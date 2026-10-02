@@ -1,11 +1,11 @@
 # Scope owners. Reviews are requested automatically for changes in these paths.
 # Replace the placeholder handles once everyone has shared their GitHub username.
-/backend/      @eoyelana @FELIX_HANDLE
-/data/         @eoyelana @FELIX_HANDLE
-/infra/        @FELIX_HANDLE @eoyelana
-/models/       @FELIX_HANDLE @eoyelana
-/clustering/   @BarnabasJuhasz1 @BASAK_HANDLE
-/evaluation/   @BASAK_HANDLE @LUCIA_HANDLE
-/frontend/     @LUCIA_HANDLE @BarnabasJuhasz1
+/backend/      @eoyelana @flix-wg
+/data/         @eoyelana @flix-wg
+/infra/        @flix-wg @eoyelana
+/models/       @flix-wg @eoyelana
+/clustering/   @BarnabasJuhasz1 @basakocak621
+/evaluation/   @basakocak621
+/frontend/     @BarnabasJuhasz1
 /docs/         @eoyelana
 /.github/      @eoyelana
