@@ -1,0 +1,2 @@
+{"id": "00000000-0000-4000-8000-000000000001", "name": "Example Journal", "type": "journal", "issn": "1234-5679", "alternate_issns": ["2345-6789"], "alternate_names": ["Ex J"], "url": "https://example.org/journal", "alternate_urls": ["https://example.org/j"]}
+{"id": "00000000-0000-4000-8000-000000000002", "name": "Example Workshop", "type": null, "issn": null, "alternate_issns": [], "alternate_names": [], "url": null, "alternate_urls": []}

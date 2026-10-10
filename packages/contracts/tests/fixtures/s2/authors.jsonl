@@ -1,0 +1,2 @@
+{"authorid": "1001", "externalids": {"DBLP": ["A. Doe", "Alice Doe"], "ORCID": "0000-0002-1825-0097"}, "url": "https://www.semanticscholar.org/author/1001", "name": "A. Doe", "aliases": ["A. Doe", "Alice Doe"], "affiliations": ["Example University"], "homepage": "https://example.org/~doe", "papercount": 3, "citationcount": 8, "hindex": 2}
+{"authorid": "1002", "externalids": null, "url": "https://www.semanticscholar.org/author/1002", "name": "C. Poe", "aliases": null, "affiliations": [], "homepage": null, "papercount": 1, "citationcount": 0, "hindex": 0}
