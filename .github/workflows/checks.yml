@@ -10,6 +10,8 @@ permissions:
 
 env:
   UV_VERSION: "0.13.0"
+  # The image infra deploys. The migration tests run its clickhouse binary.
+  CLICKHOUSE_IMAGE: "clickhouse/clickhouse-server:26.8.22.13@sha256:110d3d1f8e1ed7e451a6b5d85a16761e948ad43bc2d9ddf10b155964a8b2b40c"
 
 concurrency:
   group: checks-${{ github.ref }}
@@ -33,6 +35,13 @@ jobs:
       - name: Fail if pyright analysed no file
         run: uv run pyright --outputjson | jq -e '.summary.filesAnalyzed > 0' > /dev/null
       - run: uv run lint-imports
+      - name: Put the clickhouse binary on the PATH
+        run: |
+          mkdir -p "$RUNNER_TEMP/clickhouse"
+          docker create --name clickhouse "$CLICKHOUSE_IMAGE"
+          docker cp clickhouse:/usr/bin/clickhouse "$RUNNER_TEMP/clickhouse/clickhouse"
+          docker rm clickhouse
+          echo "$RUNNER_TEMP/clickhouse" >> "$GITHUB_PATH"
       - run: uv run pytest -q
 
   # uv does not enforce import isolation, so each package also runs alone, with only its own
