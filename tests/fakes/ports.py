@@ -1,0 +1,239 @@
+"""In-memory core ports, with FakeStore checked against the GCS adapter by test_port_contracts."""
+
+from __future__ import annotations
+
+import gzip
+from collections.abc import AsyncGenerator
+from contextlib import aclosing
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Literal
+
+from pydantic import SecretStr
+
+from openknowledge_contracts.datasets import DatasetSummary, ReleaseMetadata, ShardRef
+from openknowledge_contracts.manifests import ObjectPath, ObjectRef, Producer
+from openknowledge_core.ingestion.commands import DownloadDataset
+from openknowledge_core.ingestion.errors import (
+    IncompleteTransfer,
+    LinkExpired,
+    ObjectChanged,
+    SourceUnavailable,
+)
+from openknowledge_core.ingestion.models import (
+    ByteStream,
+    CheckedStream,
+    DatasetListing,
+    ShardLink,
+    StoredObject,
+)
+from tests.fakes.checksums import crc32c_b64, md5_b64
+
+RELEASE = "2026-10-06"
+PRODUCER = Producer(
+    transform="verbatim", transform_version=1, software_version="0.1.0", image_digest=None
+)
+STEP = 1000
+
+
+def gz(payload: bytes) -> bytes:
+    return gzip.compress(payload, mtime=0)
+
+
+PAPERS = {"part-0.gz": gz(b'{"id": 1}\n'), "part-1.gz": gz(b'{"id": 2}\n' * 50)}
+COMMAND = DownloadDataset(release=RELEASE, dataset="papers", bucket="raw", prefix="s2")
+
+
+def clock() -> datetime:
+    return datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
+
+
+def body_of(data: bytes, *, error: Exception | None = None, complete: bool = True) -> CheckedStream:
+    """A body as core hands it to a store: ``completed`` is set after the last chunk."""
+
+    async def chunks() -> AsyncGenerator[bytes, None]:
+        for start in range(0, len(data), STEP):
+            yield data[start : start + STEP]
+        if error is not None:
+            raise error
+        body.completed = complete
+
+    body = CheckedStream(size=len(data), chunks=chunks())
+    return body
+
+
+class FakeSource:
+    """Semantic Scholar's API and its file host: the catalog and the downloader in one."""
+
+    def __init__(self) -> None:
+        self.releases = [RELEASE]
+        self.files: dict[str, dict[str, bytes]] = {}
+        self.readme = "Terms of use for the release."
+        self.listings = 0
+        self.resolved: list[str] = []
+        self.opened: list[str] = []
+        self.expired_listings: set[int] = set()
+        self.unavailable: list[str] = []
+        self.cut: set[str] = set()
+        self.declared: dict[str, int | None] = {}
+        self.reorder = False
+
+    def add(self, dataset: str, name: str, data: bytes) -> None:
+        self.files.setdefault(dataset, {})[name] = data
+
+    async def resolve_release(self, selector: str | Literal["latest"]) -> ReleaseMetadata:
+        self.resolved.append(selector)
+        release_id = self.releases[-1] if selector == "latest" else selector
+        return ReleaseMetadata.model_validate(
+            {
+                "release_id": release_id,
+                "README": self.readme,
+                "license_notes": "ODC-BY for most datasets",
+                "datasets": [
+                    {"name": name, "description": f"The {name} dataset", "README": f"About {name}"}
+                    for name in self.files
+                ],
+            }
+        )
+
+    async def list_dataset(self, release_id: str, dataset: str) -> DatasetListing:
+        self.listings += 1
+        names = list(self.files[dataset])
+        if self.reorder and self.listings > 1:
+            names.reverse()
+        links = tuple(
+            ShardLink(
+                shard=shard_ref(dataset, name),
+                url=SecretStr(
+                    f"https://files.test{shard_ref(dataset, name).source_path}"
+                    f"?AWSAccessKeyId=AKIAFAKE&Signature=secret{self.listings}"
+                ),
+            )
+            for name in names
+        )
+        summary = DatasetSummary.model_validate(
+            {
+                "name": dataset,
+                "description": f"The {dataset} dataset",
+                "README": f"About {dataset}",
+                "citation": "Kinney et al. 2023",
+            }
+        )
+        return DatasetListing(summary=summary, links=links)
+
+    async def open(self, link: ShardLink) -> ByteStream:
+        shard = link.shard
+        self.opened.append(shard.file_name)
+        listing = int(link.url.get_secret_value().rsplit("secret", 1)[1])
+        if listing in self.expired_listings:
+            raise LinkExpired(f"HTTP 403 from https://files.test{shard.source_path}")
+        if shard.file_name in self.unavailable:
+            self.unavailable.remove(shard.file_name)
+            raise SourceUnavailable(f"HTTP 503 from https://files.test{shard.source_path}")
+        dataset = shard.source_path.split("/")[-2]
+        data = self.files[dataset][shard.file_name]
+        size = self.declared.get(shard.file_name, len(data))
+        return ByteStream(expected_size=size, chunks=self._chunks(shard.file_name, data))
+
+    async def _chunks(self, name: str, data: bytes) -> AsyncGenerator[bytes, None]:
+        if name in self.cut:
+            self.cut.discard(name)
+            yield data[: len(data) // 2]
+            raise SourceUnavailable(f"GET https://files.test/{name}: ReadError while streaming")
+        for start in range(0, len(data), STEP):
+            yield data[start : start + STEP]
+
+
+def shard_ref(dataset: str, name: str) -> ShardRef:
+    return ShardRef(source_path=f"/staging/{RELEASE}/{dataset}/{name}", file_name=name)
+
+
+@dataclass
+class _Object:
+    data: bytes
+    generation: int
+
+
+class FakeStore:
+    """GCS as the create-only account sees it, where ``put`` and ``remove`` play another writer."""
+
+    def __init__(self) -> None:
+        self.objects: dict[str, _Object] = {}
+        self.content_types: dict[str, str] = {}
+        self.reads: list[str] = []
+        self.md5_override: dict[str, str | None] = {}
+        self.crc32c_override: dict[str, str] = {}
+        self.appears_during_upload: dict[str, bytes] = {}
+        self.appears_before_create: dict[str, bytes] = {}
+        self._generation = 1_000
+
+    def put(self, path: ObjectPath, data: bytes) -> int:
+        self._generation += 1
+        self.objects[str(path)] = _Object(data, self._generation)
+        return self._generation
+
+    def remove(self, path: ObjectPath) -> None:
+        del self.objects[str(path)]
+
+    def data(self, path: ObjectPath) -> bytes:
+        return self.objects[str(path)].data
+
+    def generation(self, path: ObjectPath) -> int:
+        return self.objects[str(path)].generation
+
+    def _stored(self, path: ObjectPath) -> StoredObject:
+        stored = self.objects[str(path)]
+        return StoredObject(
+            ref=ObjectRef(path=path, generation=stored.generation),
+            size=len(stored.data),
+            md5=self.md5_override.get(str(path), md5_b64(stored.data)),
+            crc32c=self.crc32c_override.get(str(path), crc32c_b64(stored.data)),
+        )
+
+    async def stat(self, path: ObjectPath) -> StoredObject | None:
+        return self._stored(path) if str(path) in self.objects else None
+
+    async def create(
+        self, path: ObjectPath, data: bytes, *, content_type: str
+    ) -> StoredObject | None:
+        other = self.appears_before_create.pop(str(path), None)
+        if other is not None:
+            self.put(path, other)
+        if str(path) in self.objects:
+            return None
+        self.put(path, data)
+        self.content_types[str(path)] = content_type
+        return self._stored(path)
+
+    async def create_from_stream(
+        self, path: ObjectPath, body: CheckedStream, *, content_type: str
+    ) -> StoredObject | None:
+        received = bytearray()
+        async with aclosing(body.chunks) as chunks:
+            if str(path) in self.objects:
+                return None
+            async for chunk in chunks:
+                received += chunk
+        if not body.completed or len(received) != body.size:
+            raise IncompleteTransfer("the body ended before its checks completed")
+        other = self.appears_during_upload.pop(str(path), None)
+        if other is not None:
+            self.put(path, other)
+            return None
+        self.put(path, bytes(received))
+        self.content_types[str(path)] = content_type
+        return self._stored(path)
+
+    async def open_read(self, ref: ObjectRef) -> ByteStream:
+        stored = self.objects.get(str(ref.path))
+        if stored is None or stored.generation != ref.generation:
+            raise ObjectChanged(f"{ref.path} no longer has generation {ref.generation}")
+        self.reads.append(str(ref.path))
+        return ByteStream(expected_size=len(stored.data), chunks=self._chunks(ref, stored.data))
+
+    async def _chunks(self, ref: ObjectRef, data: bytes) -> AsyncGenerator[bytes, None]:
+        for start in range(0, len(data), STEP):
+            yield data[start : start + STEP]
+        current = self.objects.get(str(ref.path))
+        if current is None or current.generation != ref.generation:
+            raise ObjectChanged(f"{ref.path} changed generation while it was read")

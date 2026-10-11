@@ -1,1 +1,1 @@
-"""Tests for the workspace. Fakes live in conftest."""
+"""Architecture and port contract tests, and the fakes the test folders share."""
