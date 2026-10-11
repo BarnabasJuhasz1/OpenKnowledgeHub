@@ -10,6 +10,7 @@ from openknowledge_core.ingestion import DownloadDatasetService, PinRelease
 from openknowledge_core.ingestion import service as service_module
 from openknowledge_core.ingestion.errors import ArchiveConflict, ReceiptInvalid, SourceRejected
 from openknowledge_core.ingestion.models import release_record_path
+from openknowledge_core.ingestion.service import SERVED_NOW
 from tests.fakes.ports import COMMAND, PAPERS, PRODUCER, RELEASE, FakeSource, FakeStore, clock, gz
 
 RELEASE_JSON = "gs://raw/s2/2026-10-06/release.json"
@@ -63,7 +64,40 @@ async def test_an_inventory_unlike_the_listing_conflicts(
     add_papers(source)
     await service.pin_dataset(COMMAND)
     source.add("papers", "part-2.gz", gz(b"x\n"))
-    with pytest.raises(ArchiveConflict, match="holds another DatasetInventory"):
+    with pytest.raises(
+        ArchiveConflict,
+        match=f"a DatasetInventory with a different set of shards than .* {SERVED_NOW}",
+    ):
+        await service.pin_dataset(COMMAND)
+
+
+async def test_an_inventory_of_another_release_conflicts(
+    service: DownloadDatasetService, source: FakeSource, store: FakeStore
+) -> None:
+    add_papers(source)
+    path = (await service.pin_dataset(COMMAND)).inventory_path
+    stored = json.loads(store.data(path))
+    stored["release_id"] = "2026-09-29"
+    store.put(path, json.dumps(stored).encode())
+    with pytest.raises(
+        ArchiveConflict,
+        match=f"a DatasetInventory with a different release id than .* {SERVED_NOW}",
+    ):
+        await service.pin_dataset(COMMAND)
+
+
+async def test_an_inventory_of_another_dataset_conflicts(
+    service: DownloadDatasetService, source: FakeSource, store: FakeStore
+) -> None:
+    add_papers(source)
+    path = (await service.pin_dataset(COMMAND)).inventory_path
+    stored = json.loads(store.data(path))
+    stored["dataset"]["name"] = "authors"
+    store.put(path, json.dumps(stored).encode())
+    with pytest.raises(
+        ArchiveConflict,
+        match=f"a DatasetInventory with a different dataset than .* {SERVED_NOW}",
+    ):
         await service.pin_dataset(COMMAND)
 
 
@@ -76,7 +110,9 @@ async def test_a_release_record_of_another_release_conflicts(
     stored = json.loads(store.data(path))
     stored["metadata"]["release_id"] = "2026-09-29"
     store.put(path, json.dumps(stored).encode())
-    with pytest.raises(ArchiveConflict, match="holds another ReleaseRecord"):
+    with pytest.raises(
+        ArchiveConflict, match=f"a ReleaseRecord with a different release id than .* {SERVED_NOW}"
+    ):
         await service.pin_dataset(COMMAND)
 
 
@@ -147,7 +183,37 @@ async def test_a_manifest_that_disagrees_conflicts(
     stored = json.loads(store.data(path))
     stored["entries"][0]["object_ref"]["generation"] += 1
     store.put(path, json.dumps(stored).encode())
-    with pytest.raises(ArchiveConflict, match="holds another DatasetManifest"):
+    with pytest.raises(
+        ArchiveConflict,
+        match="a DatasetManifest with a different entry list than .* the receipts beside it",
+    ):
+        await service.write_manifest(pinned)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "named"),
+    [("release_id", "2026-09-29", "release id"), ("dataset", "authors", "dataset")],
+)
+async def test_a_manifest_of_another_release_or_dataset_conflicts(
+    service: DownloadDatasetService,
+    source: FakeSource,
+    store: FakeStore,
+    field: str,
+    value: str,
+    named: str,
+) -> None:
+    add_papers(source)
+    pinned = await service.pin_dataset(COMMAND)
+    for shard in pinned.shards:
+        await service.archive_shard(pinned, shard)
+    path = await service.write_manifest(pinned)
+    stored = json.loads(store.data(path))
+    stored[field] = value
+    store.put(path, json.dumps(stored).encode())
+    with pytest.raises(
+        ArchiveConflict,
+        match=f"a DatasetManifest with a different {named} than .* the receipts beside it",
+    ):
         await service.write_manifest(pinned)
 
 

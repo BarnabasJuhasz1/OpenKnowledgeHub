@@ -68,6 +68,7 @@ GZIP = "application/gzip"
 RECEIPT_LIMIT = 64 * 1024
 DOCUMENT_LIMIT = 16 * 1024 * 1024
 AGAIN = "rerun later, and report it to Semantic Scholar if it repeats"
+SERVED_NOW = "what Semantic Scholar serves now"
 
 
 class DownloadDatasetService:
@@ -98,7 +99,12 @@ class DownloadDatasetService:
         path = release_record_path(command.bucket, command.prefix, metadata.release_id)
         record = ReleaseRecord(retrieved_at=self._clock(), metadata=metadata)
         await self._archive(
-            path, record, lambda stored: stored.metadata.release_id == metadata.release_id
+            path,
+            record,
+            lambda stored: _differing(
+                ("release id", stored.metadata.release_id != metadata.release_id)
+            ),
+            compare_with=SERVED_NOW,
         )
         return PinnedRelease(release_id=metadata.release_id, record=path)
 
@@ -132,11 +138,12 @@ class DownloadDatasetService:
         stored = await self._archive(
             path,
             inventory,
-            lambda stored: (
-                stored.release_id == command.release
-                and stored.dataset.name == command.dataset
-                and _identities(stored.shards) == _identities(listed)
+            lambda stored: _differing(
+                ("release id", stored.release_id != command.release),
+                ("dataset", stored.dataset.name != command.dataset),
+                ("set of shards", _identities(stored.shards) != _identities(listed)),
             ),
+            compare_with=SERVED_NOW,
         )
         pinned = PinnedDataset(
             release_id=command.release,
@@ -223,7 +230,14 @@ class DownloadDatasetService:
             completed_at=self._clock(),
         )
         await self._archive(
-            pinned.manifest_path, manifest, lambda stored: stored.entries == manifest.entries
+            pinned.manifest_path,
+            manifest,
+            lambda stored: _differing(
+                ("release id", stored.release_id != manifest.release_id),
+                ("dataset", stored.dataset != manifest.dataset),
+                ("entry list", stored.entries != manifest.entries),
+            ),
+            compare_with="the receipts beside it",
         )
         return pinned.manifest_path
 
@@ -440,9 +454,14 @@ class DownloadDatasetService:
         return bytes(data)
 
     async def _archive[D: ArchiveDocument](
-        self, path: ObjectPath, document: D, same: Callable[[D], bool]
+        self,
+        path: ObjectPath,
+        document: D,
+        differing: Callable[[D], list[str]],
+        *,
+        compare_with: str,
     ) -> D:
-        """Create ``document`` at ``path``, or return the stored one if ``same`` accepts it."""
+        """Create ``document``, or return the stored one when ``differing`` names no field."""
         kind = type(document).__name__
         try:
             data = document.to_json()
@@ -467,10 +486,11 @@ class DownloadDatasetService:
                 f"{path} is not a valid {kind} ({_reason(exc, type(document))}); "
                 f"{_delete_hint(path)}"
             ) from None
-        if not same(existing):
+        wrong = differing(existing)
+        if wrong:
             raise ArchiveConflict(
-                f"{path} holds another {kind} than this run would write; it stays as it is, "
-                "so compare it with upstream before anyone removes it"
+                f"{path} holds a {kind} with a different {_listed(wrong)} than this run's; "
+                f"it stays as it is, so compare it with {compare_with} before anyone removes it"
             )
         return existing
 
@@ -489,6 +509,10 @@ def _verified(chunks: AsyncIterator[bytes], check: StreamCheck, size: int) -> Ch
 
 def _by_path(links: Iterable[ShardLink]) -> dict[str, ShardLink]:
     return {link.shard.source_path: link for link in links}
+
+
+def _differing(*fields: tuple[str, bool]) -> list[str]:
+    return [name for name, differs in fields if differs]
 
 
 def _identities(shards: Iterable[ShardRef]) -> frozenset[tuple[str, str]]:
