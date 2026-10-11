@@ -1,0 +1,81 @@
+name: Checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.13.0"
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+      - run: uv sync --locked --all-packages --all-extras
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pyright
+      - name: Fail if pyright analysed no file
+        run: uv run pyright --outputjson | jq -e '.summary.filesAnalyzed > 0' > /dev/null
+      - run: uv run lint-imports
+      - run: uv run pytest -q
+
+  # uv does not enforce import isolation, so each package also runs alone, with only its own
+  # dependencies and, for an adapter, only its own extra.
+  isolation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: openknowledge-contracts
+            tests: packages/contracts/tests
+          - package: openknowledge-core
+            tests: packages/core/tests
+          - package: openknowledge-adapters
+            extra: semantic-scholar
+            module: openknowledge_adapters.semantic_scholar
+            tests: packages/adapters/tests/semantic_scholar
+          - package: openknowledge-adapters
+            extra: gcs
+            module: openknowledge_adapters.gcs
+            tests: packages/adapters/tests/gcs
+          - package: openknowledge-pipelines
+            tests: pipelines/tests
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Install this package alone
+        env:
+          PACKAGE: ${{ matrix.package }}
+          EXTRA: ${{ matrix.extra }}
+        run: uv sync --locked --package "$PACKAGE" ${EXTRA:+--extra "$EXTRA"}
+      - name: Import the adapter with only its own extra installed
+        if: matrix.module
+        env:
+          MODULE: ${{ matrix.module }}
+        run: uv run --no-sync python -c "import importlib, os; importlib.import_module(os.environ['MODULE'])"
+      - name: Run its tests
+        env:
+          TESTS: ${{ matrix.tests }}
+        run: uv run --no-sync pytest -q "$TESTS"
