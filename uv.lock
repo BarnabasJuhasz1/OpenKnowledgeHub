@@ -1698,6 +1698,7 @@ dependencies = [
 [package.optional-dependencies]
 gcs = [
     { name = "aiohttp" },
+    { name = "gcloud-aio-auth" },
     { name = "gcloud-aio-storage" },
 ]
 semantic-scholar = [
@@ -1713,6 +1714,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aiohttp", marker = "extra == 'gcs'", specifier = ">=3.12,<4" },
+    { name = "gcloud-aio-auth", marker = "extra == 'gcs'", specifier = ">=5.4.4,<6" },
     { name = "gcloud-aio-storage", marker = "extra == 'gcs'", specifier = ">=9.6,<10" },
     { name = "httpx", marker = "extra == 'semantic-scholar'", specifier = ">=0.28,<1" },
     { name = "openknowledge-contracts", editable = "packages/contracts" },

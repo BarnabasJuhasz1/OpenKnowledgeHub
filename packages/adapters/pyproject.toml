@@ -6,8 +6,9 @@ requires-python = ">=3.12"
 dependencies = ["openknowledge-contracts", "openknowledge-core", "pydantic>=2.11,<3"]
 
 [project.optional-dependencies]
-# aiohttp is listed because the GCS adapter imports it directly, for ClientTimeout and errors.
-gcs = ["gcloud-aio-storage>=9.6,<10", "aiohttp>=3.12,<4"]
+# aiohttp and gcloud-aio-auth are imported directly, and gcloud-aio-auth copies the range
+# the locked gcloud-aio-storage requires.
+gcs = ["gcloud-aio-storage>=9.6,<10", "gcloud-aio-auth>=5.4.4,<6", "aiohttp>=3.12,<4"]
 semantic-scholar = ["httpx>=0.28,<1"]
 
 [dependency-groups]

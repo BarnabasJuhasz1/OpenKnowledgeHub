@@ -1,10 +1,11 @@
 """Layout and dependency rules that import-linter cannot check."""
 
 import ast
+import inspect
 import re
 import sys
 import tomllib
-from importlib.metadata import packages_distributions
+from importlib.metadata import distributions
 from pathlib import Path
 
 import pytest
@@ -95,14 +96,37 @@ def declared(package: str, extra: str | None) -> set[str]:
 
 
 def imported(paths: list[Path]) -> set[str]:
+    """Full dotted names, with each ``from`` import's name appended, since it may be a submodule."""
     names: set[str] = set()
     for path in paths:
         for node in ast.walk(parse(path)):
             if isinstance(node, ast.Import):
-                names.update(alias.name.split(".")[0] for alias in node.names)
+                names.update(alias.name for alias in node.names)
             elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
-                names.add(node.module.split(".")[0])
-    return {name for name in names if name not in sys.stdlib_module_names}
+                names.update(f"{node.module}.{alias.name}" for alias in node.names)
+    return {name for name in names if name.split(".")[0] not in sys.stdlib_module_names}
+
+
+def installed_modules() -> dict[str, set[str]]:
+    """Each module in the installed file lists, leaving out namespaces such as gcloud.aio."""
+    modules: dict[str, set[str]] = {}
+    for found in distributions():
+        owner = distribution(found.name)
+        for file in found.files or []:
+            name = inspect.getmodulename(file.name)
+            if name is not None:
+                parts = file.parent.parts if name == "__init__" else (*file.parent.parts, name)
+                modules.setdefault(".".join(parts), set()).add(owner)
+    return modules
+
+
+def providers(name: str, modules: dict[str, set[str]]) -> set[str]:
+    """The longest installed prefix decides, so gcloud.aio.auth needs gcloud-aio-auth declared."""
+    parts = name.split(".")
+    for depth in range(len(parts), 0, -1):
+        if found := modules.get(".".join(parts[:depth])):
+            return found
+    return set()
 
 
 @pytest.mark.parametrize(
@@ -128,11 +152,11 @@ def test_every_import_is_a_declared_dependency(
     else:
         paths = sorted(root.rglob("*.py"))
     allowed = declared(package, extra)
-    providers = packages_distributions()
+    modules = installed_modules()
     for name in imported(paths):
-        provided = {distribution(found) for found in providers.get(name, [])}
+        provided = providers(name, modules)
         if not provided and name.startswith("openknowledge_"):
-            provided = {distribution(name)}
+            provided = {distribution(name.split(".")[0])}
         assert provided & allowed, f"{root.name}/{subpackage or ''} imports undeclared {name}"
 
 
