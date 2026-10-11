@@ -1,0 +1,63 @@
+"""Wires adapters to the core ports for one run, as the only module that imports them."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
+from importlib.metadata import version
+from typing import TYPE_CHECKING
+
+from openknowledge_adapters import gcs, semantic_scholar
+from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
+from openknowledge_core.ingestion import DownloadDatasetService
+from openknowledge_pipelines.settings import PipelineSettings
+
+if TYPE_CHECKING:
+    from openknowledge_pipelines.flows.s2_download import S2DownloadFlow
+
+
+@asynccontextmanager
+async def open_service(settings: PipelineSettings) -> AsyncGenerator[DownloadDatasetService, None]:
+    s2_config = semantic_scholar.SemanticScholarConfig(
+        api_key=settings.s2_api_key,
+        api_url=settings.s2_api_url,
+        request_interval_seconds=settings.s2_request_interval_seconds,
+        attempts=settings.s2_attempts,
+        backoff_seconds=settings.s2_backoff_seconds,
+        timeout_seconds=settings.s2_timeout_seconds,
+        download_connect_timeout_seconds=settings.download_connect_timeout_seconds,
+        download_read_timeout_seconds=settings.download_read_timeout_seconds,
+    )
+    gcs_config = gcs.GcsConfig(
+        request_timeout_seconds=settings.gcs_request_timeout_seconds,
+        min_transfer_rate=settings.gcs_min_transfer_bytes_per_second,
+    )
+    async with semantic_scholar.connect(s2_config) as s2, gcs.connect(gcs_config) as store:
+        yield DownloadDatasetService(
+            catalog=s2.catalog,
+            downloads=s2.downloads,
+            store=store,
+            producer=producer(settings),
+            clock=lambda: datetime.now(UTC),
+        )
+
+
+def producer(settings: PipelineSettings) -> Producer:
+    return Producer(
+        transform="verbatim",
+        transform_version=TRANSFORM_VERSION,
+        software_version=version("openknowledge-pipelines"),
+        image_digest=settings.image_digest,
+    )
+
+
+def download_flow(service: DownloadDatasetService, settings: PipelineSettings) -> S2DownloadFlow:
+    # Imported here so that `okp s2 pin` and `okp s2 download-shard` never load Prefect.
+    from openknowledge_pipelines.flows.s2_download import s2_download_flow
+
+    return s2_download_flow(
+        service,
+        task_retries=settings.task_retries,
+        retry_delay_seconds=settings.task_retry_delay_seconds,
+    )

@@ -1,0 +1,129 @@
+[tool.uv.workspace]
+members = ["packages/contracts", "packages/core", "packages/adapters", "pipelines"]
+
+[tool.uv.sources]
+openknowledge-contracts = { workspace = true }
+openknowledge-core = { workspace = true }
+openknowledge-adapters = { workspace = true }
+openknowledge-pipelines = { workspace = true }
+
+[dependency-groups]
+dev = [
+    "openknowledge-pipelines",
+    "import-linter>=2.15,<3",
+    "pyright[nodejs]>=1.1.414,<1.2",
+    "pytest>=9,<10",
+    "pytest-asyncio>=1.4,<2",
+    "ruff>=0.17,<1",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = [
+    ".",
+    "packages/contracts/src",
+    "packages/core/src",
+    "packages/adapters/src",
+    "pipelines/src",
+]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "ANN", "D", "ASYNC"]
+# A docstring is written where it says something the code does not, so none is required.
+ignore = ["D1"]
+pydocstyle.convention = "google"
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = ["D"]
+
+[tool.pyright]
+include = ["packages", "pipelines", "tests", "conftest.py"]
+exclude = ["**/__pycache__", "**/.venv"]
+typeCheckingMode = "strict"
+pythonVersion = "3.12"
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+testpaths = [
+    "packages/contracts/tests",
+    "packages/core/tests",
+    "packages/adapters/tests",
+    "pipelines/tests",
+    "tests",
+]
+addopts = ["-ra", "--import-mode=importlib"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.importlinter]
+root_packages = [
+    "openknowledge_contracts",
+    "openknowledge_core",
+    "openknowledge_adapters",
+    "openknowledge_pipelines",
+]
+include_external_packages = true
+
+[[tool.importlinter.contracts]]
+name = "Imports point one way, from cli down to contracts"
+type = "layers"
+layers = [
+    "openknowledge_pipelines.cli",
+    "openknowledge_pipelines.bootstrap",
+    "openknowledge_pipelines.flows | openknowledge_pipelines.settings | openknowledge_adapters",
+    "openknowledge_core",
+    "openknowledge_contracts",
+]
+
+[[tool.importlinter.contracts]]
+name = "Only bootstrap imports adapters"
+type = "protected"
+protected_modules = ["openknowledge_adapters"]
+allowed_importers = ["openknowledge_pipelines.bootstrap"]
+
+[[tool.importlinter.contracts]]
+name = "Core and contracts import no framework and no client"
+type = "forbidden"
+source_modules = ["openknowledge_core", "openknowledge_contracts"]
+forbidden_modules = [
+    "prefect",
+    "fastapi",
+    "starlette",
+    "click",
+    "pydantic_settings",
+    "httpx",
+    "aiohttp",
+    "google",
+    "gcloud",
+]
+
+[[tool.importlinter.contracts]]
+name = "Flows import no vendor client"
+type = "forbidden"
+source_modules = ["openknowledge_pipelines.flows"]
+forbidden_modules = ["httpx", "aiohttp", "google", "gcloud"]
+
+[[tool.importlinter.contracts]]
+name = "The Semantic Scholar adapter imports only its own extra"
+type = "forbidden"
+source_modules = ["openknowledge_adapters.semantic_scholar"]
+forbidden_modules = ["google", "gcloud", "aiohttp", "openknowledge_adapters.gcs"]
+
+[[tool.importlinter.contracts]]
+name = "The GCS adapter imports only its own extra"
+type = "forbidden"
+source_modules = ["openknowledge_adapters.gcs"]
+forbidden_modules = ["httpx", "google", "openknowledge_adapters.semantic_scholar"]
+
+[[tool.importlinter.contracts]]
+name = "No import cycles between sibling modules"
+type = "acyclic_siblings"
+ancestors = [
+    "openknowledge_contracts",
+    "openknowledge_core",
+    "openknowledge_adapters",
+    "openknowledge_pipelines",
+]

@@ -1,0 +1,19 @@
+[project]
+name = "openknowledge-adapters"
+version = "0.1.0"
+description = "Clients for the services OpenKnowledge reads from and writes to, one extra per backend."
+requires-python = ">=3.12"
+dependencies = ["openknowledge-contracts", "openknowledge-core", "pydantic>=2.11,<3"]
+
+[project.optional-dependencies]
+# aiohttp and gcloud-aio-auth are imported directly, and gcloud-aio-auth copies the range
+# the locked gcloud-aio-storage requires.
+gcs = ["gcloud-aio-storage>=9.6,<10", "gcloud-aio-auth>=5.4.4,<6", "aiohttp>=3.12,<4"]
+semantic-scholar = ["httpx>=0.28,<1"]
+
+[dependency-groups]
+dev = ["pytest>=9,<10", "pytest-asyncio>=1.4,<2"]
+
+[build-system]
+requires = ["uv_build>=0.9,<0.14"]
+build-backend = "uv_build"
