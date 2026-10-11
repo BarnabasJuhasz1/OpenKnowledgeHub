@@ -4,17 +4,21 @@ version = "0.1.0"
 description = "Prefect flows and the okp command line."
 requires-python = ">=3.12"
 dependencies = [
-    # Same version as the server in OpenKnowledgeInfra deploy/control/compose.yaml.
+    # Matches the Prefect server on the control VM.
     "prefect==3.8.8",
     "click>=8,<9",
-    "openknowledge-adapters",
+    "openknowledge-adapters[gcs,semantic-scholar]",
+    "openknowledge-contracts",
+    "openknowledge-core",
+    "pydantic>=2.11,<3",
+    "pydantic-settings>=2.10,<3",
 ]
 
 [project.scripts]
 okp = "openknowledge_pipelines.cli:main"
 
-[tool.uv.sources]
-openknowledge-adapters = { workspace = true }
+[dependency-groups]
+dev = ["pytest>=9,<10", "pytest-asyncio>=1.4,<2"]
 
 [build-system]
 requires = ["uv_build>=0.9,<0.14"]
