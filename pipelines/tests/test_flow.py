@@ -8,8 +8,16 @@ from prefect.client.schemas.sorting import FlowRunSort
 from prefect.settings import PREFECT_RESULTS_LOCAL_STORAGE_PATH, temporary_settings
 
 from openknowledge_contracts.manifests import DatasetManifest
-from openknowledge_core.ingestion import DownloadDatasetService, LoadDataset, LoadDatasetService
+from openknowledge_core.ingestion import (
+    DownloadDatasetService,
+    DownloadShard,
+    JobOutcome,
+    LoadDataset,
+    LoadDatasetService,
+    ShardJob,
+)
 from openknowledge_core.ingestion.errors import ContractViolation, GzipInvalid, TableUnavailable
+from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flow
 from openknowledge_pipelines.flows.s2_download import S2DownloadFlow, s2_download_flow
 from openknowledge_pipelines.flows.s2_load import S2LoadFlow, s2_load_flow
 from tests.fakes.ports import (
@@ -111,3 +119,50 @@ async def test_only_transient_load_errors_are_retried(
     with pytest.raises(ContractViolation):
         await load_flow(store, tables)(LOAD)
     assert tables.loads == ["part-0.gz", "part-0.gz"]
+
+
+class FakeJobs:
+    """Archives a job's shards in this process, failing each shard in ``failing`` once."""
+
+    def __init__(self, service: DownloadDatasetService, failing: set[int]) -> None:
+        self.service = service
+        self.failing = failing
+        self.submitted: list[tuple[int, ...]] = []
+        self.outcomes: dict[str, JobOutcome] = {}
+
+    async def submit(self, job: ShardJob) -> str:
+        self.submitted.append(job.shards)
+        outcome = JobOutcome.SUCCEEDED
+        for index in job.shards:
+            if index in self.failing:
+                self.failing.discard(index)
+                outcome = JobOutcome.FAILED
+                continue
+            await self.service.archive_shard_at(
+                DownloadShard(
+                    release=job.release_id,
+                    dataset=job.dataset,
+                    shard=index,
+                    bucket=job.bucket,
+                    prefix=job.prefix,
+                )
+            )
+        name = f"job-{len(self.submitted)}"
+        self.outcomes[name] = outcome
+        return name
+
+    async def wait(self, name: str) -> JobOutcome:
+        return self.outcomes[name]
+
+
+async def test_batch_rounds_run_only_unfinished_shards(
+    service: DownloadDatasetService, store: FakeStore
+) -> None:
+    jobs = FakeJobs(service, failing={1})
+    batch = s2_batch_download_flow(service, jobs, rounds=3, task_retries=0, retry_delay_seconds=0)
+    result = await batch(COMMAND)
+    assert jobs.submitted == [(0, 1), (1,)]
+    assert (result.shards, result.jobs) == (2, ("job-1", "job-2"))
+    assert len(DatasetManifest.from_json(store.data(result.manifest)).entries) == 2
+    again = await batch(COMMAND)
+    assert (jobs.submitted[2:], again.jobs) == ([], ())

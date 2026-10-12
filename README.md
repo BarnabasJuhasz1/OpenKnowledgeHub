@@ -4,7 +4,7 @@
 
 Needs `uv` and `gcloud auth application-default login` with an account that can create and read objects in the bucket.
 Keep the API key in `~/.config/openknowledge/.env` as `S2_API_KEY=...` and let uv load it.
-Run only `publication-venues` locally. Every other dataset waits for the Batch job.
+Run only `publication-venues` locally. Every other dataset downloads through Batch.
 
 ```sh
 uv sync
@@ -38,6 +38,14 @@ The key is `S2_API_KEY`, and every other setting is `OKP_` plus a field name fro
 
 With Prefect's default profile and no `PREFECT_API_URL`, Prefect starts a temporary local server for the run.
 `okp` turns that server's telemetry off.
+
+## Downloading through Batch
+
+On the control VM, `okp serve` also serves the deployment `s2-batch-download/control-vm`.
+It pins the dataset, runs each shard without a receipt as a task of one Cloud Batch job, and writes the manifest.
+Each task runs `okp s2 download-shard` from the same image with its shard in `OKP_SHARD`.
+Tasks run one at a time, so the key stays at one request per second.
+A run makes up to `OKP_TASK_RETRIES` more rounds for shards still without a receipt, and a new run resumes the same way.
 
 ## Loading into ClickHouse
 

@@ -12,8 +12,10 @@ from openknowledge_core.ingestion.models import (
     CheckedStream,
     DatasetListing,
     Duplicates,
+    JobOutcome,
     LoadObject,
     LoadRecord,
+    ShardJob,
     ShardLink,
     StoredObject,
     TableState,
@@ -73,4 +75,14 @@ class TableLoader(Protocol):
 
     async def duplicates(self, dataset: DatasetName, objects: Sequence[ObjectPath]) -> Duplicates:
         """Keys that repeat across the objects, which are read again."""
+        ...
+
+
+class ShardJobs(Protocol):
+    async def submit(self, job: ShardJob) -> str:
+        """Start one task per shard and return the job's name."""
+        ...
+
+    async def wait(self, name: str) -> JobOutcome:
+        """Return once the job has ended."""
         ...

@@ -1697,6 +1697,10 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+batch = [
+    { name = "aiohttp" },
+    { name = "gcloud-aio-auth" },
+]
 clickhouse = [
     { name = "httpx" },
     { name = "pyarrow" },
@@ -1718,7 +1722,9 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", marker = "extra == 'batch'", specifier = ">=3.12,<4" },
     { name = "aiohttp", marker = "extra == 'gcs'", specifier = ">=3.12,<4" },
+    { name = "gcloud-aio-auth", marker = "extra == 'batch'", specifier = ">=5.4.4,<6" },
     { name = "gcloud-aio-auth", marker = "extra == 'gcs'", specifier = ">=5.4.4,<6" },
     { name = "gcloud-aio-storage", marker = "extra == 'gcs'", specifier = ">=9.6,<10" },
     { name = "httpx", marker = "extra == 'clickhouse'", specifier = ">=0.28,<1" },
@@ -1728,7 +1734,7 @@ requires-dist = [
     { name = "pyarrow", marker = "extra == 'clickhouse'", specifier = ">=26,<27" },
     { name = "pydantic", specifier = ">=2.11,<3" },
 ]
-provides-extras = ["gcs", "semantic-scholar", "clickhouse"]
+provides-extras = ["gcs", "semantic-scholar", "clickhouse", "batch"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1796,7 +1802,7 @@ version = "0.1.0"
 source = { editable = "pipelines" }
 dependencies = [
     { name = "click" },
-    { name = "openknowledge-adapters", extra = ["clickhouse", "gcs", "semantic-scholar"] },
+    { name = "openknowledge-adapters", extra = ["batch", "clickhouse", "gcs", "semantic-scholar"] },
     { name = "openknowledge-contracts" },
     { name = "openknowledge-core" },
     { name = "prefect" },
@@ -1813,7 +1819,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8,<9" },
-    { name = "openknowledge-adapters", extras = ["clickhouse", "gcs", "semantic-scholar"], editable = "packages/adapters" },
+    { name = "openknowledge-adapters", extras = ["batch", "clickhouse", "gcs", "semantic-scholar"], editable = "packages/adapters" },
     { name = "openknowledge-contracts", editable = "packages/contracts" },
     { name = "openknowledge-core", editable = "packages/core" },
     { name = "prefect", specifier = "==3.8.8" },

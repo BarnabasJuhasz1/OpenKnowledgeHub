@@ -200,6 +200,11 @@ class DownloadDatasetService:
             receipt=pinned.receipt_path(shard),
         )
 
+    async def unfinished(self, pinned: PinnedDataset) -> tuple[int, ...]:
+        """Indexes of the shards without a receipt."""
+        receipts = [await self._store.stat(pinned.receipt_path(shard)) for shard in pinned.shards]
+        return tuple(index for index, receipt in enumerate(receipts) if receipt is None)
+
     async def write_manifest(self, pinned: PinnedDataset) -> ObjectPath:
         """Write the manifest after every receipt checks out, or keep an earlier one that agrees."""
         entries: list[ManifestEntry] = []

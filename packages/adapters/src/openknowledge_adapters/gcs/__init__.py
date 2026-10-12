@@ -1,4 +1,4 @@
-"""Google Cloud Storage, the only package that imports ``gcloud.aio`` or ``aiohttp``."""
+"""Google Cloud Storage over gcloud-aio-storage."""
 
 from __future__ import annotations
 

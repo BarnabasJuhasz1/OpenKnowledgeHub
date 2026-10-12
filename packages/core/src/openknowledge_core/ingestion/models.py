@@ -13,6 +13,7 @@ from pydantic import (
     AwareDatetime,
     BaseModel,
     ConfigDict,
+    Field,
     NonNegativeInt,
     PositiveInt,
     SecretStr,
@@ -206,3 +207,20 @@ class LoadRecord(BaseModel):
 class LoadOutcome(StrEnum):
     LOADED = "loaded"
     ALREADY_LOADED = "already-loaded"
+
+
+class ShardJob(BaseModel):
+    """Archive these shards of a pinned dataset, each in its own task."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    release_id: ReleaseId
+    dataset: DatasetName
+    bucket: BucketName
+    prefix: ObjectPrefix
+    shards: tuple[NonNegativeInt, ...] = Field(min_length=1)
+
+
+class JobOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
