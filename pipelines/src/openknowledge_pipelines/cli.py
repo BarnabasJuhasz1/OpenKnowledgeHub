@@ -1,4 +1,4 @@
-"""The ``okp`` command line, where only ``download`` and ``load`` load Prefect."""
+"""The ``okp`` command line, where only ``download``, ``load`` and ``serve`` load Prefect."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ PIN_HELP = "Archive a release's metadata and print it as JSON, with the explicit
 DOWNLOAD_HELP = "Archive a whole dataset through the Prefect flow."
 DOWNLOAD_SHARD_HELP = "Archive one shard of a dataset without Prefect."
 LOAD_HELP = "Load an archived dataset into its ClickHouse table through the Prefect flow."
+SERVE_HELP = "Serve the flows the control VM runs, until stopped."
 RELEASE_HELP = "The release_id that okp s2 pin printed, such as 2026-10-06."
 DATASET_HELP = "Dataset name, such as publication-venues."
 PREFIX_HELP = "Folder in the bucket that every object goes under."
@@ -160,13 +161,18 @@ def load(release: str, dataset: str, bucket: str, prefix: str) -> None:
         bucket=bucket,
         prefix=prefix,
     )
-    settings = _settings(LoadSettings)
+    _settings(LoadSettings)
+    from openknowledge_pipelines.deployments import s2_load
 
-    async def run() -> BaseModel:
-        async with bootstrap.open_load_service(settings) as service:
-            return await bootstrap.load_flow(service, settings)(command)
+    _run(lambda: s2_load(command))
 
-    _run(run)
+
+@main.command(help=SERVE_HELP, short_help=SERVE_HELP)
+def serve() -> None:
+    _settings(LoadSettings)
+    from openknowledge_pipelines import deployments
+
+    deployments.serve()
 
 
 def _command[C: BaseModel](kind: type[C], rules: Mapping[str, str], **values: object) -> C:
