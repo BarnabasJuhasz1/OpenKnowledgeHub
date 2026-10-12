@@ -20,6 +20,10 @@ class StoreUnavailable(TransientError):
     """A GCS call failed in a way a retry may fix."""
 
 
+class TableUnavailable(TransientError):
+    """A ClickHouse call failed in a way a retry may fix."""
+
+
 class CredentialRejected(IngestionError):
     pass
 
@@ -48,6 +52,18 @@ class StoreRejected(IngestionError):
     """A GCS call failed in a way a retry will not fix, such as refused access or no credentials."""
 
 
+class TableRejected(IngestionError):
+    """ClickHouse refused a call in a way a retry will not fix."""
+
+
+class ContractViolation(IngestionError):
+    """A record breaks its dataset's contract, so its object stays unloaded."""
+
+
+class ManifestInvalid(IngestionError):
+    pass
+
+
 class ObjectChanged(IngestionError):
     """An object is missing or has another generation than the one being read."""
 
@@ -69,4 +85,8 @@ class StoredCopyMismatch(IntegrityError):
 
 
 class ReceiptInvalid(IntegrityError):
+    pass
+
+
+class RowCountMismatch(IntegrityError):
     pass

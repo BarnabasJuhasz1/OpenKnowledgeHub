@@ -9,10 +9,10 @@ from pathlib import Path
 import pytest
 from click.testing import CliRunner
 
-from openknowledge_core.ingestion import DownloadDatasetService
+from openknowledge_core.ingestion import DownloadDatasetService, LoadDatasetService
 from openknowledge_pipelines import bootstrap, cli
-from openknowledge_pipelines.settings import PipelineSettings
-from tests.fakes.ports import PAPERS, FakeSource
+from openknowledge_pipelines.settings import LoadSettings, PipelineSettings
+from tests.fakes.ports import PAPERS, PRODUCER, FakeSource, FakeStore, FakeTables, clock
 
 ROOT = Path(__file__).resolve().parents[2]
 TARGET = ["--bucket", "raw", "--prefix", "s2"]
@@ -97,6 +97,28 @@ def test_bad_options_exit_2(args: list[str], message: str) -> None:
     code, output = okp(*args)
     assert code == 2
     assert message in output
+
+
+@pytest.mark.usefixtures("prefect_server")
+def test_load_runs_the_flow_without_an_s2_key(
+    monkeypatch: pytest.MonkeyPatch, wired: DownloadDatasetService, store: FakeStore
+) -> None:
+    assert okp("download", "--release", "2026-10-06", "--dataset", "papers", *TARGET)[0] == 0
+
+    @asynccontextmanager
+    async def open_load_service(settings: LoadSettings) -> AsyncGenerator[LoadDatasetService]:
+        yield LoadDatasetService(
+            store=store, tables=FakeTables(store), producer=PRODUCER, clock=clock
+        )
+
+    monkeypatch.setattr(bootstrap, "open_load_service", open_load_service)
+    monkeypatch.delenv("S2_API_KEY")
+    monkeypatch.setenv("OKP_CLICKHOUSE_URL", "http://clickhouse:8123")
+    monkeypatch.setenv("CLICKHOUSE_PASSWORD", "dev")
+    monkeypatch.setenv("OKP_CLICKHOUSE_RAW_BUCKET", "raw")
+    code, output = okp("load", "--release", "2026-10-06", "--dataset", "papers", *TARGET)
+    assert code == 0, output
+    assert json.loads(output.splitlines()[-1])["loaded"] == 2
 
 
 def test_a_missing_key_fails_before_anything_opens(monkeypatch: pytest.MonkeyPatch) -> None:

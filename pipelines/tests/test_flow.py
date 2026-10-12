@@ -8,10 +8,19 @@ from prefect.client.schemas.sorting import FlowRunSort
 from prefect.settings import PREFECT_RESULTS_LOCAL_STORAGE_PATH, temporary_settings
 
 from openknowledge_contracts.manifests import DatasetManifest
-from openknowledge_core.ingestion import DownloadDatasetService
-from openknowledge_core.ingestion.errors import GzipInvalid
+from openknowledge_core.ingestion import DownloadDatasetService, LoadDataset, LoadDatasetService
+from openknowledge_core.ingestion.errors import ContractViolation, GzipInvalid, TableUnavailable
 from openknowledge_pipelines.flows.s2_download import S2DownloadFlow, s2_download_flow
-from tests.fakes.ports import COMMAND, PAPERS, PRODUCER, FakeSource, FakeStore, clock
+from openknowledge_pipelines.flows.s2_load import S2LoadFlow, s2_load_flow
+from tests.fakes.ports import (
+    COMMAND,
+    PAPERS,
+    PRODUCER,
+    FakeSource,
+    FakeStore,
+    FakeTables,
+    clock,
+)
 
 pytestmark = pytest.mark.usefixtures("prefect_server")
 
@@ -73,3 +82,32 @@ async def test_a_failing_run_persists_no_signed_link(
     assert b"GzipInvalid" in pickled  # the record is the pickled exception, so the checks see it
     for blob in (record, pickled):
         assert b"secret" not in blob and b"Signature" not in blob
+
+
+LOAD = LoadDataset(**COMMAND.model_dump())
+
+
+def load_flow(store: FakeStore, tables: FakeTables) -> S2LoadFlow:
+    loader = LoadDatasetService(store=store, tables=tables, producer=PRODUCER, clock=clock)
+    return s2_load_flow(loader, task_retries=2, retry_delay_seconds=0)
+
+
+async def test_the_load_flow_loads_each_object_once(
+    service: DownloadDatasetService, store: FakeStore
+) -> None:
+    await build(service)(COMMAND)
+    tables = FakeTables(store)
+    first = await load_flow(store, tables)(LOAD)
+    again = await load_flow(store, tables)(LOAD)
+    assert (first.loaded, again.already_loaded, len(tables.loads)) == (2, 2, 2)
+
+
+async def test_only_transient_load_errors_are_retried(
+    service: DownloadDatasetService, store: FakeStore
+) -> None:
+    await build(service)(COMMAND)
+    tables = FakeTables(store)
+    tables.failures = [TableUnavailable("try again"), ContractViolation("bad record")]
+    with pytest.raises(ContractViolation):
+        await load_flow(store, tables)(LOAD)
+    assert tables.loads == ["part-0.gz", "part-0.gz"]

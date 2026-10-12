@@ -6,8 +6,17 @@ import re
 from collections.abc import AsyncGenerator
 from enum import StrEnum
 from typing import Annotated
+from uuid import UUID
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, NonNegativeInt, SecretStr
+from pydantic import (
+    AfterValidator,
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    NonNegativeInt,
+    PositiveInt,
+    SecretStr,
+)
 
 from openknowledge_contracts.datasets import (
     INVENTORY_NAME,
@@ -22,10 +31,13 @@ from openknowledge_contracts.datasets import (
 from openknowledge_contracts.manifests import (
     BucketName,
     Crc32cBase64,
+    DatasetManifest,
+    ImageDigest,
     Md5Base64,
     ObjectPath,
     ObjectPrefix,
     ObjectRef,
+    Sha256Hex,
 )
 
 
@@ -129,3 +141,54 @@ class ShardOutcome(StrEnum):
     """Found in the bucket without a receipt, hashed in place and receipted."""
     VERIFIED = "verified"
     """Its receipt and object passed validation, so the shard was not downloaded again."""
+
+
+class TableState(BaseModel):
+    """A dataset's table when a load starts, whose UUID changes when it is created again."""
+
+    model_config = ConfigDict(frozen=True)
+
+    name: str
+    uuid: UUID
+    has_rows: bool
+    load_sql_sha256: Sha256Hex
+
+
+class PreparedLoad(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    manifest_path: ObjectPath
+    manifest: DatasetManifest
+    table: TableState
+
+
+class LoadObject(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    dataset: DatasetName
+    release: ReleaseId
+    object_ref: ObjectRef
+
+
+class LoadRecord(BaseModel):
+    """One object loaded into a table, as the ``loads`` table keeps it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    target: str
+    target_uuid: UUID
+    source_object: str
+    generation: PositiveInt
+    sha256: Sha256Hex
+    source_release: ReleaseId
+    records: NonNegativeInt
+    written_rows: NonNegativeInt
+    load_sql_sha256: Sha256Hex
+    software_version: str
+    image_digest: ImageDigest | None
+    loaded_at: AwareDatetime
+
+
+class LoadOutcome(StrEnum):
+    LOADED = "loaded"
+    ALREADY_LOADED = "already-loaded"

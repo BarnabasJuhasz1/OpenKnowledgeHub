@@ -39,6 +39,20 @@ The key is `S2_API_KEY`, and every other setting is `OKP_` plus a field name fro
 With Prefect's default profile and no `PREFECT_API_URL`, Prefect starts a temporary local server for the run.
 `okp` turns that server's telemetry off.
 
+## Loading into ClickHouse
+
+```sh
+uv run okp s2 load --release <release_id> --dataset publication-venues --bucket openknowledge-508216-raw
+```
+
+It loads every object in the dataset's `manifest.json` into the dataset's table.
+ClickHouse reads each object itself through its `raw` named collection and checks every record against the dataset's contract.
+It needs `OKP_CLICKHOUSE_URL`, `CLICKHOUSE_PASSWORD` and `OKP_CLICKHOUSE_RAW_BUCKET`, the bucket that collection reads, but no S2 key.
+
+Each loaded object leaves a row in `loads`.
+A rerun skips an object whose row matches its generation, its checksum, the table and the load SQL, so a table created again or emptied loads everything again.
+`tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
+
 Before a pull request:
 
 ```sh

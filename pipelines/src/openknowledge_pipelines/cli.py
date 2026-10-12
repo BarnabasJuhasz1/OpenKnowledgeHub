@@ -1,4 +1,4 @@
-"""The ``okp`` command line, where only ``download`` loads Prefect."""
+"""The ``okp`` command line, where only ``download`` and ``load`` load Prefect."""
 
 from __future__ import annotations
 
@@ -13,14 +13,16 @@ from openknowledge_core.ingestion import (
     DownloadDataset,
     DownloadShard,
     IngestionError,
+    LoadDataset,
     PinRelease,
 )
 from openknowledge_pipelines import bootstrap
-from openknowledge_pipelines.settings import PipelineSettings
+from openknowledge_pipelines.settings import CommonSettings, LoadSettings, PipelineSettings
 
 PIN_HELP = "Archive a release's metadata and print it as JSON, with the explicit release_id."
 DOWNLOAD_HELP = "Archive a whole dataset through the Prefect flow."
 DOWNLOAD_SHARD_HELP = "Archive one shard of a dataset without Prefect."
+LOAD_HELP = "Load an archived dataset into its ClickHouse table through the Prefect flow."
 RELEASE_HELP = "The release_id that okp s2 pin printed, such as 2026-10-06."
 DATASET_HELP = "Dataset name, such as publication-venues."
 PREFIX_HELP = "Folder in the bucket that every object goes under."
@@ -41,6 +43,7 @@ PIN_RULES = {**OPTION_RULES, "release": "--release must be latest or look like 2
 SETTING_RULES = {
     "OKP_IMAGE_DIGEST": "OKP_IMAGE_DIGEST must be sha256: followed by 64 lowercase hex digits",
     "OKP_S2_API_URL": "OKP_S2_API_URL must be an http or https URL",
+    "OKP_CLICKHOUSE_URL": "OKP_CLICKHOUSE_URL must be an http or https URL",
 }
 MISSING_KEY = (
     "S2_API_KEY is not set; keep it in ~/.config/openknowledge/.env and run okp through "
@@ -75,7 +78,7 @@ def s2() -> None:
 )
 def pin(release: str, bucket: str, prefix: str) -> None:
     command = _command(PinRelease, PIN_RULES, release=release, bucket=bucket, prefix=prefix)
-    settings = _settings()
+    settings = _settings(PipelineSettings)
 
     async def run() -> BaseModel:
         async with bootstrap.open_service(settings) as service:
@@ -100,7 +103,7 @@ def download(release: str, dataset: str, bucket: str, prefix: str) -> None:
         bucket=bucket,
         prefix=prefix,
     )
-    settings = _settings()
+    settings = _settings(PipelineSettings)
 
     async def run() -> BaseModel:
         async with bootstrap.open_service(settings) as service:
@@ -132,11 +135,36 @@ def download_shard(release: str, dataset: str, shard: str, bucket: str, prefix: 
         bucket=bucket,
         prefix=prefix,
     )
-    settings = _settings()
+    settings = _settings(PipelineSettings)
 
     async def run() -> BaseModel:
         async with bootstrap.open_service(settings) as service:
             return await service.archive_shard_at(command)
+
+    _run(run)
+
+
+@s2.command(help=LOAD_HELP, short_help=LOAD_HELP)
+@click.option("--release", required=True, help=RELEASE_HELP)
+@click.option("--dataset", required=True, help=DATASET_HELP)
+@click.option("--bucket", required=True, help="Bucket holding the archive, without gs://.")
+@click.option(
+    "--prefix", default=_default(LoadDataset, "prefix"), show_default=True, help=PREFIX_HELP
+)
+def load(release: str, dataset: str, bucket: str, prefix: str) -> None:
+    command = _command(
+        LoadDataset,
+        OPTION_RULES,
+        release=release,
+        dataset=dataset,
+        bucket=bucket,
+        prefix=prefix,
+    )
+    settings = _settings(LoadSettings)
+
+    async def run() -> BaseModel:
+        async with bootstrap.open_load_service(settings) as service:
+            return await bootstrap.load_flow(service, settings)(command)
 
     _run(run)
 
@@ -151,9 +179,9 @@ def _command[C: BaseModel](kind: type[C], rules: Mapping[str, str], **values: ob
     raise click.UsageError("; ".join(messages) or "these options do not fit together")
 
 
-def _settings() -> PipelineSettings:
+def _settings[S: CommonSettings](kind: type[S]) -> S:
     try:
-        return PipelineSettings()  # pyright: ignore[reportCallIssue]  # fields come from the environment
+        return kind()  # pyright: ignore[reportCallIssue]  # fields come from the environment
     except ValidationError as exc:
         problems = [_setting_problem(error) for error in exc.errors(include_input=False)]
     raise click.ClickException("; ".join(problems))

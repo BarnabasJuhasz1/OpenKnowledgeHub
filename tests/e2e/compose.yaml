@@ -1,0 +1,32 @@
+# ClickHouse as infra deploy/clickhouse configures it, with the raw bucket on a fake GCS.
+# tests/test_load_e2e.py starts it with free ports in CLICKHOUSE_PORT and GCS_PORT.
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.8.22.13@sha256:110d3d1f8e1ed7e451a6b5d85a16761e948ad43bc2d9ddf10b155964a8b2b40c
+    environment:
+      OPENKNOWLEDGE_PASSWORD: openknowledge
+      GCS_HMAC_KEY_ID: fake
+      GCS_HMAC_SECRET: fake
+      CLICKHOUSE_PASSWORD: default
+      CLICKHOUSE_SKIP_USER_SETUP: "1"
+    volumes:
+      - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      - ./clickhouse/users.d:/etc/clickhouse-server/users.d:ro
+    ports:
+      - "127.0.0.1:${CLICKHOUSE_PORT:?}:8123"
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+      interval: 1s
+      retries: 60
+    depends_on:
+      - gcs
+
+  gcs:
+    image: fsouza/fake-gcs-server:1.56.1@sha256:797ce226d62f947c009dc40246b30cfb456b8473d8241407f9d6f2c04e4d69ef
+    command:
+      - -scheme=http
+      - -port=4443
+      - -external-url=http://127.0.0.1:${GCS_PORT:?}
+      - -public-host=gcs
+    ports:
+      - "127.0.0.1:${GCS_PORT:?}:4443"

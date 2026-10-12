@@ -1,17 +1,12 @@
 """ClickHouse migrations against the dataset contracts.
 
-Apart from the file format, every check applies the migrations with ``clickhouse local``. They
-are skipped where no ``clickhouse`` binary is on the PATH, but fail under CI, which installs one.
+Apart from the file format, every check applies the migrations with ``clickhouse local``.
 """
 
 from __future__ import annotations
 
 import itertools
-import json
-import os
 import re
-import shutil
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -20,48 +15,20 @@ import pytest
 from openknowledge_contracts.tables import DatasetContract
 from openknowledge_contracts.tables.clickhouse import table_columns
 from openknowledge_contracts.tables.s2 import CONTRACTS
-
-MIGRATIONS = Path(__file__).resolve().parents[1] / "migrations" / "clickhouse"
-CLICKHOUSE = shutil.which("clickhouse")
-
-needs_clickhouse = pytest.mark.skipif(
-    CLICKHOUSE is None and not os.environ.get("CI"), reason="no clickhouse binary on PATH"
+from tests.clickhouse_local import (
+    MIGRATIONS,
+    clickhouse_local,
+    down,
+    migrations,
+    needs_clickhouse,
+    section,
+    up,
 )
 
 type Catalog = dict[str, list[dict[str, Any]]]
 
-
-def migrations() -> list[Path]:
-    return sorted(MIGRATIONS.glob("*.sql"))
-
-
-def section(path: Path, name: str) -> str:
-    """The statements under ``-- +goose <name>``, up to the next annotation or the end."""
-    _, _, rest = path.read_text().partition(f"-- +goose {name}\n")
-    return rest.partition("-- +goose ")[0]
-
-
-def up() -> str:
-    return "\n".join(section(path, "Up") for path in migrations())
-
-
-def down() -> str:
-    return "\n".join(section(path, "Down") for path in reversed(migrations()))
-
-
-def clickhouse_local(sql: str, workdir: Path) -> list[dict[str, Any]]:
-    assert CLICKHOUSE is not None, "CI runs these checks, so it must put clickhouse on the PATH"
-    # Whether JSON output quotes 64-bit integers is a default that changed between releases, so
-    # it is pinned: a UInt64 comes back as a JSON number.
-    args = ["local", "--path", str(workdir), "--output_format_json_quote_64bit_integers=0"]
-    result = subprocess.run(
-        [CLICKHOUSE, *args, "--multiquery", "--query", sql],
-        stdin=subprocess.DEVNULL,  # a piped stdin would be read as data for the INSERTs
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return [json.loads(line) for line in result.stdout.splitlines()]
+# Tables that hold no dataset: which objects were loaded into which table.
+BOOKKEEPING = {"loads"}
 
 
 def test_every_migration_is_a_numbered_goose_file_with_up_and_down() -> None:
@@ -91,9 +58,11 @@ def catalog(tmp_path_factory: pytest.TempPathFactory) -> Catalog:
 
 
 @needs_clickhouse
-def test_the_migrations_create_one_table_per_contract(catalog: Catalog) -> None:
+def test_the_migrations_create_one_table_per_contract_and_the_bookkeeping(
+    catalog: Catalog,
+) -> None:
     created = sorted(table["table"] for table in catalog["tables"])
-    assert created == sorted(contract.table for contract in CONTRACTS.values())
+    assert created == sorted({contract.table for contract in CONTRACTS.values()} | BOOKKEEPING)
 
 
 @needs_clickhouse

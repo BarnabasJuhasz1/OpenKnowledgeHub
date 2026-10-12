@@ -71,3 +71,25 @@ class DownloadShardResult(BaseModel):
     shard: ShardRef
     outcome: ShardOutcome
     receipt: ObjectPath
+
+
+class LoadDataset(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    release: ReleaseId
+    dataset: DatasetName
+    bucket: BucketName
+    prefix: ObjectPrefix = DEFAULT_PREFIX
+
+
+class LoadDatasetResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    release_id: ReleaseId
+    dataset: DatasetName
+    table: str
+    objects: NonNegativeInt
+    loaded: NonNegativeInt
+    already_loaded: NonNegativeInt
+    live_rows: NonNegativeInt
+    manifest: ObjectPath

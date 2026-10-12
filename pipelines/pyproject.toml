@@ -7,7 +7,7 @@ dependencies = [
     # Matches the Prefect server on the control VM.
     "prefect==3.8.8",
     "click>=8,<9",
-    "openknowledge-adapters[gcs,semantic-scholar]",
+    "openknowledge-adapters[clickhouse,gcs,semantic-scholar]",
     "openknowledge-contracts",
     "openknowledge-core",
     "pydantic>=2.11,<3",
