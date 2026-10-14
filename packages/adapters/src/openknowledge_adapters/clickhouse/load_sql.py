@@ -22,13 +22,8 @@ from openknowledge_contracts.tables.fields import ArrowField, fields_of
 type Source = Literal["s3", "file"]
 type Check = tuple[str, str]
 
-SOURCES: dict[Source, str] = {
-    "s3": (
-        "s3(raw, filename = {source_file:String}, format = 'LineAsString', "
-        "structure = 'line String', compression_method = 'gzip')"
-    ),
-    "file": "file({source_file:String}, 'LineAsString', 'line String', 'gzip')",
-}
+# Repeated keys a failing load names, at most.
+EXAMPLES = 10
 
 _PLAIN_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _TYPES: dict[pa.DataType, str] = {
@@ -60,11 +55,8 @@ def upsert_query(contract: DatasetContract, source: Source = "s3") -> str:
     checks = query.record(fields, required=[f.name for f in fields if not f.nullable])
     values: list[tuple[str, str]] = []
     for field in fields:
-        raw = _raw(field.name)
-        checks.append(query.field(field, raw))
-        values.append((field.name, query.value(field, raw)))
-        if field.nullable and _is_composite(field.type):
-            values.append((field.name + NULL_FLAG_SUFFIX, f"JSONType({raw}) = 'Null'"))
+        checks.append(query.field(field, _raw(field.name)))
+        values += _stored(query, field)
     values += _provenance()
     return _insert(contract, fields, values, checks, source)
 
@@ -81,12 +73,48 @@ def problems_query(contract: DatasetContract, source: Source = "s3") -> str:
     return (
         f"SELECT line, problem FROM (\n{_with(fields)}"
         f"SELECT line, multiIf(\n        {branches},\n        ''\n    ) AS problem\n"
-        f"FROM {SOURCES[source]})\nWHERE problem != ''"
+        f"FROM {_source(source)})\nWHERE problem != ''"
+    )
+
+
+def duplicates_query(contract: DatasetContract, objects: int, source: Source = "s3") -> str:
+    """Keys that repeat across the objects ``source_file_0`` to ``source_file_<objects - 1>``.
+
+    Records repeat identically when every stored value is the same, whatever the key order or
+    spacing of their lines. The values are hashed as one tuple, because a null argument would
+    make the hash null and ``min`` and ``max`` skip it.
+    """
+    query = _Query(contract)
+    fields = fields_of(contract.source)
+    values = dict(column for field in fields for column in _stored(query, field))
+    key = ", ".join(values[name] for name in contract.key)
+    lines = "\n    UNION ALL\n    ".join(
+        f"SELECT line FROM {_source(source, f'source_file_{index}')}" for index in range(objects)
+    )
+    records = (
+        f"{_with(fields)}SELECT tuple({key}) AS record_key, "
+        f"cityHash64(tuple({', '.join(values.values())})) AS record_hash\n"
+        f"FROM (\n    {lines}\n)"
+    )
+    keys = (
+        "SELECT record_key, count() AS n, min(record_hash) != max(record_hash) AS conflicting\n"
+        f"FROM (\n{records}\n)\nGROUP BY record_key\nHAVING n > 1"
+    )
+    return (
+        "SELECT\n"
+        "    sumIf(n - 1, NOT conflicting) AS identical_rows,\n"
+        "    countIf(conflicting) AS conflicting_keys,\n"
+        f"    groupArrayIf({EXAMPLES})(toString(record_key), conflicting) AS examples\n"
+        f"FROM (\n{keys}\n)"
     )
 
 
 def query_parameters(*, source_file: str, release: str, source_object: str) -> dict[str, str]:
     return {"source_file": source_file, "source_release": release, "source_object": source_object}
+
+
+def duplicates_parameters(source_files: Sequence[str]) -> dict[str, str]:
+    return {f"source_file_{index}": name for index, name in enumerate(source_files)}
 
 
 def sql_sha256(query: str) -> str:
@@ -233,7 +261,7 @@ def _insert(
         f"INSERT INTO {_identifier(contract.table)} ({columns})\n"
         f"{_with(fields)}"
         f"SELECT\n    {selected}\n"
-        f"FROM {SOURCES[source]}\n"
+        f"FROM {_source(source)}\n"
         f"WHERE {where}"
     )
 
@@ -243,6 +271,26 @@ def _with(fields: Sequence[ArrowField]) -> str:
         f"JSONExtractRaw(line, {_literal(f.name)}) AS {_raw(f.name)}" for f in fields
     )
     return f"WITH\n    {raws}\n"
+
+
+def _stored(query: _Query, field: ArrowField) -> list[tuple[str, str]]:
+    """The columns a field fills: its value, and whether a nullable composite was null."""
+    raw = _raw(field.name)
+    columns = [(field.name, query.value(field, raw))]
+    if field.nullable and _is_composite(field.type):
+        columns.append((field.name + NULL_FLAG_SUFFIX, f"JSONType({raw}) = 'Null'"))
+    return columns
+
+
+def _source(source: Source, parameter: str = "source_file") -> str:
+    """The table function that reads the object a query parameter names."""
+    name = "{" + parameter + ":String}"
+    if source == "s3":
+        return (
+            f"s3(raw, filename = {name}, format = 'LineAsString', "
+            "structure = 'line String', compression_method = 'gzip')"
+        )
+    return f"file({name}, 'LineAsString', 'line String', 'gzip')"
 
 
 def _provenance() -> list[tuple[str, str]]:

@@ -152,3 +152,10 @@ def test_a_record_that_breaks_the_contract_fails_the_load(ports: dict[str, str])
     code, output = okp_load(ports, "2026-10-13")
     assert code == 1
     assert "a record has a key the contract does not declare; the object stays unloaded" in output
+
+
+def test_a_key_repeated_identically_is_counted(ports: dict[str, str]) -> None:
+    record = json.loads(FIXTURE.read_text().splitlines()[0])
+    archive(ports, "2026-10-20", [json.dumps(record), json.dumps(dict(reversed(record.items())))])
+    result = loaded(ports, "2026-10-20")
+    assert (result["live_rows"], result["identical_duplicates"]) == (1, 1)

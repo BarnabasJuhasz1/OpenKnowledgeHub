@@ -4,11 +4,18 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 import httpx
 
-from openknowledge_adapters.clickhouse.load_sql import query_parameters, sql_sha256, upsert_query
+from openknowledge_adapters.clickhouse.load_sql import (
+    duplicates_parameters,
+    duplicates_query,
+    query_parameters,
+    sql_sha256,
+    upsert_query,
+)
 from openknowledge_contracts.datasets import DatasetName, ReleaseId
 from openknowledge_contracts.manifests import ObjectPath
 from openknowledge_contracts.tables import DatasetContract
@@ -21,7 +28,7 @@ from openknowledge_core.ingestion.errors import (
     TableRejected,
     TableUnavailable,
 )
-from openknowledge_core.ingestion.models import LoadObject, LoadRecord, TableState
+from openknowledge_core.ingestion.models import Duplicates, LoadObject, LoadRecord, TableState
 
 SETTINGS = {
     "wait_end_of_query": "1",
@@ -64,9 +71,7 @@ class ClickHouseTables:
         return LoadRecord.model_validate(rows[0]) if rows else None
 
     async def load(self, request: LoadObject) -> int:
-        path = request.object_ref.path
-        if path.bucket != self._raw_bucket:
-            raise TableRejected(f"ClickHouse reads only {self._raw_bucket}, not {path}")
+        path = self._readable(request.object_ref.path)
         parameters = query_parameters(
             source_file=path.name, release=request.release, source_object=str(path)
         )
@@ -84,6 +89,18 @@ class ClickHouseTables:
             release=release,
         )
         return int(rows[0]["rows"])
+
+    async def duplicates(self, dataset: DatasetName, objects: Sequence[ObjectPath]) -> Duplicates:
+        names = [self._readable(path).name for path in objects]
+        rows = await self._rows(
+            duplicates_query(_contract(dataset), len(names)), **duplicates_parameters(names)
+        )
+        return Duplicates.model_validate(rows[0])
+
+    def _readable(self, path: ObjectPath) -> ObjectPath:
+        if path.bucket != self._raw_bucket:
+            raise TableRejected(f"ClickHouse reads only {self._raw_bucket}, not {path}")
+        return path
 
     async def _rows(self, query: str, **parameters: str) -> list[dict[str, Any]]:
         response = await self._post(f"{query} FORMAT JSONEachRow", **parameters)

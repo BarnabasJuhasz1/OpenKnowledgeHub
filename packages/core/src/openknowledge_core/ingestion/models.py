@@ -154,6 +154,20 @@ class TableState(BaseModel):
     load_sql_sha256: Sha256Hex
 
 
+class Duplicates(BaseModel):
+    """Keys that repeat across a release's objects.
+
+    ``identical_rows`` counts the records beyond the first of keys whose records hold the same
+    values; every other repeated key conflicts.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    identical_rows: NonNegativeInt
+    conflicting_keys: NonNegativeInt
+    examples: tuple[str, ...]
+
+
 class PreparedLoad(BaseModel):
     model_config = ConfigDict(frozen=True)
 

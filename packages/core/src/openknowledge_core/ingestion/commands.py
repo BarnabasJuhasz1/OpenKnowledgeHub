@@ -92,4 +92,5 @@ class LoadDatasetResult(BaseModel):
     loaded: NonNegativeInt
     already_loaded: NonNegativeInt
     live_rows: NonNegativeInt
+    identical_duplicates: NonNegativeInt
     manifest: ObjectPath
