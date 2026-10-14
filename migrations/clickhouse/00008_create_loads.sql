@@ -3,7 +3,7 @@
 -- One row per archived object loaded into a table; the latest load of an object wins. A record
 -- counts only while target_uuid is the table's current UUID and the table has rows, so a
 -- dropped, recreated or truncated table is loaded again.
-CREATE TABLE loads
+CREATE TABLE IF NOT EXISTS loads
 (
     target LowCardinality(String),
     target_uuid UUID,
@@ -23,4 +23,4 @@ ENGINE = ReplacingMergeTree(loaded_at)
 ORDER BY (target, source_object);
 
 -- +goose Down
-DROP TABLE loads;
+DROP TABLE IF EXISTS loads;

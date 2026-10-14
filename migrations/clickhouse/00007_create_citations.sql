@@ -1,6 +1,6 @@
 -- +goose NO TRANSACTION
 -- +goose Up
-CREATE TABLE citations
+CREATE TABLE IF NOT EXISTS citations
 (
     citationid UInt64,
     citingcorpusid UInt64,
@@ -19,4 +19,4 @@ ENGINE = ReplacingMergeTree(version, is_deleted)
 ORDER BY citationid;
 
 -- +goose Down
-DROP TABLE citations;
+DROP TABLE IF EXISTS citations;

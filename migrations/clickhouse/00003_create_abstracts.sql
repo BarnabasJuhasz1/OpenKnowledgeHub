@@ -1,6 +1,6 @@
 -- +goose NO TRANSACTION
 -- +goose Up
-CREATE TABLE abstracts
+CREATE TABLE IF NOT EXISTS abstracts
 (
     corpusid UInt64,
     openaccessinfo Tuple(
@@ -20,4 +20,4 @@ ENGINE = ReplacingMergeTree(version, is_deleted)
 ORDER BY corpusid;
 
 -- +goose Down
-DROP TABLE abstracts;
+DROP TABLE IF EXISTS abstracts;

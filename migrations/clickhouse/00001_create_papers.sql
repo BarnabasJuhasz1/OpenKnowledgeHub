@@ -1,6 +1,6 @@
 -- +goose NO TRANSACTION
 -- +goose Up
-CREATE TABLE papers
+CREATE TABLE IF NOT EXISTS papers
 (
     corpusid UInt64,
     externalids Map(String, Nullable(String)),
@@ -30,4 +30,4 @@ ENGINE = ReplacingMergeTree(version, is_deleted)
 ORDER BY corpusid;
 
 -- +goose Down
-DROP TABLE papers;
+DROP TABLE IF EXISTS papers;

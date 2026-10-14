@@ -1,6 +1,6 @@
 -- +goose NO TRANSACTION
 -- +goose Up
-CREATE TABLE authors
+CREATE TABLE IF NOT EXISTS authors
 (
     authorid String,
     externalids Nullable(String),
@@ -23,4 +23,4 @@ ENGINE = ReplacingMergeTree(version, is_deleted)
 ORDER BY authorid;
 
 -- +goose Down
-DROP TABLE authors;
+DROP TABLE IF EXISTS authors;

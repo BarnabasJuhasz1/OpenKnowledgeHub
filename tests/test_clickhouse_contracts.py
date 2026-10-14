@@ -91,9 +91,12 @@ def test_tables_keep_the_highest_version_per_key(
 
 
 @needs_clickhouse
-def test_down_drops_every_table_up_created(tmp_path: Path) -> None:
+def test_up_and_down_rerun_and_down_drops_every_table_up_created(tmp_path: Path) -> None:
+    """Goose records a version only after a file ran, so a crashed migration runs again."""
     sql = f"""
         {up()}
+        {up()}
+        {down()}
         {down()}
         SELECT name FROM system.tables WHERE database = currentDatabase() FORMAT JSONEachRow;
     """
