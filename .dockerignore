@@ -1,0 +1,11 @@
+# Only what pipelines/Dockerfile copies, so a local .env, .venv or credentials file never
+# reaches the build context.
+*
+!pyproject.toml
+!uv.lock
+!.python-version
+!packages/*/pyproject.toml
+!packages/*/src
+!pipelines/pyproject.toml
+!pipelines/src
+**/__pycache__
