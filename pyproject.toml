@@ -11,6 +11,7 @@ openknowledge-pipelines = { workspace = true }
 dev = [
     "openknowledge-pipelines",
     "import-linter>=2.15,<3",
+    "pyarrow-stubs>=20.0.0.20260819,<21",
     "pyright[nodejs]>=1.1.414,<1.2",
     "pytest>=9,<10",
     "pytest-asyncio>=1.4,<2",

@@ -1,0 +1,2 @@
+{"corpusid": 101, "openaccessinfo": {"disclaimer": "Notice: synthetic.", "externalids": {"Medline": "41486930v1", "MAG": null, "ACL": null, "DOI": "10.1000/EXAMPLE.1", "MedRxiv": null, "PubMedCentral": "8800001", "ArXiv": "2609.00001"}, "license": "CCBY", "url": "https://example.org/101.pdf", "status": "GREEN"}, "abstract": "A synthetic abstract."}
+{"corpusid": 102, "openaccessinfo": {"disclaimer": null, "externalids": {"doi": "10.1000/example.2"}, "license": null, "url": null, "status": null}, "abstract": ". . . . . . . . . ."}

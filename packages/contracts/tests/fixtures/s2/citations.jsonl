@@ -1,0 +1,3 @@
+{"citationid": 6270000001, "citingcorpusid": 101, "citedcorpusid": 102, "isinfluential": true, "contexts": ["as shown in [1]", "following [1]"], "intents": [["methodology"], null]}
+{"citationid": 6270000002, "citingcorpusid": 101, "citedcorpusid": null, "isinfluential": false, "contexts": null, "intents": null}
+{"citationid": 6270000003, "citingcorpusid": 102, "citedcorpusid": 101, "isinfluential": false, "contexts": [], "intents": []}
