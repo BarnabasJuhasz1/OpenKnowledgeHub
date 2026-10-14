@@ -62,3 +62,18 @@ uv run ruff check . && uv run ruff format --check .
 uv run pyright
 uv run lint-imports
 ```
+
+## Pipelines image
+
+`pipelines/Dockerfile` builds one image for Batch download tasks, loads and the Prefect worker.
+Its entry point is `okp`; the worker runs `prefect` from the same image.
+Build it from the repository root:
+
+```sh
+docker build -f pipelines/Dockerfile -t pipelines .
+docker run --rm pipelines s2 download-shard --help
+```
+
+Pull requests build and smoke-test it.
+Every push to `main` publishes it as `europe-west4-docker.pkg.dev/openknowledge-508216/openknowledge/pipelines:<commit>` and writes the digest to the job summary.
+Deployments pin that digest, never a tag, and pass it as `OKP_IMAGE_DIGEST`: receipts record it, and an image cannot know its own digest.

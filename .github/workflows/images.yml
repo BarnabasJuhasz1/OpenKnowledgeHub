@@ -1,0 +1,117 @@
+name: Images
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: europe-west4-docker.pkg.dev/openknowledge-508216/openknowledge/pipelines
+
+concurrency:
+  group: images-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Pull requests, from forks too, build and run the image without any credentials.
+  build:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: pipelines/Dockerfile
+          platforms: linux/amd64
+          build-args: REVISION=${{ github.sha }}
+          tags: pipelines:smoke
+          load: true
+          provenance: false
+          sbom: false
+      - name: Smoke test
+        run: |
+          docker run --rm pipelines:smoke --help
+          docker run --rm pipelines:smoke s2 download-shard --help
+          docker run --rm --entrypoint prefect pipelines:smoke version
+          test "$(docker run --rm --entrypoint id pipelines:smoke -u)" != 0
+
+  # main builds and smoke-tests the same way, then pushes the image tagged with the commit.
+  # provenance and sbom stay off, so the pushed digest is the one amd64 manifest that Batch
+  # and Docker report back.
+  publish:
+    if: github.event_name == 'push' && github.repository == 'OpenKnowledgeOrg/OpenKnowledgeHub'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write # workload identity federation, to push to Artifact Registry
+    steps:
+      - name: Check the repository variables
+        env:
+          GCP_WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+          GCP_PUBLISHER_SERVICE_ACCOUNT: ${{ vars.GCP_PUBLISHER_SERVICE_ACCOUNT }}
+        run: |
+          : "${GCP_WIF_PROVIDER:?Set the GCP_WIF_PROVIDER repository variable}"
+          : "${GCP_PUBLISHER_SERVICE_ACCOUNT:?Set the GCP_PUBLISHER_SERVICE_ACCOUNT repository variable}"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: pipelines/Dockerfile
+          platforms: linux/amd64
+          build-args: REVISION=${{ github.sha }}
+          tags: pipelines:smoke
+          load: true
+          provenance: false
+          sbom: false
+      - name: Smoke test
+        run: |
+          docker run --rm pipelines:smoke --help
+          docker run --rm pipelines:smoke s2 download-shard --help
+          docker run --rm --entrypoint prefect pipelines:smoke version
+          test "$(docker run --rm --entrypoint id pipelines:smoke -u)" != 0
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        id: auth
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_PUBLISHER_SERVICE_ACCOUNT }}
+          token_format: access_token
+          create_credentials_file: false
+      - name: Log in to Artifact Registry
+        env:
+          ACCESS_TOKEN: ${{ steps.auth.outputs.access_token }}
+        run: >-
+          printf '%s' "$ACCESS_TOKEN" |
+          docker login --username oauth2accesstoken --password-stdin europe-west4-docker.pkg.dev
+      # Same inputs as the smoke build, so every layer comes from its cache.
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: push
+        with:
+          context: .
+          file: pipelines/Dockerfile
+          platforms: linux/amd64
+          build-args: REVISION=${{ github.sha }}
+          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          push: true
+          provenance: false
+          sbom: false
+      - name: Write the digest to the summary
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          {
+            echo "Pushed \`${IMAGE}:${GITHUB_SHA}\`"
+            echo
+            echo "Pin deployments to \`${IMAGE}@${DIGEST}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
