@@ -16,7 +16,8 @@ from typing import Any, Literal, cast
 import pyarrow as pa
 
 from openknowledge_contracts.tables import PROVENANCE, DatasetContract
-from openknowledge_contracts.tables.clickhouse import NULL_FLAG_SUFFIX
+from openknowledge_contracts.tables.clickhouse import NULL_FLAG_SUFFIX, table_columns
+from openknowledge_contracts.tables.contract import REMOVED
 from openknowledge_contracts.tables.fields import ArrowField, fields_of
 
 type Source = Literal["s3", "file"]
@@ -25,6 +26,7 @@ type Check = tuple[str, str]
 # Repeated keys a failing load names, at most.
 EXAMPLES = 10
 
+_RELEASE = "{source_release:Date}"
 _PLAIN_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _TYPES: dict[pa.DataType, str] = {
     pa.bool_(): "Bool",
@@ -50,15 +52,38 @@ _RANGES: dict[pa.DataType, tuple[int, int]] = {
 
 def upsert_query(contract: DatasetContract, source: Source = "s3") -> str:
     """Insert every record of one object as a current row."""
-    query = _Query(contract)
     fields = fields_of(contract.source)
-    checks = query.record(fields, required=[f.name for f in fields if not f.nullable])
-    values: list[tuple[str, str]] = []
-    for field in fields:
-        checks.append(query.field(field, _raw(field.name)))
-        values += _stored(query, field)
-    values += _provenance()
-    return _insert(contract, fields, values, checks, source)
+    return _load(contract, fields, [f.name for f in fields if not f.nullable], 0, source)
+
+
+def delete_query(contract: DatasetContract, source: Source = "s3") -> str:
+    """Insert a tombstone for every record of one object of delete records.
+
+    A delete record holds the contract's key fields and nothing else, so the tombstone takes the
+    table's defaults in every other column.
+    """
+    keys = [field for field in fields_of(contract.source) if field.name in contract.key]
+    return _load(contract, keys, contract.key, 1, source)
+
+
+def removed_query(contract: DatasetContract) -> str:
+    """Flag every key that an older release holds and the loaded release no longer lists.
+
+    Each such live row is copied with ``removed`` set and ``source_release`` moved to the loaded
+    release, so a later release that lists the key again wins with ``removed`` unset.
+    """
+    if contract.updates != "snapshot":
+        raise ValueError(f"{contract.name}: only a snapshot contract flags removed keys")
+    columns = [column.name for column in table_columns(contract) if not column.materialized]
+    replaced = {"source_release": _RELEASE, REMOVED: "true"}
+    selected = ",\n    ".join(replaced.get(name, _identifier(name)) for name in columns)
+    table = _identifier(contract.table)
+    return (
+        f"INSERT INTO {table} ({', '.join(_identifier(name) for name in columns)})\n"
+        f"SELECT\n    {selected}\n"
+        f"FROM {table} FINAL\n"
+        f"WHERE source_release < {_RELEASE} AND NOT {REMOVED}"
+    )
 
 
 def problems_query(contract: DatasetContract, source: Source = "s3") -> str:
@@ -245,6 +270,23 @@ class _Query:
         return f"x{self._variables}"
 
 
+def _load(
+    contract: DatasetContract,
+    fields: Sequence[ArrowField],
+    required: Sequence[str],
+    is_deleted: int,
+    source: Source,
+) -> str:
+    query = _Query(contract)
+    checks = query.record(fields, required=required)
+    values: list[tuple[str, str]] = []
+    for field in fields:
+        checks.append(query.field(field, _raw(field.name)))
+        values += _stored(query, field)
+    values += _provenance(is_deleted)
+    return _insert(contract, fields, values, checks, source)
+
+
 def _insert(
     contract: DatasetContract,
     fields: Sequence[ArrowField],
@@ -293,11 +335,11 @@ def _source(source: Source, parameter: str = "source_file") -> str:
     return f"file({name}, 'LineAsString', 'line String', 'gzip')"
 
 
-def _provenance() -> list[tuple[str, str]]:
+def _provenance(is_deleted: int) -> list[tuple[str, str]]:
     values = {
-        "source_release": "{source_release:Date}",
+        "source_release": _RELEASE,
         "source_object": "{source_object:String}",
-        "is_deleted": "0",
+        "is_deleted": str(is_deleted),
     }
     return [(name, values[name]) for name in PROVENANCE.names]
 

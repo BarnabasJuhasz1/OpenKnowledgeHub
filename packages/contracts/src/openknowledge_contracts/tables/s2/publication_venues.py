@@ -1,8 +1,8 @@
 """``publication-venues``: journals and conferences, keyed by S2's UUID text.
 
 Papers point here through ``publicationvenueid``. The dataset has no diffs, only full rewrites,
-and those carry no deletes: a venue missing from a later release keeps its row until the table
-is replaced.
+and those carry no deletes, so each release loads whole. A venue a later release no longer
+lists keeps its row, flagged ``removed``.
 """
 
 import pyarrow as pa
@@ -26,4 +26,5 @@ PUBLICATION_VENUES = DatasetContract(
             required("alternate_urls", list_of(pa.string())),
         ]
     ),
+    updates="snapshot",
 )

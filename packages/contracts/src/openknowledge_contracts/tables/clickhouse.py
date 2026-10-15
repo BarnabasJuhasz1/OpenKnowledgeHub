@@ -18,7 +18,7 @@ from typing import Any, cast
 
 import pyarrow as pa
 
-from openknowledge_contracts.tables.contract import VERSION, DatasetContract
+from openknowledge_contracts.tables.contract import REMOVED, VERSION, DatasetContract
 from openknowledge_contracts.tables.fields import ArrowField, fields_of
 
 NULL_FLAG_SUFFIX = "_is_null"
@@ -48,13 +48,19 @@ class Column:
     type: str
     materialized: str = ""
     """The expression the table computes the column from, for a column a load does not write."""
+    default: str = ""
+    """The expression of a ``DEFAULT`` column, which a load leaves to the table."""
 
 
 _VERSION = Column(VERSION, "UInt64", materialized="(toUInt64(source_release) * 2) + is_deleted")
+_REMOVED = Column(REMOVED, "Bool", default="false")
 
 
 def table_columns(contract: DatasetContract) -> tuple[Column, ...]:
-    """The columns of ``contract.table`` in order, null flags and ``version`` included."""
+    """The columns of ``contract.table`` in order, null flags and ``version`` included.
+
+    A snapshot contract adds ``removed`` last, where ``ALTER TABLE ... ADD COLUMN`` puts it.
+    """
     renderer = _Renderer(contract)
     columns: list[Column] = []
     for field in fields_of(contract.schema):
@@ -62,6 +68,8 @@ def table_columns(contract: DatasetContract) -> tuple[Column, ...]:
         if field.nullable and _is_composite(field.type):
             columns.append(Column(field.name + NULL_FLAG_SUFFIX, "Bool"))
     columns.append(_VERSION)
+    if contract.updates == "snapshot":
+        columns.append(_REMOVED)
     names = [column.name for column in columns]
     if duplicates := sorted({name for name in names if names.count(name) > 1}):
         raise ValueError(f"{contract.name}: columns {duplicates} appear twice")

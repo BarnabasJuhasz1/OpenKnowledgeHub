@@ -33,12 +33,14 @@ def section(path: Path, name: str) -> str:
     return rest.partition("-- +goose ")[0]
 
 
-def up() -> str:
-    return "\n".join(section(path, "Up") for path in migrations())
+def up(runs: int = 1) -> str:
+    """Every migration's Up in order, each ``runs`` times in a row."""
+    return "\n".join(section(path, "Up") for path in migrations() for _ in range(runs))
 
 
-def down() -> str:
-    return "\n".join(section(path, "Down") for path in reversed(migrations()))
+def down(runs: int = 1) -> str:
+    """Every migration's Down in reverse order, each ``runs`` times in a row."""
+    return "\n".join(section(path, "Down") for path in reversed(migrations()) for _ in range(runs))
 
 
 def run(sql: str, workdir: Path, **params: str) -> subprocess.CompletedProcess[str]:
