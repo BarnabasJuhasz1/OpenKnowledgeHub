@@ -37,11 +37,14 @@ async def s2_batch_download(command: DownloadDataset) -> BatchDownloadResult:
 
 def serve() -> None:
     prefect_serve(
-        *(
-            RunnerDeployment.from_flow(
-                served, DEPLOYMENT, entrypoint_type=EntrypointType.MODULE_PATH
-            )
-            for served in (s2_load, s2_batch_download)
+        RunnerDeployment.from_flow(s2_load, DEPLOYMENT, entrypoint_type=EntrypointType.MODULE_PATH),
+        # One download at a time, since every run shares the S2 key's one request per second.
+        # Prefect holds a second run until the first ends.
+        RunnerDeployment.from_flow(
+            s2_batch_download,
+            DEPLOYMENT,
+            entrypoint_type=EntrypointType.MODULE_PATH,
+            concurrency_limit=1,
         ),
         limit=RUNS_AT_ONCE,
     )

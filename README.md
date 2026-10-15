@@ -44,7 +44,7 @@ With Prefect's default profile and no `PREFECT_API_URL`, Prefect starts a tempor
 On the control VM, `okp serve` also serves the deployment `s2-batch-download/control-vm`.
 It pins the dataset, runs each shard without a receipt as a task of one Cloud Batch job, and writes the manifest.
 Each task runs `okp s2 download-shard` from the same image with its shard in `OKP_SHARD`.
-Tasks run one at a time, so the key stays at one request per second.
+Tasks run one at a time, and so do these runs, so the key stays at one request per second.
 A run makes up to `OKP_TASK_RETRIES` more rounds for shards still without a receipt, and a new run resumes the same way.
 
 ## Loading into ClickHouse

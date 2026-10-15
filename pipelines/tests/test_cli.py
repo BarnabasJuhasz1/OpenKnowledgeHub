@@ -152,6 +152,7 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_load,
         deployments.s2_batch_download,
     ]
+    assert [found.concurrency_limit for found in served] == [None, 1]
 
 
 def test_a_missing_key_fails_before_anything_opens(monkeypatch: pytest.MonkeyPatch) -> None:
