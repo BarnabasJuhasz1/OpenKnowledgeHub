@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-import uuid
+import asyncio
+import hashlib
+import json
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -10,7 +12,12 @@ import aiohttp
 from gcloud.aio.auth import Token
 
 from openknowledge_adapters.batch.config import BatchConfig
-from openknowledge_core.ingestion.errors import TRANSIENT_STATUSES, BatchRejected, BatchUnavailable
+from openknowledge_core.ingestion.errors import (
+    TRANSIENT_STATUSES,
+    BatchRejected,
+    BatchTimedOut,
+    BatchUnavailable,
+)
 from openknowledge_core.ingestion.models import JobOutcome, ShardJob
 
 ENDED = {
@@ -18,6 +25,10 @@ ENDED = {
     "FAILED": JobOutcome.FAILED,
     "CANCELLED": JobOutcome.FAILED,
 }
+
+
+class _JobExists(Exception):
+    """Creation conflicted with a job whose identity must be checked before resuming."""
 
 
 class CloudBatchJobs:
@@ -38,24 +49,51 @@ class CloudBatchJobs:
 
     async def submit(self, job: ShardJob) -> str:
         parent = f"projects/{self._config.project}/locations/{self._config.region}"
-        body = await self._call(
-            "POST",
-            f"{parent}/jobs",
-            params={"jobId": job_id(job)},
-            json=job_spec(self._config, job),
-        )
-        return str(body["name"])
+        name = f"{parent}/jobs/{job_id(job)}"
+        spec = job_spec(self._config, job)
+        try:
+            try:
+                body = await self._call(
+                    "POST",
+                    f"{parent}/jobs",
+                    params={"jobId": job_id(job), "requestId": str(job.operation_id)},
+                    json=spec,
+                )
+            except _JobExists:
+                body = await self._call("GET", name)
+        except BatchUnavailable as exc:
+            raise BatchUnavailable(
+                f"Cloud Batch job {name} submission is unconfirmed; it may be running. {exc}"
+            ) from None
+        labels = body.get("labels", {})
+        if body.get("name") != name or any(
+            labels.get(key) != spec["labels"][key] for key in ("operation-id", "payload-hash")
+        ):
+            raise BatchRejected(
+                f"Cloud Batch job {name} has a different operation or payload; "
+                "refusing to resume it"
+            )
+        return name
 
     async def wait(self, name: str) -> JobOutcome:
-        """Polls until the job ends, through any number of failed polls."""
-        while True:
-            try:
-                state = (await self._call("GET", name)).get("status", {}).get("state")
-            except BatchUnavailable:
-                state = None
-            if state in ENDED:
-                return ENDED[state]
-            await self._sleep(self._config.poll_seconds)
+        """Bound the whole wait, including failed or stalled polls."""
+        try:
+            async with asyncio.timeout(self._config.wait_timeout_seconds):
+                while True:
+                    try:
+                        state = (await self._call("GET", name)).get("status", {}).get("state")
+                    except BatchUnavailable:
+                        state = None
+                    if state in ENDED:
+                        return ENDED[state]
+                    await self._sleep(self._config.poll_seconds)
+        except TimeoutError:
+            raise BatchTimedOut(
+                f"Cloud Batch job {name} did not finish within "
+                f"{self._config.wait_timeout_seconds:g}s; it may still be running. "
+                "Check its status and wait for it to end or cancel it "
+                "before starting another download"
+            ) from None
 
     async def _call(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
         try:
@@ -74,15 +112,17 @@ class CloudBatchJobs:
             return body
         if status in TRANSIENT_STATUSES:
             raise BatchUnavailable(f"Cloud Batch answered HTTP {status}; rerun later")
+        if status == 409 and method == "POST":
+            raise _JobExists
         message = str(body.get("error", {}).get("message", "no message"))
         raise BatchRejected(f"Cloud Batch refused {method} {path} with HTTP {status}: {message}")
 
 
 def job_id(job: ShardJob) -> str:
-    """Lowercase letters, digits and hyphens, at most 63, and new for every submission."""
+    """At most 63 lowercase characters, stable for retries of the same operation."""
     part = f"-{job.part}" if job.part else ""
-    name = f"s2-{job.dataset.replace('_', '-')}-{job.release_id}{part}"[:54]
-    return f"{name}-{uuid.uuid4().hex[:8]}"
+    name = f"s2-{job.dataset.replace('_', '-')}-{job.release_id}{part}"[:30].rstrip("-")
+    return f"{name}-{job.operation_id.hex}"
 
 
 def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
@@ -90,7 +130,7 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
     command += ["--bucket", job.bucket, "--prefix", job.prefix]
     if job.from_release is not None and job.part is not None:
         command += ["--from-release", job.from_release, "--part", job.part]
-    return {
+    spec: dict[str, Any] = {
         "taskGroups": [
             {
                 # One task per entry; okp reads its shard from OKP_SHARD.
@@ -110,7 +150,14 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
         ],
         "allocationPolicy": {
             "serviceAccount": {"email": config.service_account},
-            "instances": [{"policy": {"machineType": config.machine_type}}],
+            "instances": [
+                {
+                    "policy": {
+                        "machineType": config.machine_type,
+                        "provisioningModel": config.provisioning_model,
+                    }
+                }
+            ],
             "network": {
                 "networkInterfaces": [{"network": config.network, "subnetwork": config.subnetwork}]
             },
@@ -119,6 +166,12 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
             "dataset": job.dataset.replace("_", "-"),
             "release": job.release_id,
             "part": job.part or "base",
+            "operation-id": job.operation_id.hex,
         },
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
     }
+    # Hash the submitted payload, before the hash label itself is added. Batch may expand
+    # defaults in GET responses, so comparing their complete JSON would reject valid retries.
+    payload = json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
+    spec["labels"]["payload-hash"] = hashlib.sha256(payload).hexdigest()[:63]
+    return spec

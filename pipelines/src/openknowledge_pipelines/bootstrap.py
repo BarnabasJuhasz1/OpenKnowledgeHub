@@ -118,8 +118,10 @@ async def open_batch_download(
         subnetwork=settings.batch_subnetwork,
         image=f"{settings.batch_image_repository}@{settings.image_digest}",
         machine_type=settings.batch_machine_type,
+        provisioning_model=settings.batch_provisioning_model,
         max_run_seconds=settings.batch_max_run_seconds,
         poll_seconds=settings.batch_poll_seconds,
+        wait_timeout_seconds=settings.batch_wait_timeout_seconds,
         environment={"OKP_IMAGE_DIGEST": settings.image_digest},
         secrets={"S2_API_KEY": settings.batch_s2_key_secret},
     )

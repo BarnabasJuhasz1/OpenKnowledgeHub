@@ -13,12 +13,19 @@ from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.config import ClickHouseConfig
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 
-# An insert sends nothing back until it ends, and GCP drops a connection idle for 10 minutes.
-KEEPALIVE = [
-    (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
-    (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 60),
-    (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 30),
-]
+
+def keepalive_options() -> list[tuple[int, int, int]]:
+    """Probe idle inserts before GCP drops their connection, using this platform's options."""
+    options = [(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)]
+    idle = getattr(socket, "TCP_KEEPIDLE", None)
+    if idle is None:
+        idle = getattr(socket, "TCP_KEEPALIVE", None)
+    if idle is not None:
+        options.append((socket.IPPROTO_TCP, idle, 60))
+    interval = getattr(socket, "TCP_KEEPINTVL", None)
+    if interval is not None:
+        options.append((socket.IPPROTO_TCP, interval, 30))
+    return options
 
 
 class ClickHouse(NamedTuple):
@@ -38,7 +45,7 @@ async def connect(
         },
         timeout=httpx.Timeout(config.timeout_seconds, connect=10.0),
         follow_redirects=False,
-        transport=transport or httpx.AsyncHTTPTransport(socket_options=KEEPALIVE),
+        transport=transport or httpx.AsyncHTTPTransport(socket_options=keepalive_options()),
     )
     async with http:
         client = ClickHouseClient(http, database=config.database)

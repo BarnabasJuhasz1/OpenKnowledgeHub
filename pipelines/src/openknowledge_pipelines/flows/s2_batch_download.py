@@ -22,6 +22,7 @@ from openknowledge_core.ingestion import (
     ShardJob,
     ShardJobs,
 )
+from openknowledge_core.ingestion.errors import ManifestIncomplete
 from openknowledge_pipelines.flows.s2_download import retry_transient
 
 type S2BatchDownloadFlow = Flow[[DownloadDataset], CoroutineType[Any, Any, BatchDownloadResult]]
@@ -86,19 +87,11 @@ def s2_batch_download_flows(
         cache_policy=NO_CACHE,
         persist_result=False,
     )
-    async def run_job(pinned: PinnedDataset, shards: tuple[int, ...], round_: int) -> str:
-        job = ShardJob(
-            release_id=pinned.release_id,
-            dataset=pinned.dataset,
-            bucket=pinned.bucket,
-            prefix=pinned.prefix,
-            shards=shards,
-            from_release=pinned.from_release,
-            part=pinned.part,
-        )
-        name = await jobs.submit(job)
+    async def run_job(job: ShardJob, round_: int) -> str:
         logger = get_run_logger()
-        logger.info("%s archives shards %s", name, ", ".join(map(str, shards)))
+        logger.info("Submitting Batch operation %s", job.operation_id)
+        name = await jobs.submit(job)
+        logger.info("%s archives shards %s", name, ", ".join(map(str, job.shards)))
         if await jobs.wait(name) is JobOutcome.FAILED:
             logger.warning("%s failed; the next round runs the shards still unfinished", name)
         return name
@@ -112,7 +105,16 @@ def s2_batch_download_flows(
         persist_result=False,
     )
     async def write_manifest(pinned: PinnedDataset) -> ObjectPath:
-        return await service.write_manifest(pinned)
+        try:
+            return await service.write_manifest(pinned)
+        except ManifestIncomplete as exc:
+            deployment = (
+                "s2-batch-download-diff" if pinned.part is not None else "s2-batch-download"
+            )
+            raise ManifestIncomplete(
+                f"{exc}. Start a new {deployment}/control-vm run with the same parameters "
+                "to archive the remaining shards"
+            ) from None
 
     async def archive(pinned: PinnedDataset) -> tuple[list[str], ObjectPath]:
         names: list[str] = []
@@ -120,7 +122,16 @@ def s2_batch_download_flows(
             shards = await find_unfinished(pinned)
             if not shards:
                 break
-            names.append(await run_job(pinned, shards, round_))
+            job = ShardJob(
+                release_id=pinned.release_id,
+                dataset=pinned.dataset,
+                bucket=pinned.bucket,
+                prefix=pinned.prefix,
+                shards=shards,
+                from_release=pinned.from_release,
+                part=pinned.part,
+            )
+            names.append(await run_job(job, round_))
         return names, await write_manifest(pinned)
 
     @flow(name="s2-batch-download", persist_result=False)

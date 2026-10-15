@@ -53,6 +53,20 @@ A run makes up to `OKP_TASK_RETRIES` more rounds for shards still without a rece
 `s2-batch-download-diff/control-vm` does the same for one dataset's diff to the next release, with a job per part that has files.
 Its tasks add `--from-release` and `--part` to `okp s2 download-shard`.
 
+Batch VMs use Spot by default; `OKP_BATCH_PROVISIONING_MODEL=STANDARD` selects standard VMs.
+Each submission keeps the same operation ID and job name across task retries, so a lost creation reply resumes that job rather than creating another one.
+The operation ID is logged before submission, and uncertain submission errors include the expected job name for recovery.
+`OKP_BATCH_WAIT_TIMEOUT_SECONDS` bounds each job's whole wait, including queued time and API outages, to 24 hours by default, separately from each task's `OKP_BATCH_MAX_RUN_SECONDS`.
+If that wait expires, the flow fails without submitting another job automatically: check the named job and let it finish or cancel it before starting another download run.
+
+Both Batch download deployments require the same persistent `PREFECT_API_URL` and share the global concurrency limit `s2-downloads`; load deployments remain independent.
+The first download creates this limit only if absent, with `active=true`, `limit=1` and no slot decay.
+Each download reserves a persistent slot before pinning or submitting work and releases it only after the whole download succeeds. Counter mutations never retry an uncertain response.
+Overlapping downloads are refused while the slot is occupied. Errors, timeouts and cancellation leave it occupied across worker restarts; it has no lease to expire and startup never resets it.
+To recover, inspect the failed flow's logged Batch job names and confirm every submitted job is terminal (`SUCCEEDED`, `FAILED` or `CANCELLED`); cancel and wait for any job still running.
+Then use Prefect's global concurrency limit UI to clear the active slot on `s2-downloads`, keeping `active=true`, `limit=1` and `slot_decay_per_second=0`, and rerun the download.
+Do not disable or delete the limit, change it during a download, or clear the slot while any prior job's state is unknown.
+
 ## Loading into ClickHouse
 
 ```sh
@@ -70,8 +84,11 @@ On the control VM, `okp serve` serves the same flow as the deployment `s2-load/c
 
 `okp s2 load-diff --from-release <release_id> --release <release_id> --dataset <name> --bucket <bucket>` loads one archived diff, its update files as upserts and then its delete files as tombstones, and `okp serve` serves it as `s2-load-diff/control-vm`.
 The `applied` table records each base load and diff that passed its checks, and a diff loads only into a table that holds the release it starts from or the one it brings, which is a rerun.
-A base loads only into an empty table or one holding the same release, and `publication-venues` also into one holding an older release.
+When lineage is recorded, a base loads only into an empty table or one holding the same release, and `publication-venues` also into one holding an older release.
 A load of `publication-venues`, which has no diffs, flags the venues its release no longer lists in `removed`.
+
+Load recovery still needs persisted ownership of a begun load and shared coordination per table.
+Until those are implemented, do not load a base over a populated table with missing lineage or overlap base and diff loads for the same dataset.
 
 Before a pull request:
 

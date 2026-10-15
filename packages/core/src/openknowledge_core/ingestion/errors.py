@@ -64,6 +64,10 @@ class BatchRejected(IngestionError):
     """Cloud Batch refused a call in a way a retry will not fix."""
 
 
+class BatchTimedOut(IngestionError):
+    """The job may still be running, so an automatic retry could start a concurrent download."""
+
+
 class ContractViolation(IngestionError):
     """A record breaks its dataset's contract, so its object stays unloaded."""
 
@@ -102,6 +106,10 @@ class StoredCopyMismatch(IntegrityError):
 
 class ReceiptInvalid(IntegrityError):
     pass
+
+
+class ManifestIncomplete(ReceiptInvalid):
+    """Some shards have no receipt yet, so their download must resume before publication."""
 
 
 class RowCountMismatch(IntegrityError):

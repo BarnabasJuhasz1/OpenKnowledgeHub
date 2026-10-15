@@ -18,6 +18,7 @@ from openknowledge_core.ingestion import (
     LoadDiffResult,
 )
 from openknowledge_pipelines import bootstrap
+from openknowledge_pipelines.download_coordination import exclusive_download
 from openknowledge_pipelines.settings import BatchSettings, LoadSettings
 
 DEPLOYMENT = "control-vm"
@@ -42,14 +43,14 @@ async def s2_load_diff(command: LoadDiff) -> LoadDiffResult:
 @flow(name="s2-batch-download", persist_result=False)
 async def s2_batch_download(command: DownloadDataset) -> BatchDownloadResult:
     settings = BatchSettings()  # pyright: ignore[reportCallIssue]
-    async with bootstrap.open_batch_download(settings) as (service, jobs):
+    async with exclusive_download(), bootstrap.open_batch_download(settings) as (service, jobs):
         return await bootstrap.batch_download_flows(service, jobs, settings).dataset.fn(command)
 
 
 @flow(name="s2-batch-download-diff", persist_result=False)
 async def s2_batch_download_diff(command: DownloadDiff) -> BatchDiffDownloadResult:
     settings = BatchSettings()  # pyright: ignore[reportCallIssue]
-    async with bootstrap.open_batch_download(settings) as (service, jobs):
+    async with exclusive_download(), bootstrap.open_batch_download(settings) as (service, jobs):
         return await bootstrap.batch_download_flows(service, jobs, settings).diff.fn(command)
 
 
@@ -59,8 +60,8 @@ def serve() -> None:
         RunnerDeployment.from_flow(
             s2_load_diff, DEPLOYMENT, entrypoint_type=EntrypointType.MODULE_PATH
         ),
-        # One run of each download at a time, since a run's tasks share the S2 key's one request
-        # per second. Prefect holds a second run until the first ends.
+        # Each deployment queues its own runs; exclusive_download shares the key's gate
+        # across both deployments, leaving load runs independent.
         *(
             RunnerDeployment.from_flow(
                 download,
