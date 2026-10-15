@@ -65,6 +65,10 @@ jobs:
             extra: gcs
             module: openknowledge_adapters.gcs
             tests: packages/adapters/tests/gcs
+          - package: openknowledge-adapters
+            extra: clickhouse
+            module: openknowledge_adapters.clickhouse
+            tests: packages/adapters/tests/clickhouse
           - package: openknowledge-pipelines
             tests: pipelines/tests
     steps:

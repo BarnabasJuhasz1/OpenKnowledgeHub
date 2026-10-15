@@ -73,6 +73,7 @@ name = "Imports point one way, from cli down to contracts"
 type = "layers"
 layers = [
     "openknowledge_pipelines.cli",
+    "openknowledge_pipelines.deployments",
     "openknowledge_pipelines.bootstrap",
     "openknowledge_pipelines.flows | openknowledge_pipelines.settings | openknowledge_adapters",
     "openknowledge_core",
@@ -111,13 +112,36 @@ forbidden_modules = ["httpx", "aiohttp", "google", "gcloud"]
 name = "The Semantic Scholar adapter imports only its own extra"
 type = "forbidden"
 source_modules = ["openknowledge_adapters.semantic_scholar"]
-forbidden_modules = ["google", "gcloud", "aiohttp", "openknowledge_adapters.gcs"]
+forbidden_modules = [
+    "google",
+    "gcloud",
+    "aiohttp",
+    "openknowledge_adapters.gcs",
+    "openknowledge_adapters.clickhouse",
+]
 
 [[tool.importlinter.contracts]]
 name = "The GCS adapter imports only its own extra"
 type = "forbidden"
 source_modules = ["openknowledge_adapters.gcs"]
-forbidden_modules = ["httpx", "google", "openknowledge_adapters.semantic_scholar"]
+forbidden_modules = [
+    "httpx",
+    "google",
+    "openknowledge_adapters.semantic_scholar",
+    "openknowledge_adapters.clickhouse",
+]
+
+[[tool.importlinter.contracts]]
+name = "The ClickHouse adapter imports only its own extra"
+type = "forbidden"
+source_modules = ["openknowledge_adapters.clickhouse"]
+forbidden_modules = [
+    "google",
+    "gcloud",
+    "aiohttp",
+    "openknowledge_adapters.gcs",
+    "openknowledge_adapters.semantic_scholar",
+]
 
 [[tool.importlinter.contracts]]
 name = "No import cycles between sibling modules"

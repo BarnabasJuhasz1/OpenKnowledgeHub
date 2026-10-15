@@ -1,6 +1,6 @@
 -- +goose NO TRANSACTION
 -- +goose Up
-CREATE TABLE paper_ids
+CREATE TABLE IF NOT EXISTS paper_ids
 (
     sha String,
     corpusid UInt64,
@@ -14,4 +14,4 @@ ENGINE = ReplacingMergeTree(version, is_deleted)
 ORDER BY sha;
 
 -- +goose Down
-DROP TABLE paper_ids;
+DROP TABLE IF EXISTS paper_ids;

@@ -8,6 +8,7 @@ from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
+from uuid import UUID
 
 from pydantic import SecretStr
 
@@ -16,6 +17,7 @@ from openknowledge_contracts.manifests import ObjectPath, ObjectRef, Producer
 from openknowledge_core.ingestion.commands import DownloadDataset
 from openknowledge_core.ingestion.errors import (
     IncompleteTransfer,
+    IngestionError,
     LinkExpired,
     ObjectChanged,
     SourceUnavailable,
@@ -24,8 +26,11 @@ from openknowledge_core.ingestion.models import (
     ByteStream,
     CheckedStream,
     DatasetListing,
+    LoadObject,
+    LoadRecord,
     ShardLink,
     StoredObject,
+    TableState,
 )
 from tests.fakes.checksums import crc32c_b64, md5_b64
 
@@ -237,3 +242,40 @@ class FakeStore:
         current = self.objects.get(str(ref.path))
         if current is None or current.generation != ref.generation:
             raise ObjectChanged(f"{ref.path} changed generation while it was read")
+
+
+class FakeTables:
+    """ClickHouse as the loader sees it, counting rows per object."""
+
+    def __init__(self, store: FakeStore) -> None:
+        self.store = store
+        self.uuid = UUID(int=1)
+        self.rows: dict[str, int] = {}
+        self.records: dict[str, LoadRecord] = {}
+        self.loads: list[str] = []
+        self.failures: list[IngestionError] = []
+        self.short_by = 0
+        self.repeated_keys = 0
+
+    async def table(self, dataset: str) -> TableState:
+        return TableState(
+            name=dataset, uuid=self.uuid, has_rows=bool(self.rows), load_sql_sha256="0" * 64
+        )
+
+    async def loaded(self, dataset: str, source_object: ObjectPath) -> LoadRecord | None:
+        return self.records.get(str(source_object))
+
+    async def load(self, request: LoadObject) -> int:
+        path = request.object_ref.path
+        self.loads.append(path.name.rsplit("/", 1)[-1])
+        if self.failures:
+            raise self.failures.pop(0)
+        lines = gzip.decompress(self.store.data(path)).count(b"\n")
+        self.rows[str(path)] = lines - self.short_by
+        return self.rows[str(path)]
+
+    async def record(self, record: LoadRecord) -> None:
+        self.records[record.source_object] = record
+
+    async def live_rows(self, dataset: str, release: str) -> int:
+        return sum(self.rows.values()) - self.repeated_keys

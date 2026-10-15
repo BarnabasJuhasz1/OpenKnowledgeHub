@@ -1,0 +1,10 @@
+<clickhouse>
+    <listen_host replace="true">0.0.0.0</listen_host>
+    <named_collections>
+        <raw>
+            <url overridable="false">http://gcs:4443/openknowledge-508216-raw/</url>
+            <access_key_id from_env="GCS_HMAC_KEY_ID" overridable="false" />
+            <secret_access_key from_env="GCS_HMAC_SECRET" overridable="false" />
+        </raw>
+    </named_collections>
+</clickhouse>

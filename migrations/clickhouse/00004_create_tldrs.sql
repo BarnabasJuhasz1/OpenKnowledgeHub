@@ -1,6 +1,6 @@
 -- +goose NO TRANSACTION
 -- +goose Up
-CREATE TABLE tldrs
+CREATE TABLE IF NOT EXISTS tldrs
 (
     corpusid UInt64,
     model String,
@@ -14,4 +14,4 @@ ENGINE = ReplacingMergeTree(version, is_deleted)
 ORDER BY corpusid;
 
 -- +goose Down
-DROP TABLE tldrs;
+DROP TABLE IF EXISTS tldrs;

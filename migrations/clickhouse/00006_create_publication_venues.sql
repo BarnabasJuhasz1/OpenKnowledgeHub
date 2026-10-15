@@ -1,6 +1,6 @@
 -- +goose NO TRANSACTION
 -- +goose Up
-CREATE TABLE publication_venues
+CREATE TABLE IF NOT EXISTS publication_venues
 (
     id String,
     name String,
@@ -19,4 +19,4 @@ ENGINE = ReplacingMergeTree(version, is_deleted)
 ORDER BY id;
 
 -- +goose Down
-DROP TABLE publication_venues;
+DROP TABLE IF EXISTS publication_venues;

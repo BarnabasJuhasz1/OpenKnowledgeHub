@@ -10,8 +10,11 @@ from openknowledge_core.ingestion.models import (
     ByteStream,
     CheckedStream,
     DatasetListing,
+    LoadObject,
+    LoadRecord,
     ShardLink,
     StoredObject,
+    TableState,
 )
 
 
@@ -49,3 +52,19 @@ class ArtifactStore(Protocol):
     async def open_read(self, ref: ObjectRef) -> ByteStream:
         """Read exactly ``ref.generation``, or raise ObjectChanged if it is gone."""
         ...
+
+
+class TableLoader(Protocol):
+    async def table(self, dataset: DatasetName) -> TableState: ...
+
+    async def loaded(
+        self, dataset: DatasetName, source_object: ObjectPath
+    ) -> LoadRecord | None: ...
+
+    async def load(self, request: LoadObject) -> int:
+        """Insert every record of the object and return the rows written."""
+        ...
+
+    async def record(self, record: LoadRecord) -> None: ...
+
+    async def live_rows(self, dataset: DatasetName, release: ReleaseId) -> int: ...

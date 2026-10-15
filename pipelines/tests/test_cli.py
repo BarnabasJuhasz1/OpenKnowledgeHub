@@ -8,14 +8,21 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from prefect.deployments.runner import RunnerDeployment
+from prefect.flows import load_flow_from_entrypoint
 
-from openknowledge_core.ingestion import DownloadDatasetService
-from openknowledge_pipelines import bootstrap, cli
-from openknowledge_pipelines.settings import PipelineSettings
-from tests.fakes.ports import PAPERS, FakeSource
+from openknowledge_core.ingestion import DownloadDatasetService, LoadDatasetService
+from openknowledge_pipelines import bootstrap, cli, deployments
+from openknowledge_pipelines.settings import LoadSettings, PipelineSettings
+from tests.fakes.ports import PAPERS, PRODUCER, FakeSource, FakeStore, FakeTables, clock
 
 ROOT = Path(__file__).resolve().parents[2]
 TARGET = ["--bucket", "raw", "--prefix", "s2"]
+LOAD_ENV = {
+    "OKP_CLICKHOUSE_URL": "http://clickhouse:8123",
+    "CLICKHOUSE_PASSWORD": "dev",
+    "OKP_CLICKHOUSE_RAW_BUCKET": "raw",
+}
 
 
 def okp(*args: str) -> tuple[int, str]:
@@ -97,6 +104,43 @@ def test_bad_options_exit_2(args: list[str], message: str) -> None:
     code, output = okp(*args)
     assert code == 2
     assert message in output
+
+
+@pytest.mark.usefixtures("prefect_server")
+def test_load_runs_the_flow_without_an_s2_key(
+    monkeypatch: pytest.MonkeyPatch, wired: DownloadDatasetService, store: FakeStore
+) -> None:
+    assert okp("download", "--release", "2026-10-06", "--dataset", "papers", *TARGET)[0] == 0
+
+    @asynccontextmanager
+    async def open_load_service(settings: LoadSettings) -> AsyncGenerator[LoadDatasetService]:
+        yield LoadDatasetService(
+            store=store, tables=FakeTables(store), producer=PRODUCER, clock=clock
+        )
+
+    monkeypatch.setattr(bootstrap, "open_load_service", open_load_service)
+    monkeypatch.delenv("S2_API_KEY")
+    for name, value in LOAD_ENV.items():
+        monkeypatch.setenv(name, value)
+    code, output = okp("load", "--release", "2026-10-06", "--dataset", "papers", *TARGET)
+    assert code == 0, output
+    assert json.loads(output.splitlines()[-1])["loaded"] == 2
+
+
+def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    served: list[RunnerDeployment] = []
+
+    def fake_serve(*found: RunnerDeployment, limit: int) -> None:
+        served.extend(found)
+
+    monkeypatch.setattr(deployments, "prefect_serve", fake_serve)
+    for name, value in LOAD_ENV.items():
+        monkeypatch.setenv(name, value)
+    result = CliRunner().invoke(cli.main, ["serve"])
+    assert result.exit_code == 0, result.output
+    [deployment] = served
+    assert deployment.entrypoint is not None
+    assert load_flow_from_entrypoint(deployment.entrypoint) is deployments.s2_load
 
 
 def test_a_missing_key_fails_before_anything_opens(monkeypatch: pytest.MonkeyPatch) -> None:

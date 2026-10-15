@@ -392,7 +392,7 @@ class DownloadDatasetService:
     ) -> ShardReceipt:
         """Accept a receipt only when it and the object it names agree on every field."""
         path = stored.ref.path
-        data = await self._read(stored, RECEIPT_LIMIT)
+        data = await read_small(self._store, stored, RECEIPT_LIMIT)
         if data is None:
             raise ReceiptInvalid(f"{path} is larger than a receipt can be; {_delete_hint(path)}")
         try:
@@ -441,18 +441,6 @@ class DownloadDatasetService:
             )
         return receipt
 
-    async def _read(self, stored: StoredObject, limit: int) -> bytes | None:
-        if stored.size > limit:
-            return None
-        source = await self._store.open_read(stored.ref)
-        data = bytearray()
-        async with aclosing(source.chunks) as chunks:
-            async for chunk in chunks:
-                data += chunk
-                if len(data) > limit:
-                    return None
-        return bytes(data)
-
     async def _archive[D: ArchiveDocument](
         self,
         path: ObjectPath,
@@ -476,7 +464,7 @@ class DownloadDatasetService:
         stored = await self._store.stat(path)
         if stored is None:
             raise _vanished(path)
-        existing_data = await self._read(stored, DOCUMENT_LIMIT)
+        existing_data = await read_small(self._store, stored, DOCUMENT_LIMIT)
         if existing_data is None:
             raise ArchiveConflict(f"{path} is larger than a {kind} can be; {_delete_hint(path)}")
         try:
@@ -493,6 +481,19 @@ class DownloadDatasetService:
                 f"it stays as it is, so compare it with {compare_with} before anyone removes it"
             )
         return existing
+
+
+async def read_small(store: ArtifactStore, stored: StoredObject, limit: int) -> bytes | None:
+    if stored.size > limit:
+        return None
+    source = await store.open_read(stored.ref)
+    data = bytearray()
+    async with aclosing(source.chunks) as chunks:
+        async for chunk in chunks:
+            data += chunk
+            if len(data) > limit:
+                return None
+    return bytes(data)
 
 
 def _verified(chunks: AsyncIterator[bytes], check: StreamCheck, size: int) -> CheckedStream:

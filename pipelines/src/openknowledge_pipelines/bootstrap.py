@@ -8,13 +8,14 @@ from datetime import UTC, datetime
 from importlib.metadata import version
 from typing import TYPE_CHECKING
 
-from openknowledge_adapters import gcs, semantic_scholar
+from openknowledge_adapters import clickhouse, gcs, semantic_scholar
 from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
-from openknowledge_core.ingestion import DownloadDatasetService
-from openknowledge_pipelines.settings import PipelineSettings
+from openknowledge_core.ingestion import DownloadDatasetService, LoadDatasetService
+from openknowledge_pipelines.settings import CommonSettings, LoadSettings, PipelineSettings
 
 if TYPE_CHECKING:
     from openknowledge_pipelines.flows.s2_download import S2DownloadFlow
+    from openknowledge_pipelines.flows.s2_load import S2LoadFlow
 
 
 @asynccontextmanager
@@ -29,11 +30,7 @@ async def open_service(settings: PipelineSettings) -> AsyncGenerator[DownloadDat
         download_connect_timeout_seconds=settings.download_connect_timeout_seconds,
         download_read_timeout_seconds=settings.download_read_timeout_seconds,
     )
-    gcs_config = gcs.GcsConfig(
-        request_timeout_seconds=settings.gcs_request_timeout_seconds,
-        min_transfer_rate=settings.gcs_min_transfer_bytes_per_second,
-    )
-    async with semantic_scholar.connect(s2_config) as s2, gcs.connect(gcs_config) as store:
+    async with semantic_scholar.connect(s2_config) as s2, gcs.connect(_gcs(settings)) as store:
         yield DownloadDatasetService(
             catalog=s2.catalog,
             downloads=s2.downloads,
@@ -43,7 +40,36 @@ async def open_service(settings: PipelineSettings) -> AsyncGenerator[DownloadDat
         )
 
 
-def producer(settings: PipelineSettings) -> Producer:
+@asynccontextmanager
+async def open_load_service(settings: LoadSettings) -> AsyncGenerator[LoadDatasetService, None]:
+    clickhouse_config = clickhouse.ClickHouseConfig(
+        url=settings.clickhouse_url,
+        user=settings.clickhouse_user,
+        password=settings.clickhouse_password,
+        raw_bucket=settings.clickhouse_raw_bucket,
+        timeout_seconds=settings.clickhouse_timeout_seconds,
+    )
+    async with (
+        gcs.connect(_gcs(settings)) as store,
+        clickhouse.connect(clickhouse_config) as tables,
+    ):
+        yield LoadDatasetService(
+            store=store,
+            tables=tables,
+            producer=producer(settings),
+            clock=lambda: datetime.now(UTC),
+        )
+
+
+def _gcs(settings: CommonSettings) -> gcs.GcsConfig:
+    return gcs.GcsConfig(
+        request_timeout_seconds=settings.gcs_request_timeout_seconds,
+        min_transfer_rate=settings.gcs_min_transfer_bytes_per_second,
+        api_root=settings.gcs_api_root,
+    )
+
+
+def producer(settings: CommonSettings) -> Producer:
     return Producer(
         transform="verbatim",
         transform_version=TRANSFORM_VERSION,
@@ -57,6 +83,16 @@ def download_flow(service: DownloadDatasetService, settings: PipelineSettings) -
     from openknowledge_pipelines.flows.s2_download import s2_download_flow
 
     return s2_download_flow(
+        service,
+        task_retries=settings.task_retries,
+        retry_delay_seconds=settings.task_retry_delay_seconds,
+    )
+
+
+def load_flow(service: LoadDatasetService, settings: LoadSettings) -> S2LoadFlow:
+    from openknowledge_pipelines.flows.s2_load import s2_load_flow
+
+    return s2_load_flow(
         service,
         task_retries=settings.task_retries,
         retry_delay_seconds=settings.task_retry_delay_seconds,

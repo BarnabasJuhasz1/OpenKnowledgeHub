@@ -1,0 +1,25 @@
+<!-- infra's users, except that openknowledge connects from the Docker host, not the VPC. -->
+<clickhouse>
+    <users>
+        <default>
+            <password from_env="CLICKHOUSE_PASSWORD" />
+            <networks replace="true">
+                <ip>127.0.0.1</ip>
+                <ip>::1</ip>
+            </networks>
+        </default>
+        <openknowledge>
+            <password from_env="OPENKNOWLEDGE_PASSWORD" />
+            <networks>
+                <ip>::/0</ip>
+            </networks>
+            <profile>default</profile>
+            <quota>default</quota>
+            <grants>
+                <query>GRANT ALL ON openknowledge.*</query>
+                <query>GRANT NAMED COLLECTION ON raw</query>
+                <query>GRANT READ ON S3('^http://gcs:4443/openknowledge-508216-raw/.*$')</query>
+            </grants>
+        </openknowledge>
+    </users>
+</clickhouse>
