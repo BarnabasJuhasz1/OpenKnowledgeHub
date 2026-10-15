@@ -19,7 +19,7 @@ from openknowledge_core.ingestion import (
 from openknowledge_core.ingestion.errors import ContractViolation, GzipInvalid, TableUnavailable
 from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flows
 from openknowledge_pipelines.flows.s2_download import S2DownloadFlow, s2_download_flow
-from openknowledge_pipelines.flows.s2_load import S2LoadFlow, s2_load_flow
+from openknowledge_pipelines.flows.s2_load import S2LoadFlow, s2_load_flows
 from tests.fakes.ports import (
     COMMAND,
     DIFF,
@@ -103,7 +103,7 @@ def load_flow(store: FakeStore, tables: FakeTables) -> S2LoadFlow:
     loader = LoadDatasetService(
         store=store, tables=tables, applied=FakeApplied(), producer=PRODUCER, clock=clock
     )
-    return s2_load_flow(loader, task_retries=2, retry_delay_seconds=0)
+    return s2_load_flows(loader, task_retries=2, retry_delay_seconds=0).dataset
 
 
 async def test_the_load_flow_loads_each_object_once(

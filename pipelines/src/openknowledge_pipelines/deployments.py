@@ -14,6 +14,8 @@ from openknowledge_core.ingestion import (
     DownloadDiff,
     LoadDataset,
     LoadDatasetResult,
+    LoadDiff,
+    LoadDiffResult,
 )
 from openknowledge_pipelines import bootstrap
 from openknowledge_pipelines.settings import BatchSettings, LoadSettings
@@ -27,7 +29,14 @@ async def s2_load(command: LoadDataset) -> LoadDatasetResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]  # fields come from the environment
     async with bootstrap.open_load_service(settings) as service:
         # fn runs the body in this flow run, so its tasks do not start a subflow.
-        return await bootstrap.load_flow(service, settings).fn(command)
+        return await bootstrap.load_flows(service, settings).dataset.fn(command)
+
+
+@flow(name="s2-load-diff", persist_result=False)
+async def s2_load_diff(command: LoadDiff) -> LoadDiffResult:
+    settings = LoadSettings()  # pyright: ignore[reportCallIssue]
+    async with bootstrap.open_load_service(settings) as service:
+        return await bootstrap.load_flows(service, settings).diff.fn(command)
 
 
 @flow(name="s2-batch-download", persist_result=False)
@@ -47,6 +56,9 @@ async def s2_batch_download_diff(command: DownloadDiff) -> BatchDiffDownloadResu
 def serve() -> None:
     prefect_serve(
         RunnerDeployment.from_flow(s2_load, DEPLOYMENT, entrypoint_type=EntrypointType.MODULE_PATH),
+        RunnerDeployment.from_flow(
+            s2_load_diff, DEPLOYMENT, entrypoint_type=EntrypointType.MODULE_PATH
+        ),
         # One run of each download at a time, since a run's tasks share the S2 key's one request
         # per second. Prefect holds a second run until the first ends.
         *(

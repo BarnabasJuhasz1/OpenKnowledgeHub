@@ -21,7 +21,7 @@ from openknowledge_pipelines.settings import (
 if TYPE_CHECKING:
     from openknowledge_pipelines.flows.s2_batch_download import S2BatchDownloadFlows
     from openknowledge_pipelines.flows.s2_download import S2DownloadFlow
-    from openknowledge_pipelines.flows.s2_load import S2LoadFlow
+    from openknowledge_pipelines.flows.s2_load import S2LoadFlows
 
 
 @asynccontextmanager
@@ -96,10 +96,10 @@ def download_flow(service: DownloadDatasetService, settings: PipelineSettings) -
     )
 
 
-def load_flow(service: LoadDatasetService, settings: LoadSettings) -> S2LoadFlow:
-    from openknowledge_pipelines.flows.s2_load import s2_load_flow
+def load_flows(service: LoadDatasetService, settings: LoadSettings) -> S2LoadFlows:
+    from openknowledge_pipelines.flows.s2_load import s2_load_flows
 
-    return s2_load_flow(
+    return s2_load_flows(
         service,
         task_retries=settings.task_retries,
         retry_delay_seconds=settings.task_retry_delay_seconds,

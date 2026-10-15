@@ -68,6 +68,11 @@ A rerun skips an object whose row matches its generation, its checksum, the tabl
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.
 
+`okp s2 load-diff --from-release <release_id> --release <release_id> --dataset <name> --bucket <bucket>` loads one archived diff, its update files as upserts and then its delete files as tombstones, and `okp serve` serves it as `s2-load-diff/control-vm`.
+The `applied` table records each base load and diff that passed its checks, and a diff loads only into a table that holds the release it starts from or the one it brings, which is a rerun.
+A base loads only into an empty table or one holding the same release, and `publication-venues` also into one holding an older release.
+A load of `publication-venues`, which has no diffs, flags the venues its release no longer lists in `removed`.
+
 Before a pull request:
 
 ```sh
