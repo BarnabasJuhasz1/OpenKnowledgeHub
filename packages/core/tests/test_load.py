@@ -9,7 +9,13 @@ from openknowledge_core.ingestion import (
     LoadDatasetResult,
     LoadDatasetService,
 )
-from openknowledge_core.ingestion.errors import ObjectChanged, RowCountMismatch
+from openknowledge_core.ingestion.errors import (
+    ConflictingKeys,
+    IngestionError,
+    ObjectChanged,
+    RowCountMismatch,
+)
+from openknowledge_core.ingestion.models import Duplicates
 from tests.fakes.ports import COMMAND, PAPERS, PRODUCER, FakeSource, FakeStore, FakeTables, clock
 
 LOAD = LoadDataset(**COMMAND.model_dump())
@@ -42,6 +48,7 @@ async def test_a_rerun_skips_every_loaded_object(store: FakeStore, tables: FakeT
     assert (first.loaded, first.already_loaded, first.live_rows) == (2, 0, 51)
     assert (again.loaded, again.already_loaded) == (0, 2)
     assert len(tables.loads) == 2
+    assert tables.scanned == []
 
 
 @pytest.mark.parametrize("change", ["recreated", "truncated"])
@@ -72,7 +79,38 @@ async def test_missing_rows_fail_the_load(store: FakeStore, tables: FakeTables) 
     assert tables.records == {}
 
 
-async def test_repeated_keys_fail_the_load(store: FakeStore, tables: FakeTables) -> None:
-    tables.repeated_keys = 1
-    with pytest.raises(RowCountMismatch, match="keys repeat"):
+async def test_keys_repeated_identically_are_counted(store: FakeStore, tables: FakeTables) -> None:
+    tables.collapsed = 1
+    tables.found = Duplicates(identical_rows=1, conflicting_keys=0, examples=())
+    result = await load(store, tables)
+    assert (result.live_rows, result.identical_duplicates) == (50, 1)
+    assert tables.scanned == ["part-0.gz", "part-1.gz"]
+
+
+@pytest.mark.parametrize(
+    ("found", "error", "message"),
+    [
+        (
+            Duplicates(identical_rows=0, conflicting_keys=1, examples=("(7)",)),
+            ConflictingKeys,
+            r"\(1, such as \(7\)\)",
+        ),
+        (
+            Duplicates(identical_rows=0, conflicting_keys=0, examples=()),
+            RowCountMismatch,
+            "0 of them repeat",
+        ),
+    ],
+    ids=["conflicting", "unexplained"],
+)
+async def test_other_repeated_keys_fail_the_load(
+    store: FakeStore,
+    tables: FakeTables,
+    found: Duplicates,
+    error: type[IngestionError],
+    message: str,
+) -> None:
+    tables.collapsed = 1
+    tables.found = found
+    with pytest.raises(error, match=message):
         await load(store, tables)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal, Protocol
 
 from openknowledge_contracts.datasets import DatasetName, ReleaseId, ReleaseMetadata
@@ -10,6 +11,7 @@ from openknowledge_core.ingestion.models import (
     ByteStream,
     CheckedStream,
     DatasetListing,
+    Duplicates,
     LoadObject,
     LoadRecord,
     ShardLink,
@@ -68,3 +70,7 @@ class TableLoader(Protocol):
     async def record(self, record: LoadRecord) -> None: ...
 
     async def live_rows(self, dataset: DatasetName, release: ReleaseId) -> int: ...
+
+    async def duplicates(self, dataset: DatasetName, objects: Sequence[ObjectPath]) -> Duplicates:
+        """Keys that repeat across the objects, which are read again."""
+        ...

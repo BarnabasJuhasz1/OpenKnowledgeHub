@@ -90,3 +90,7 @@ class ReceiptInvalid(IntegrityError):
 
 class RowCountMismatch(IntegrityError):
     pass
+
+
+class ConflictingKeys(IntegrityError):
+    """A key repeats in a release with other values, so load order picks its row."""

@@ -15,6 +15,8 @@ import pyarrow as pa
 import pytest
 
 from openknowledge_adapters.clickhouse.load_sql import (
+    duplicates_parameters,
+    duplicates_query,
     problems_query,
     query_parameters,
     upsert_query,
@@ -342,6 +344,48 @@ def test_an_upsert_stops_at_a_refused_record(contract: DatasetContract, tmp_path
     sql = f"{migration(contract)}\n{upsert_query(contract, 'file')};"
     result = run(sql, tmp_path, **params(source))
     assert f"Code: 395. DB::Exception: {case.problem}: " in result.stderr
+
+
+@needs_clickhouse
+@contracts
+def test_a_repeated_key_is_identical_or_conflicting(
+    contract: DatasetContract, tmp_path: Path
+) -> None:
+    """Key order and spacing do not tell repeats apart, and nulls do; a changed value does."""
+    first, nulls, inner_nulls, last = accepted(contract)
+    changed = next(
+        f.name
+        for f in fields_of(contract.source)
+        if f.name not in contract.key
+        and _kind(f.type) == "scalar"
+        and not isinstance(f.type, pa.JsonType)
+    )
+    value = first[changed]
+    other = (
+        not value
+        if isinstance(value, bool)
+        else value - 1
+        if isinstance(value, int)
+        else f"{value}!"
+    )
+    swapped = [
+        json.dumps(dict(reversed(record.items())), separators=(",", ":"))
+        for record in (nulls, inner_nulls)
+    ]
+    files = [
+        gz(tmp_path / "part-0.gz", [json.dumps(r) for r in (first, nulls, inner_nulls)]),
+        gz(
+            tmp_path / "part-1.gz",
+            [*swapped, json.dumps({**first, changed: other}), json.dumps(last)],
+        ),
+    ]
+    found = clickhouse_local(
+        duplicates_query(contract, len(files), "file") + "\nFORMAT JSONEachRow",
+        tmp_path,
+        **duplicates_parameters([str(file) for file in files]),
+    )
+    key = first[contract.key[0]]
+    assert found == [{"identical_rows": 2, "conflicting_keys": 1, "examples": [f"({key!r})"]}]
 
 
 @contracts

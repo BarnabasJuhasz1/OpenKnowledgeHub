@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import gzip
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -26,6 +26,7 @@ from openknowledge_core.ingestion.models import (
     ByteStream,
     CheckedStream,
     DatasetListing,
+    Duplicates,
     LoadObject,
     LoadRecord,
     ShardLink,
@@ -255,7 +256,9 @@ class FakeTables:
         self.loads: list[str] = []
         self.failures: list[IngestionError] = []
         self.short_by = 0
-        self.repeated_keys = 0
+        self.collapsed = 0
+        self.found = Duplicates(identical_rows=0, conflicting_keys=0, examples=())
+        self.scanned: list[str] = []
 
     async def table(self, dataset: str) -> TableState:
         return TableState(
@@ -278,4 +281,8 @@ class FakeTables:
         self.records[record.source_object] = record
 
     async def live_rows(self, dataset: str, release: str) -> int:
-        return sum(self.rows.values()) - self.repeated_keys
+        return sum(self.rows.values()) - self.collapsed
+
+    async def duplicates(self, dataset: str, objects: Sequence[ObjectPath]) -> Duplicates:
+        self.scanned = [path.name.rsplit("/", 1)[-1] for path in objects]
+        return self.found

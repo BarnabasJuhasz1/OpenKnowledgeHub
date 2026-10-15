@@ -14,7 +14,12 @@ from datetime import datetime
 from openknowledge_contracts.datasets import MANIFEST_NAME
 from openknowledge_contracts.manifests import DatasetManifest, ManifestEntry, Producer
 from openknowledge_core.ingestion.commands import LoadDataset, LoadDatasetResult
-from openknowledge_core.ingestion.errors import ManifestInvalid, ObjectChanged, RowCountMismatch
+from openknowledge_core.ingestion.errors import (
+    ConflictingKeys,
+    ManifestInvalid,
+    ObjectChanged,
+    RowCountMismatch,
+)
 from openknowledge_core.ingestion.models import (
     LoadObject,
     LoadOutcome,
@@ -100,15 +105,15 @@ class LoadDatasetService:
     async def finish(
         self, prepared: PreparedLoad, outcomes: Iterable[LoadOutcome]
     ) -> LoadDatasetResult:
-        """A base release holds each key once, so its live rows must equal its records."""
+        """A base release holds each key once, so its live rows must equal its records.
+
+        Only when they differ are the objects read again, to tell identical repeats, which are
+        counted, from conflicting ones.
+        """
         manifest = prepared.manifest
         records = sum(entry.records for entry in manifest.entries)
         live = await self._tables.live_rows(manifest.dataset, manifest.release_id)
-        if live != records:
-            raise RowCountMismatch(
-                f"{prepared.table.name} holds {live} live rows of {manifest.release_id}, but "
-                f"{prepared.manifest_path} counts {records} records, so keys repeat in the release"
-            )
+        identical = 0 if live == records else await self._identical(prepared, records, live)
         counts = Counter(outcomes)
         return LoadDatasetResult(
             release_id=manifest.release_id,
@@ -118,8 +123,28 @@ class LoadDatasetService:
             loaded=counts[LoadOutcome.LOADED],
             already_loaded=counts[LoadOutcome.ALREADY_LOADED],
             live_rows=live,
+            identical_duplicates=identical,
             manifest=prepared.manifest_path,
         )
+
+    async def _identical(self, prepared: PreparedLoad, records: int, live: int) -> int:
+        """The records that repeat a key with its values, which must be every row not live."""
+        manifest, path = prepared.manifest, prepared.manifest_path
+        found = await self._tables.duplicates(
+            manifest.dataset, [entry.object_ref.path for entry in manifest.entries]
+        )
+        if found.conflicting_keys:
+            raise ConflictingKeys(
+                f"keys repeat in {path} with other values ({found.conflicting_keys}, such as "
+                f"{', '.join(found.examples)}); the row each keeps depends on load order"
+            )
+        if found.identical_rows != records - live:
+            raise RowCountMismatch(
+                f"{prepared.table.name} holds {live} live rows of {manifest.release_id}, but "
+                f"{path} counts {records} records, and {found.identical_rows} of them repeat "
+                "a key identically"
+            )
+        return found.identical_rows
 
 
 def _current(record: LoadRecord, entry: ManifestEntry, prepared: PreparedLoad) -> bool:
