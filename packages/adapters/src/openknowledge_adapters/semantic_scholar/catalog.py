@@ -23,7 +23,7 @@ from openknowledge_core.ingestion.errors import (
     SourceRejected,
     SourceUnavailable,
 )
-from openknowledge_core.ingestion.models import DatasetListing, ShardLink
+from openknowledge_core.ingestion.models import DatasetListing, DiffChain, DiffListing, ShardLink
 
 KEY_REFUSED_STATUSES = frozenset({401, 403})
 AGAIN = "rerun later, and report it to Semantic Scholar if it repeats"
@@ -37,6 +37,24 @@ class _DatasetBody(BaseModel):
 
     name: str
     files: list[str]
+
+
+class _DiffBody(BaseModel):
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
+
+    from_release: str
+    to_release: str
+    update_files: list[str]
+    delete_files: list[str]
+
+
+class _DiffChainBody(BaseModel):
+    """The diffs endpoint's answer, whose links leave only inside SecretStr, like a listing's."""
+
+    model_config = ConfigDict(extra="allow", hide_input_in_errors=True)
+
+    dataset: str
+    diffs: list[_DiffBody]
 
 
 class SemanticScholarCatalog:
@@ -86,6 +104,33 @@ class SemanticScholarCatalog:
                 f"{AGAIN}"
             )
         return DatasetListing(summary=summary, links=tuple(_link(url) for url in parsed.files))
+
+    async def list_diffs(
+        self, start: ReleaseId, end: ReleaseId | Literal["latest"], dataset: DatasetName
+    ) -> DiffChain:
+        about = f"diffs of {dataset} from {start} to {end}"
+        body = await self._get(_path("diffs", start, "to", end, dataset), about, authenticated=True)
+        try:
+            parsed = _DiffChainBody.model_validate(body)
+            chain = DiffChain(
+                dataset=parsed.dataset,
+                diffs=tuple(
+                    DiffListing(
+                        from_release=diff.from_release,
+                        release_id=diff.to_release,
+                        updates=tuple(_link(url) for url in diff.update_files),
+                        deletes=tuple(_link(url) for url in diff.delete_files),
+                    )
+                    for diff in parsed.diffs
+                ),
+            )
+        except ValidationError:
+            chain = None
+        if chain is None:
+            raise SourceRejected(
+                f"the {about} Semantic Scholar sent have missing or malformed fields; {AGAIN}"
+            )
+        return chain
 
     async def _get(self, path: str, about: str, *, authenticated: bool) -> object:
         headers = {"x-api-key": self._key.get_secret_value()} if authenticated else {}

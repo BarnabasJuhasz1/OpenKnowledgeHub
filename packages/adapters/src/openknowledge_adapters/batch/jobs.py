@@ -80,13 +80,16 @@ class CloudBatchJobs:
 
 def job_id(job: ShardJob) -> str:
     """Lowercase letters, digits and hyphens, at most 63, and new for every submission."""
-    name = f"s2-{job.dataset.replace('_', '-')}-{job.release_id}"[:54]
+    part = f"-{job.part}" if job.part else ""
+    name = f"s2-{job.dataset.replace('_', '-')}-{job.release_id}{part}"[:54]
     return f"{name}-{uuid.uuid4().hex[:8]}"
 
 
 def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
     command = ["s2", "download-shard", "--release", job.release_id, "--dataset", job.dataset]
     command += ["--bucket", job.bucket, "--prefix", job.prefix]
+    if job.from_release is not None and job.part is not None:
+        command += ["--from-release", job.from_release, "--part", job.part]
     return {
         "taskGroups": [
             {
@@ -112,6 +115,10 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
                 "networkInterfaces": [{"network": config.network, "subnetwork": config.subnetwork}]
             },
         },
-        "labels": {"dataset": job.dataset.replace("_", "-"), "release": job.release_id},
+        "labels": {
+            "dataset": job.dataset.replace("_", "-"),
+            "release": job.release_id,
+            "part": job.part or "base",
+        },
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
     }

@@ -17,13 +17,16 @@ from openknowledge_core.ingestion import (
     ShardJob,
 )
 from openknowledge_core.ingestion.errors import ContractViolation, GzipInvalid, TableUnavailable
-from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flow
+from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flows
 from openknowledge_pipelines.flows.s2_download import S2DownloadFlow, s2_download_flow
 from openknowledge_pipelines.flows.s2_load import S2LoadFlow, s2_load_flow
 from tests.fakes.ports import (
     COMMAND,
+    DIFF,
+    NEXT,
     PAPERS,
     PRODUCER,
+    RELEASE,
     FakeSource,
     FakeStore,
     FakeTables,
@@ -128,10 +131,12 @@ class FakeJobs:
         self.service = service
         self.failing = failing
         self.submitted: list[tuple[int, ...]] = []
+        self.parts: list[str | None] = []
         self.outcomes: dict[str, JobOutcome] = {}
 
     async def submit(self, job: ShardJob) -> str:
         self.submitted.append(job.shards)
+        self.parts.append(job.part)
         outcome = JobOutcome.SUCCEEDED
         for index in job.shards:
             if index in self.failing:
@@ -145,6 +150,8 @@ class FakeJobs:
                     shard=index,
                     bucket=job.bucket,
                     prefix=job.prefix,
+                    from_release=job.from_release,
+                    part=job.part,
                 )
             )
         name = f"job-{len(self.submitted)}"
@@ -159,10 +166,25 @@ async def test_batch_rounds_run_only_unfinished_shards(
     service: DownloadDatasetService, store: FakeStore
 ) -> None:
     jobs = FakeJobs(service, failing={1})
-    batch = s2_batch_download_flow(service, jobs, rounds=3, task_retries=0, retry_delay_seconds=0)
+    flows = s2_batch_download_flows(service, jobs, rounds=3, task_retries=0, retry_delay_seconds=0)
+    batch = flows.dataset
     result = await batch(COMMAND)
     assert jobs.submitted == [(0, 1), (1,)]
     assert (result.shards, result.jobs) == (2, ("job-1", "job-2"))
     assert len(DatasetManifest.from_json(store.data(result.manifest)).entries) == 2
     again = await batch(COMMAND)
     assert (jobs.submitted[2:], again.jobs) == ([], ())
+
+
+async def test_a_diff_runs_a_job_for_each_part_with_files(
+    service: DownloadDatasetService, source: FakeSource, store: FakeStore
+) -> None:
+    source.add_diff("papers", RELEASE, NEXT, dict(PAPERS), {})
+    jobs = FakeJobs(service, failing=set())
+    flows = s2_batch_download_flows(service, jobs, rounds=1, task_retries=0, retry_delay_seconds=0)
+    result = await flows.diff(DIFF)
+    assert (jobs.parts, jobs.submitted) == (["updates"], [(0, 1)])
+    assert (result.updates, result.deletes, result.jobs) == (2, 0, ("job-1",))
+    [manifest] = result.manifests
+    assert manifest.name == "s2/diffs/2026-10-06/2026-10-13/papers/updates/manifest.json"
+    assert len(DatasetManifest.from_json(store.data(manifest)).entries) == 2

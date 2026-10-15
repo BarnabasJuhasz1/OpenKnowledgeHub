@@ -3,6 +3,7 @@ import logging
 
 import pytest
 
+from openknowledge_contracts.datasets import DiffInventory
 from openknowledge_contracts.manifests import ShardReceipt
 from openknowledge_core.ingestion import (
     DownloadDatasetService,
@@ -16,11 +17,22 @@ from openknowledge_core.ingestion.errors import (
     InventoryChanged,
     LinkExpired,
     ShardNotListed,
+    SourceRejected,
     SourceUnavailable,
     StoredCopyMismatch,
 )
 from tests.fakes.checksums import crc32c_b64, md5_b64
-from tests.fakes.ports import COMMAND, PAPERS, RELEASE, FakeSource, FakeStore, gz, shard_ref
+from tests.fakes.ports import (
+    COMMAND,
+    DIFF,
+    NEXT,
+    PAPERS,
+    RELEASE,
+    FakeSource,
+    FakeStore,
+    gz,
+    shard_ref,
+)
 
 
 def add_papers(source: FakeSource) -> None:
@@ -292,3 +304,37 @@ async def test_no_signed_link_reaches_the_bucket_or_a_log_line(
         assert b"Signature" not in stored.data and b"AWSAccessKeyId" not in stored.data
     assert caplog.records
     assert not any("Signature" in record.getMessage() for record in caplog.records)
+
+
+async def test_a_diff_keeps_its_update_and_delete_files_apart(
+    service: DownloadDatasetService, source: FakeSource, store: FakeStore
+) -> None:
+    deleted = gz(b'{"corpusid": 2}\n{"corpusid": 3}\n')
+    source.add_diff("papers", RELEASE, NEXT, {"u-0.gz": PAPERS["part-1.gz"]}, {"d-0.gz": deleted})
+    source.expired_listings.add(1)
+    pinned = await service.pin_diff(DIFF)
+    receipts: list[ShardReceipt] = []
+    for part in (pinned.updates, pinned.deletes):
+        [shard] = part.shards
+        assert await service.archive_shard(part, shard) is ShardOutcome.CREATED
+        receipts.append(ShardReceipt.from_json(store.data(part.receipt_path(shard))))
+        await service.write_manifest(part)
+    assert [(receipt.records, receipt.schema_ref) for receipt in receipts] == [
+        (50, "semantic-scholar/papers@2026-10-13"),
+        (2, "semantic-scholar/papers@2026-10-13/deletes"),
+    ]
+    assert str(pinned.deletes.manifest_path) == (
+        "gs://raw/s2/diffs/2026-10-06/2026-10-13/papers/deletes/manifest.json"
+    )
+    inventory = DiffInventory.from_json(store.data(pinned.updates.inventory_path))
+    assert [shard.file_name for shard in inventory.deletes] == ["d-0.gz"]
+    assert source.listings == 2  # the expired links were listed again once, for both parts
+
+
+async def test_a_diff_spans_exactly_one_release(
+    service: DownloadDatasetService, source: FakeSource
+) -> None:
+    source.add_diff("papers", "2026-09-29", RELEASE, {"u-0.gz": PAPERS["part-0.gz"]}, {})
+    source.add_diff("papers", RELEASE, NEXT, {"u-1.gz": PAPERS["part-0.gz"]}, {})
+    with pytest.raises(SourceRejected, match="exactly one diff of papers from 2026-09-29"):
+        await service.pin_diff(DIFF.model_copy(update={"from_release": "2026-09-29"}))

@@ -36,6 +36,26 @@ async def test_a_listing_keeps_signed_links_out_of_its_metadata(
     assert s2.keys_sent == [KEY]
 
 
+async def test_a_diff_chain_keeps_its_signed_links_secret(
+    client: SemanticScholar, s2: FakeS2
+) -> None:
+    s2.releases.append("2026-10-13")
+    s2.diffs["tldrs"] = [
+        ("2026-09-29", "2026-10-06", ["u-0.gz", "u-1.gz"], ["d-0.gz"]),
+        ("2026-10-06", "2026-10-13", ["u-2.gz"], []),
+    ]
+    chain = await client.catalog.list_diffs("2026-09-29", "latest", "tldrs")
+    steps = [(diff.from_release, diff.release_id) for diff in chain.diffs]
+    assert steps == [("2026-09-29", "2026-10-06"), ("2026-10-06", "2026-10-13")]
+    first = chain.diffs[0]
+    assert [link.shard.source_path for link in first.deletes] == [
+        "/deletes/2026-09-29-to-2026-10-06/tldrs/d-0.gz"
+    ]
+    assert [link.shard.file_name for link in first.updates] == ["u-0.gz", "u-1.gz"]
+    assert "Signature" not in repr(chain) and "Signature" not in chain.model_dump_json()
+    assert (s2.api_calls, s2.keys_sent) == (["diffs/2026-09-29/to/latest/tldrs"], [KEY])
+
+
 async def test_a_rejected_key_is_not_retried_and_never_shown(s2: FakeS2, clock: FakeClock) -> None:
     config = s2_config(key="wrong-key")
     async with connect(config, transport=s2.transport, clock=clock, sleep=clock.sleep) as client:

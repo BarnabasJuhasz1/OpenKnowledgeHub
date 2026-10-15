@@ -29,6 +29,9 @@ Every object is created once and never overwritten. Under `<prefix>/<release>/`:
 - `<dataset>/<file>.receipt.json`: its checksums and line count, written after the gzip check passed.
 - `<dataset>/manifest.json`: every object that has a receipt, written by `okp s2 download` after the last receipt.
 
+A dataset's diff from one release to the next goes under `<prefix>/diffs/<from>/<release>/<dataset>/`.
+There `diff.json` pins its update and delete files, and `updates/` and `deletes/` each hold their files, receipts and `manifest.json`.
+
 A rerun skips a shard whose receipt matches the stored object.
 It rehashes an object that has no receipt.
 It refreshes a signed link that has expired.
@@ -46,6 +49,9 @@ It pins the dataset, runs each shard without a receipt as a task of one Cloud Ba
 Each task runs `okp s2 download-shard` from the same image with its shard in `OKP_SHARD`.
 Tasks run one at a time, and so do these runs, so the key stays at one request per second.
 A run makes up to `OKP_TASK_RETRIES` more rounds for shards still without a receipt, and a new run resumes the same way.
+
+`s2-batch-download-diff/control-vm` does the same for one dataset's diff to the next release, with a job per part that has files.
+Its tasks add `--from-release` and `--part` to `okp s2 download-shard`.
 
 ## Loading into ClickHouse
 

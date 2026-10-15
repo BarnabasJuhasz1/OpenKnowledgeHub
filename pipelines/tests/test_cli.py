@@ -107,6 +107,11 @@ def test_download_shard_archives_one_shard(monkeypatch: pytest.MonkeyPatch) -> N
             + TARGET,
             "--shard must be a whole number like 0",
         ),
+        (
+            ["download-shard", "--release", "2026-10-06", "--dataset", "papers", "--shard", "0"]
+            + ["--part", "updates", *TARGET],
+            "a diff file needs both the release it starts from and its part",
+        ),
     ],
 )
 @pytest.mark.usefixtures("wired")
@@ -151,8 +156,9 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
     assert [load_flow_from_entrypoint(str(found.entrypoint)) for found in served] == [
         deployments.s2_load,
         deployments.s2_batch_download,
+        deployments.s2_batch_download_diff,
     ]
-    assert [found.concurrency_limit for found in served] == [None, 1]
+    assert [found.concurrency_limit for found in served] == [None, 1, 1]
 
 
 def test_a_missing_key_fails_before_anything_opens(monkeypatch: pytest.MonkeyPatch) -> None:
