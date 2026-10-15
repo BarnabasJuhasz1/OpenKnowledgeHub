@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncGenerator
 from enum import StrEnum
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 from uuid import UUID
 
 from pydantic import (
@@ -44,6 +44,9 @@ from openknowledge_contracts.manifests import (
     ObjectRef,
     Sha256Hex,
 )
+from openknowledge_contracts.tables.contract import UpdateMode
+
+type Operation = Literal["upsert", "delete"]
 
 
 def _sendable_as_a_header(key: SecretStr) -> SecretStr:
@@ -235,6 +238,11 @@ class TableState(BaseModel):
     uuid: UUID
     has_rows: bool
     load_sql_sha256: Sha256Hex
+    delete_sql_sha256: Sha256Hex
+    updates: UpdateMode
+
+    def sql_sha256(self, operation: Operation) -> str:
+        return self.delete_sql_sha256 if operation == "delete" else self.load_sql_sha256
 
 
 class Duplicates(BaseModel):
@@ -257,6 +265,26 @@ class PreparedLoad(BaseModel):
     manifest_path: ObjectPath
     manifest: DatasetManifest
     table: TableState
+    operation: Operation = "upsert"
+
+
+class PreparedDiff(BaseModel):
+    """A diff to load, where a part without files, and so without a manifest, is ``None``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    from_release: ReleaseId
+    release_id: ReleaseId
+    dataset: DatasetName
+    table: TableState
+    inventory_path: ObjectPath
+    updates: PreparedLoad | None
+    deletes: PreparedLoad | None
+    identical_duplicates: NonNegativeInt
+
+    @property
+    def parts(self) -> tuple[PreparedLoad, ...]:
+        return tuple(part for part in (self.updates, self.deletes) if part is not None)
 
 
 class LoadObject(BaseModel):
@@ -265,6 +293,7 @@ class LoadObject(BaseModel):
     dataset: DatasetName
     release: ReleaseId
     object_ref: ObjectRef
+    operation: Operation = "upsert"
 
 
 class LoadRecord(BaseModel):
@@ -278,12 +307,34 @@ class LoadRecord(BaseModel):
     generation: PositiveInt
     sha256: Sha256Hex
     source_release: ReleaseId
+    operation: Operation
     records: NonNegativeInt
     written_rows: NonNegativeInt
     load_sql_sha256: Sha256Hex
     software_version: str
     image_digest: ImageDigest | None
     loaded_at: AwareDatetime
+
+
+class AppliedRelease(BaseModel):
+    """A base release or a diff that a table took in, as the ``applied`` table keeps it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    target: str
+    target_uuid: UUID
+    release: ReleaseId
+    from_release: ReleaseId | None
+    software_version: str
+    image_digest: ImageDigest | None
+    applied_at: AwareDatetime
+
+
+def held_release(table: TableState, latest: AppliedRelease | None) -> ReleaseId | None:
+    """The release ``table`` holds, which a dropped, recreated or emptied table no longer does."""
+    if latest is None or latest.target_uuid != table.uuid or not table.has_rows:
+        return None
+    return latest.release
 
 
 class LoadOutcome(StrEnum):

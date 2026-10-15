@@ -14,7 +14,15 @@ from prefect.flows import load_flow_from_entrypoint
 from openknowledge_core.ingestion import DownloadDatasetService, LoadDatasetService
 from openknowledge_pipelines import bootstrap, cli, deployments
 from openknowledge_pipelines.settings import LoadSettings, PipelineSettings
-from tests.fakes.ports import PAPERS, PRODUCER, FakeSource, FakeStore, FakeTables, clock
+from tests.fakes.ports import (
+    PAPERS,
+    PRODUCER,
+    FakeApplied,
+    FakeSource,
+    FakeStore,
+    FakeTables,
+    clock,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 TARGET = ["--bucket", "raw", "--prefix", "s2"]
@@ -130,7 +138,11 @@ def test_load_runs_the_flow_without_an_s2_key(
     @asynccontextmanager
     async def open_load_service(settings: LoadSettings) -> AsyncGenerator[LoadDatasetService]:
         yield LoadDatasetService(
-            store=store, tables=FakeTables(store), producer=PRODUCER, clock=clock
+            store=store,
+            tables=FakeTables(store),
+            applied=FakeApplied(),
+            producer=PRODUCER,
+            clock=clock,
         )
 
     monkeypatch.setattr(bootstrap, "open_load_service", open_load_service)

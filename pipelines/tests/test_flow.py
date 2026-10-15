@@ -27,6 +27,7 @@ from tests.fakes.ports import (
     PAPERS,
     PRODUCER,
     RELEASE,
+    FakeApplied,
     FakeSource,
     FakeStore,
     FakeTables,
@@ -99,7 +100,9 @@ LOAD = LoadDataset(**COMMAND.model_dump())
 
 
 def load_flow(store: FakeStore, tables: FakeTables) -> S2LoadFlow:
-    loader = LoadDatasetService(store=store, tables=tables, producer=PRODUCER, clock=clock)
+    loader = LoadDatasetService(
+        store=store, tables=tables, applied=FakeApplied(), producer=PRODUCER, clock=clock
+    )
     return s2_load_flow(loader, task_retries=2, retry_delay_seconds=0)
 
 

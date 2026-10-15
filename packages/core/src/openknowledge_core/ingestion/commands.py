@@ -111,6 +111,8 @@ class LoadDataset(BaseModel):
 
 
 class LoadDatasetResult(BaseModel):
+    """``removed`` counts the rows that flag keys a snapshot release no longer lists."""
+
     model_config = ConfigDict(frozen=True)
 
     release_id: ReleaseId
@@ -121,7 +123,44 @@ class LoadDatasetResult(BaseModel):
     already_loaded: NonNegativeInt
     live_rows: NonNegativeInt
     identical_duplicates: NonNegativeInt
+    removed: NonNegativeInt
     manifest: ObjectPath
+
+
+class LoadDiff(BaseModel):
+    """One dataset's changes from ``from_release`` to ``release``, the release right after it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    from_release: ReleaseId
+    release: ReleaseId
+    dataset: DatasetName
+    bucket: BucketName
+    prefix: ObjectPrefix = DEFAULT_PREFIX
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Self:
+        if self.from_release >= self.release:
+            raise ValueError("a diff must start from a release before the one it brings")
+        return self
+
+
+class LoadDiffResult(BaseModel):
+    """``upserted`` and ``deleted`` count the records in the update and the delete files."""
+
+    model_config = ConfigDict(frozen=True)
+
+    from_release: ReleaseId
+    release_id: ReleaseId
+    dataset: DatasetName
+    table: str
+    objects: NonNegativeInt
+    loaded: NonNegativeInt
+    already_loaded: NonNegativeInt
+    upserted: NonNegativeInt
+    deleted: NonNegativeInt
+    identical_duplicates: NonNegativeInt
+    manifests: tuple[ObjectPath, ...]
 
 
 class BatchDownloadResult(BaseModel):

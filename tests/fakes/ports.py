@@ -14,6 +14,7 @@ from pydantic import SecretStr
 
 from openknowledge_contracts.datasets import DatasetSummary, ReleaseMetadata, ShardRef
 from openknowledge_contracts.manifests import ObjectPath, ObjectRef, Producer
+from openknowledge_contracts.tables.contract import UpdateMode
 from openknowledge_core.ingestion.commands import DownloadDataset, DownloadDiff
 from openknowledge_core.ingestion.errors import (
     IncompleteTransfer,
@@ -23,6 +24,7 @@ from openknowledge_core.ingestion.errors import (
     SourceUnavailable,
 )
 from openknowledge_core.ingestion.models import (
+    AppliedRelease,
     ByteStream,
     CheckedStream,
     DatasetListing,
@@ -31,6 +33,7 @@ from openknowledge_core.ingestion.models import (
     Duplicates,
     LoadObject,
     LoadRecord,
+    Operation,
     ShardLink,
     StoredObject,
     TableState,
@@ -296,18 +299,27 @@ class FakeTables:
     def __init__(self, store: FakeStore) -> None:
         self.store = store
         self.uuid = UUID(int=1)
+        self.updates: UpdateMode = "diffs"
         self.rows: dict[str, int] = {}
         self.records: dict[str, LoadRecord] = {}
         self.loads: list[str] = []
+        self.operations: list[Operation] = []
         self.failures: list[IngestionError] = []
         self.short_by = 0
         self.collapsed = 0
         self.found = Duplicates(identical_rows=0, conflicting_keys=0, examples=())
         self.scanned: list[str] = []
+        self.flagged = 0
+        self.marked: list[str] = []
 
     async def table(self, dataset: str) -> TableState:
         return TableState(
-            name=dataset, uuid=self.uuid, has_rows=bool(self.rows), load_sql_sha256="0" * 64
+            name=dataset,
+            uuid=self.uuid,
+            has_rows=bool(self.rows),
+            load_sql_sha256="0" * 64,
+            delete_sql_sha256="1" * 64,
+            updates=self.updates,
         )
 
     async def loaded(self, dataset: str, source_object: ObjectPath) -> LoadRecord | None:
@@ -316,6 +328,7 @@ class FakeTables:
     async def load(self, request: LoadObject) -> int:
         path = request.object_ref.path
         self.loads.append(path.name.rsplit("/", 1)[-1])
+        self.operations.append(request.operation)
         if self.failures:
             raise self.failures.pop(0)
         lines = gzip.decompress(self.store.data(path)).count(b"\n")
@@ -331,3 +344,20 @@ class FakeTables:
     async def duplicates(self, dataset: str, objects: Sequence[ObjectPath]) -> Duplicates:
         self.scanned = [path.name.rsplit("/", 1)[-1] for path in objects]
         return self.found
+
+    async def mark_removed(self, dataset: str, release: str) -> int:
+        self.marked.append(release)
+        return self.flagged
+
+
+class FakeApplied:
+    """The ``applied`` table, newest record last."""
+
+    def __init__(self) -> None:
+        self.records: list[AppliedRelease] = []
+
+    async def record(self, applied: AppliedRelease) -> None:
+        self.records.append(applied)
+
+    async def latest(self, target: str) -> AppliedRelease | None:
+        return next((found for found in reversed(self.records) if found.target == target), None)

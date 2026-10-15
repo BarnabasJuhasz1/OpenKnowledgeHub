@@ -10,6 +10,8 @@ from openknowledge_core.ingestion.commands import (
     DownloadShardResult,
     LoadDataset,
     LoadDatasetResult,
+    LoadDiff,
+    LoadDiffResult,
     PinnedRelease,
     PinRelease,
 )
@@ -20,11 +22,13 @@ from openknowledge_core.ingestion.models import (
     LoadOutcome,
     PinnedDataset,
     PinnedDiff,
+    PreparedDiff,
     PreparedLoad,
     ShardJob,
     ShardOutcome,
 )
 from openknowledge_core.ingestion.ports import (
+    AppliedReleases,
     ArtifactStore,
     ReleaseCatalog,
     ShardDownloader,
@@ -34,6 +38,7 @@ from openknowledge_core.ingestion.ports import (
 from openknowledge_core.ingestion.service import DownloadDatasetService
 
 __all__ = [
+    "AppliedReleases",
     "ArtifactStore",
     "BatchDiffDownloadResult",
     "BatchDownloadResult",
@@ -48,11 +53,14 @@ __all__ = [
     "LoadDataset",
     "LoadDatasetResult",
     "LoadDatasetService",
+    "LoadDiff",
+    "LoadDiffResult",
     "LoadOutcome",
     "PinRelease",
     "PinnedDataset",
     "PinnedDiff",
     "PinnedRelease",
+    "PreparedDiff",
     "PreparedLoad",
     "ReleaseCatalog",
     "ShardDownloader",

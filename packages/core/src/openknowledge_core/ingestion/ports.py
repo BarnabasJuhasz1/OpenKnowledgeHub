@@ -8,6 +8,7 @@ from typing import Literal, Protocol
 from openknowledge_contracts.datasets import DatasetName, ReleaseId, ReleaseMetadata
 from openknowledge_contracts.manifests import ObjectPath, ObjectRef
 from openknowledge_core.ingestion.models import (
+    AppliedRelease,
     ByteStream,
     CheckedStream,
     DatasetListing,
@@ -82,6 +83,18 @@ class TableLoader(Protocol):
 
     async def duplicates(self, dataset: DatasetName, objects: Sequence[ObjectPath]) -> Duplicates:
         """Keys that repeat across the objects, which are read again."""
+        ...
+
+    async def mark_removed(self, dataset: DatasetName, release: ReleaseId) -> int:
+        """Flag a snapshot table's keys ``release`` no longer lists and return the rows written."""
+        ...
+
+
+class AppliedReleases(Protocol):
+    async def record(self, applied: AppliedRelease) -> None: ...
+
+    async def latest(self, target: str) -> AppliedRelease | None:
+        """The last release recorded for the table, whatever UUID it had then."""
         ...
 
 

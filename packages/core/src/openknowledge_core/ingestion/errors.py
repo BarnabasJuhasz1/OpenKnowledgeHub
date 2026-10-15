@@ -72,6 +72,14 @@ class ManifestInvalid(IngestionError):
     pass
 
 
+class DiffRefused(IngestionError):
+    """A table cannot take a diff, because it holds another release or loads only snapshots."""
+
+
+class BaseRefused(IngestionError):
+    """A table cannot take a base release, because it holds another one."""
+
+
 class ObjectChanged(IngestionError):
     """An object is missing or has another generation than the one being read."""
 

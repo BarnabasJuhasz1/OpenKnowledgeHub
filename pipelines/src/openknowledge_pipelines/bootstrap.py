@@ -57,11 +57,12 @@ async def open_load_service(settings: LoadSettings) -> AsyncGenerator[LoadDatase
     )
     async with (
         gcs.connect(_gcs(settings)) as store,
-        clickhouse.connect(clickhouse_config) as tables,
+        clickhouse.connect(clickhouse_config) as ch,
     ):
         yield LoadDatasetService(
             store=store,
-            tables=tables,
+            tables=ch.tables,
+            applied=ch.applied,
             producer=producer(settings),
             clock=lambda: datetime.now(UTC),
         )
