@@ -21,7 +21,7 @@ from openknowledge_pipelines.settings import (
 if TYPE_CHECKING:
     from openknowledge_pipelines.flows.s2_batch_download import S2BatchDownloadFlows
     from openknowledge_pipelines.flows.s2_download import S2DownloadFlow
-    from openknowledge_pipelines.flows.s2_load import S2LoadFlow
+    from openknowledge_pipelines.flows.s2_load import S2LoadFlows
 
 
 @asynccontextmanager
@@ -57,11 +57,12 @@ async def open_load_service(settings: LoadSettings) -> AsyncGenerator[LoadDatase
     )
     async with (
         gcs.connect(_gcs(settings)) as store,
-        clickhouse.connect(clickhouse_config) as tables,
+        clickhouse.connect(clickhouse_config) as ch,
     ):
         yield LoadDatasetService(
             store=store,
-            tables=tables,
+            tables=ch.tables,
+            applied=ch.applied,
             producer=producer(settings),
             clock=lambda: datetime.now(UTC),
         )
@@ -95,10 +96,10 @@ def download_flow(service: DownloadDatasetService, settings: PipelineSettings) -
     )
 
 
-def load_flow(service: LoadDatasetService, settings: LoadSettings) -> S2LoadFlow:
-    from openknowledge_pipelines.flows.s2_load import s2_load_flow
+def load_flows(service: LoadDatasetService, settings: LoadSettings) -> S2LoadFlows:
+    from openknowledge_pipelines.flows.s2_load import s2_load_flows
 
-    return s2_load_flow(
+    return s2_load_flows(
         service,
         task_retries=settings.task_retries,
         retry_delay_seconds=settings.task_retry_delay_seconds,
@@ -117,8 +118,10 @@ async def open_batch_download(
         subnetwork=settings.batch_subnetwork,
         image=f"{settings.batch_image_repository}@{settings.image_digest}",
         machine_type=settings.batch_machine_type,
+        provisioning_model=settings.batch_provisioning_model,
         max_run_seconds=settings.batch_max_run_seconds,
         poll_seconds=settings.batch_poll_seconds,
+        wait_timeout_seconds=settings.batch_wait_timeout_seconds,
         environment={"OKP_IMAGE_DIGEST": settings.image_digest},
         secrets={"S2_API_KEY": settings.batch_s2_key_secret},
     )

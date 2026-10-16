@@ -16,10 +16,15 @@ from openknowledge_core.ingestion import (
     LoadDatasetService,
     ShardJob,
 )
-from openknowledge_core.ingestion.errors import ContractViolation, GzipInvalid, TableUnavailable
+from openknowledge_core.ingestion.errors import (
+    BatchUnavailable,
+    ContractViolation,
+    GzipInvalid,
+    TableUnavailable,
+)
 from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flows
 from openknowledge_pipelines.flows.s2_download import S2DownloadFlow, s2_download_flow
-from openknowledge_pipelines.flows.s2_load import S2LoadFlow, s2_load_flow
+from openknowledge_pipelines.flows.s2_load import S2LoadFlow, s2_load_flows
 from tests.fakes.ports import (
     COMMAND,
     DIFF,
@@ -27,6 +32,7 @@ from tests.fakes.ports import (
     PAPERS,
     PRODUCER,
     RELEASE,
+    FakeApplied,
     FakeSource,
     FakeStore,
     FakeTables,
@@ -99,8 +105,10 @@ LOAD = LoadDataset(**COMMAND.model_dump())
 
 
 def load_flow(store: FakeStore, tables: FakeTables) -> S2LoadFlow:
-    loader = LoadDatasetService(store=store, tables=tables, producer=PRODUCER, clock=clock)
-    return s2_load_flow(loader, task_retries=2, retry_delay_seconds=0)
+    loader = LoadDatasetService(
+        store=store, tables=tables, applied=FakeApplied(), producer=PRODUCER, clock=clock
+    )
+    return s2_load_flows(loader, task_retries=2, retry_delay_seconds=0).dataset
 
 
 async def test_the_load_flow_loads_each_object_once(
@@ -131,10 +139,18 @@ class FakeJobs:
         self.service = service
         self.failing = failing
         self.submitted: list[tuple[int, ...]] = []
+        self.jobs: list[ShardJob] = []
         self.parts: list[str | None] = []
         self.outcomes: dict[str, JobOutcome] = {}
+        self.left: list[str] = []
+        self.waited: list[str] = []
+
+    async def running(self) -> list[str]:
+        left, self.left = self.left, []
+        return left
 
     async def submit(self, job: ShardJob) -> str:
+        self.jobs.append(job)
         self.submitted.append(job.shards)
         self.parts.append(job.part)
         outcome = JobOutcome.SUCCEEDED
@@ -159,6 +175,7 @@ class FakeJobs:
         return name
 
     async def wait(self, name: str) -> JobOutcome:
+        self.waited.append(name)
         return self.outcomes[name]
 
 
@@ -170,6 +187,7 @@ async def test_batch_rounds_run_only_unfinished_shards(
     batch = flows.dataset
     result = await batch(COMMAND)
     assert jobs.submitted == [(0, 1), (1,)]
+    assert jobs.jobs[0].operation_id != jobs.jobs[1].operation_id
     assert (result.shards, result.jobs) == (2, ("job-1", "job-2"))
     assert len(DatasetManifest.from_json(store.data(result.manifest)).entries) == 2
     again = await batch(COMMAND)
@@ -188,3 +206,37 @@ async def test_a_diff_runs_a_job_for_each_part_with_files(
     [manifest] = result.manifests
     assert manifest.name == "s2/diffs/2026-10-06/2026-10-13/papers/updates/manifest.json"
     assert len(DatasetManifest.from_json(store.data(manifest)).entries) == 2
+
+
+async def test_a_round_first_waits_for_a_download_job_that_has_not_ended(
+    service: DownloadDatasetService,
+) -> None:
+    jobs = FakeJobs(service, failing=set())
+    jobs.left = ["earlier"]
+    jobs.outcomes["earlier"] = JobOutcome.FAILED
+    flows = s2_batch_download_flows(service, jobs, rounds=1, task_retries=0, retry_delay_seconds=0)
+    await flows.dataset(COMMAND)
+    assert jobs.waited == ["earlier", "job-1"]
+
+
+async def test_a_lost_submission_reply_retries_the_same_operation(
+    service: DownloadDatasetService,
+) -> None:
+    class LostReplyJobs(FakeJobs):
+        def __init__(self) -> None:
+            super().__init__(service, failing=set())
+            self.attempts: list[ShardJob] = []
+
+        async def submit(self, job: ShardJob) -> str:
+            self.attempts.append(job)
+            if len(self.attempts) > 1:
+                return "job-1"
+            await super().submit(job)
+            raise BatchUnavailable("the accepted submission's reply was lost")
+
+    jobs = LostReplyJobs()
+    flows = s2_batch_download_flows(service, jobs, rounds=1, task_retries=1, retry_delay_seconds=0)
+    result = await flows.dataset(COMMAND)
+    first, retry = jobs.attempts
+    assert first == retry
+    assert (jobs.submitted, result.jobs) == ([(0, 1)], ("job-1",))

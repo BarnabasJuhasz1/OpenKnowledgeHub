@@ -53,6 +53,14 @@ A run makes up to `OKP_TASK_RETRIES` more rounds for shards still without a rece
 `s2-batch-download-diff/control-vm` does the same for one dataset's diff to the next release, with a job per part that has files.
 Its tasks add `--from-release` and `--part` to `okp s2 download-shard`.
 
+Batch VMs use Spot by default; `OKP_BATCH_PROVISIONING_MODEL=STANDARD` selects standard VMs.
+Each submission keeps the same operation ID and job name across task retries, so a lost creation reply resumes that job rather than creating another one.
+`OKP_BATCH_WAIT_TIMEOUT_SECONDS` bounds each job's whole wait, including queued time and API outages, to 24 hours by default, separately from each task's `OKP_BATCH_MAX_RUN_SECONDS`.
+If that wait expires, the run fails and names the job.
+
+Both download deployments take the Prefect global concurrency limit `semantic-scholar`, which `okp serve` creates with a limit of 1, so their runs never overlap.
+Before submitting a job, a run waits for any download job still queued or running in Batch, such as one left by a run that failed or was cancelled.
+
 ## Loading into ClickHouse
 
 ```sh
@@ -67,6 +75,14 @@ Each loaded object leaves a row in `loads`.
 A rerun skips an object whose row matches its generation, its checksum, the table and the load SQL, so a table created again or emptied loads everything again.
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.
+
+`okp s2 load-diff --from-release <release_id> --release <release_id> --dataset <name> --bucket <bucket>` loads one archived diff, its update files as upserts and then its delete files as tombstones, and `okp serve` serves it as `s2-load-diff/control-vm`.
+The `applied` table records each base load and diff that passed its checks, and a diff loads only into a table that holds the release it starts from or the one it brings, which is a rerun.
+When lineage is recorded, a base loads only into an empty table or one holding the same release, and `publication-venues` also into one holding an older release.
+A load of `publication-venues`, which has no diffs, flags the venues its release no longer lists in `removed`.
+
+Load recovery still needs persisted ownership of a begun load and shared coordination per table.
+Until those are implemented, do not load a base over a populated table with missing lineage or overlap base and diff loads for the same dataset.
 
 Before a pull request:
 

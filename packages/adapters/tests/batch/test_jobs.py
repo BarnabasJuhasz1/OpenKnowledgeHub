@@ -1,3 +1,4 @@
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from typing import Any, cast
@@ -8,7 +9,7 @@ from gcloud.aio.auth import Token
 
 from openknowledge_adapters import batch
 from openknowledge_adapters.batch.jobs import job_id
-from openknowledge_core.ingestion.errors import BatchRejected
+from openknowledge_core.ingestion.errors import BatchRejected, BatchTimedOut, BatchUnavailable
 from openknowledge_core.ingestion.models import JobOutcome, ShardJob
 
 PARENT = "projects/p/locations/europe-west4"
@@ -37,45 +38,63 @@ class FakeToken:
 
 
 @asynccontextmanager
-async def batch_api(
-    created: web.Response, states: list[int | str]
-) -> AsyncGenerator[tuple[str, list[dict[str, Any]]]]:
-    posted: list[dict[str, Any]] = []
-
-    async def create(request: web.Request) -> web.Response:
-        posted.append({**request.query, **await request.json(), **request.headers})
-        return created
-
-    async def get(request: web.Request) -> web.Response:
-        state = states.pop(0)
-        if isinstance(state, int):
-            return web.Response(status=state)
-        return web.json_response({"status": {"state": state}})
-
-    app = web.Application()
-    app.router.add_post(f"/{PARENT}/jobs", create)
-    app.router.add_get(f"/{PARENT}/jobs/j", get)
+async def serving(app: web.Application) -> AsyncGenerator[str]:
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, "127.0.0.1", 0)
     await site.start()
     host, port = runner.addresses[0][:2]
     try:
-        yield f"http://{host}:{port}", posted
+        yield f"http://{host}:{port}"
     finally:
         await runner.cleanup()
 
 
+@asynccontextmanager
+async def batch_api(
+    created: web.Response,
+    states: list[int | str],
+    pages: list[list[dict[str, Any]]] | None = None,
+) -> AsyncGenerator[tuple[str, list[dict[str, Any]]]]:
+    posted: list[dict[str, Any]] = []
+    pages = pages or [[]]
+
+    async def create(request: web.Request) -> web.Response:
+        posted.append({**request.query, **await request.json(), **request.headers})
+        return created
+
+    async def get(request: web.Request) -> web.Response:
+        state = states.pop(0) if len(states) > 1 else states[0]
+        if isinstance(state, int):
+            return web.Response(status=state)
+        return web.json_response({"status": {"state": state}})
+
+    async def list_jobs(request: web.Request) -> web.Response:
+        page = int(request.query.get("pageToken", "0"))
+        last = page == len(pages) - 1
+        return web.json_response(
+            {"jobs": pages[page], "nextPageToken": "" if last else str(page + 1)}
+        )
+
+    app = web.Application()
+    app.router.add_post(f"/{PARENT}/jobs", create)
+    app.router.add_get(f"/{PARENT}/jobs", list_jobs)
+    app.router.add_get(f"/{PARENT}/jobs/{{job_id}}", get)
+    async with serving(app) as root:
+        yield root, posted
+
+
 async def test_a_job_runs_one_task_per_shard_and_is_polled_until_it_ends() -> None:
-    created = web.json_response({"name": f"{PARENT}/jobs/j"})
     async with (
-        batch_api(created, ["QUEUED", 503, "RUNNING", "SUCCEEDED"]) as (root, posted),
+        batch_api(web.json_response({}), ["QUEUED", 503, "RUNNING", "SUCCEEDED"]) as (root, posted),
         batch.connect(CONFIG, api_root=root, token=cast(Token, FakeToken())) as jobs,
     ):
         name = await jobs.submit(JOB)
         assert await jobs.wait(name) is JobOutcome.SUCCEEDED
     [request] = posted
+    assert name == f"{PARENT}/jobs/{request['jobId']}"
     assert request["jobId"].startswith("s2-s2orc-v2-2026-10-06-")
+    assert request["requestId"] == str(JOB.operation_id)
     assert request["Authorization"] == "Bearer token"
     [group] = request["taskGroups"]
     assert [env["variables"] for env in group["taskEnvironments"]] == [
@@ -87,9 +106,25 @@ async def test_a_job_runs_one_task_per_shard_and_is_polled_until_it_ends() -> No
     [runnable] = group["taskSpec"]["runnables"]
     assert runnable["container"]["imageUri"] == CONFIG.image
     assert "--shard" not in runnable["container"]["commands"]
-    assert request["allocationPolicy"]["network"]["networkInterfaces"][0]["subnetwork"] == (
-        CONFIG.subnetwork
-    )
+    policy = request["allocationPolicy"]
+    assert policy["network"]["networkInterfaces"][0]["subnetwork"] == CONFIG.subnetwork
+    assert policy["instances"][0]["policy"]["provisioningModel"] == "SPOT"
+
+
+async def test_running_names_download_jobs_that_have_not_ended_on_every_page() -> None:
+    def job(name: str, state: str, labels: dict[str, str]) -> dict[str, Any]:
+        return {"name": name, "labels": labels, "status": {"state": state}}
+
+    download = {"operation-id": "1"}
+    pages = [
+        [job("a", "RUNNING", download), job("b", "SUCCEEDED", download)],
+        [job("c", "RUNNING", {}), job("d", "QUEUED", download)],
+    ]
+    async with (
+        batch_api(web.json_response({}), [], pages) as (root, _),
+        batch.connect(CONFIG, api_root=root, token=cast(Token, FakeToken())) as jobs,
+    ):
+        assert await jobs.running() == ["a", "d"]
 
 
 async def test_a_refused_job_says_why() -> None:
@@ -102,6 +137,16 @@ async def test_a_refused_job_says_why() -> None:
             await jobs.submit(JOB)
 
 
+async def test_a_wait_is_bounded_even_while_batch_is_unreachable() -> None:
+    config = CONFIG.model_copy(update={"wait_timeout_seconds": 0.05, "poll_seconds": 3600})
+    async with (
+        batch_api(web.json_response({}), [503]) as (root, _),
+        batch.connect(config, api_root=root, token=cast(Token, FakeToken())) as jobs,
+    ):
+        with pytest.raises(BatchTimedOut, match=f"{PARENT}/jobs/j.*may still be running"):
+            await asyncio.wait_for(jobs.wait(f"{PARENT}/jobs/j"), timeout=1)
+
+
 def test_a_diff_part_names_the_release_it_starts_from_and_its_part() -> None:
     job = JOB.model_copy(update={"from_release": "2026-09-29", "part": "deletes"})
     spec = batch.job_spec(CONFIG, job)
@@ -109,3 +154,32 @@ def test_a_diff_part_names_the_release_it_starts_from_and_its_part() -> None:
     assert command[-4:] == ["--from-release", "2026-09-29", "--part", "deletes"]
     assert spec["labels"]["part"] == "deletes"
     assert job_id(job).startswith("s2-s2orc-v2-2026-10-06-deletes-")
+
+
+@pytest.mark.parametrize("replay", [False, True])
+async def test_a_lost_create_reply_resumes_exactly_one_remote_job(replay: bool) -> None:
+    posted: list[dict[str, str]] = []
+    remote: dict[str, Any] = {}
+
+    async def create(request: web.Request) -> web.Response:
+        posted.append(dict(request.query))
+        id_ = request.query["jobId"]
+        if id_ in remote:
+            if replay:
+                return web.json_response(remote[id_])
+            return web.json_response({"error": {"message": "already exists"}}, status=409)
+        remote[id_] = await request.json()
+        # Batch created the job, but its reply never arrives intact.
+        return web.Response(text="{", content_type="application/json")
+
+    app = web.Application()
+    app.router.add_post(f"/{PARENT}/jobs", create)
+    async with (
+        serving(app) as root,
+        batch.connect(CONFIG, api_root=root, token=cast(Token, FakeToken())) as jobs,
+    ):
+        with pytest.raises(BatchUnavailable, match=f"{PARENT}/jobs/{job_id(JOB)}.*may be running"):
+            await jobs.submit(JOB)
+        assert await jobs.submit(JOB) == f"{PARENT}/jobs/{job_id(JOB)}"
+    assert len(remote) == 1
+    assert posted == [{"jobId": job_id(JOB), "requestId": str(JOB.operation_id)}] * 2

@@ -45,8 +45,8 @@ async def test_errors_map_by_exception_code(
             raise httpx.ConnectError("refused")
         return httpx.Response(status, headers={"X-ClickHouse-Exception-Code": code}, text=body)
 
-    async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as tables:
+    async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
         with pytest.raises(error) as raised:
-            await tables.live_rows("papers", "2026-10-06")
+            await ch.tables.live_rows("papers", "2026-10-06")
     assert str(raised.value).startswith(message)
     assert "hunter2" not in str(raised.value)

@@ -15,11 +15,14 @@ the highest version per key: the latest release wins, and within a release a del
 upsert, because a diff applies its updates before its deletes. A version depends only on its own
 row, so replayed batches converge in any order, as long as a key appears at most once per release
 and operation.
+
+A snapshot contract's table also has a ``removed`` column, which a load never sets.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 import pyarrow as pa
 
@@ -34,6 +37,9 @@ PROVENANCE = pa.schema(
     ]
 )
 VERSION = "version"
+REMOVED = "removed"
+
+type UpdateMode = Literal["diffs", "snapshot"]
 
 
 @dataclass(frozen=True)
@@ -49,6 +55,9 @@ class DatasetContract:
             that cannot hold null keeps an empty value instead. A load must count empty values
             at these paths in the raw data and fail on any; otherwise the stored empty no
             longer tells which one the source sent.
+        updates: How the dataset follows its releases. ``diffs`` applies each release's
+            diff. ``snapshot`` loads every release whole and flags the keys a release no
+            longer lists in a ``removed`` column that loads never set.
     """
 
     name: DatasetName
@@ -56,6 +65,7 @@ class DatasetContract:
     key: tuple[str, ...]
     source: pa.Schema
     null_as_empty: frozenset[str] = frozenset()
+    updates: UpdateMode = "diffs"
 
     def __post_init__(self) -> None:
         """Refuse a missing or nullable key, and field names that repeat or are taken."""
@@ -68,7 +78,7 @@ class DatasetContract:
             field = fields.get(name)
             if field is None or field.nullable:
                 raise ValueError(f"{self.name}: key {name!r} must be a required source field")
-        if clash := sorted(fields.keys() & {*PROVENANCE.names, VERSION}):
+        if clash := sorted(fields.keys() & {*PROVENANCE.names, VERSION, REMOVED}):
             raise ValueError(f"{self.name}: source fields {clash} shadow table columns")
 
     @property

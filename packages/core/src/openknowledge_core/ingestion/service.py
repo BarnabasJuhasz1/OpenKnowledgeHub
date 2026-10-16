@@ -46,6 +46,7 @@ from openknowledge_core.ingestion.errors import (
     IntegrityError,
     InventoryChanged,
     LinkExpired,
+    ManifestIncomplete,
     ReceiptInvalid,
     ShardNotListed,
     SourceRejected,
@@ -285,9 +286,9 @@ class DownloadDatasetService:
         for shard in pinned.shards:
             stored = await self._store.stat(pinned.receipt_path(shard))
             if stored is None:
-                raise ReceiptInvalid(
+                raise ManifestIncomplete(
                     f"{pinned.receipt_path(shard)} is missing, and the manifest needs every "
-                    "receipt; rerun okp s2 download, which archives that shard first"
+                    "receipt; resume the dataset download before writing its manifest"
                 )
             receipt = await self._verify_receipt(pinned, shard, stored)
             entries.append(

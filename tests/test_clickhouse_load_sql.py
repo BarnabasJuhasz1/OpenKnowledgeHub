@@ -15,17 +15,26 @@ import pyarrow as pa
 import pytest
 
 from openknowledge_adapters.clickhouse.load_sql import (
+    delete_query,
     duplicates_parameters,
     duplicates_query,
     problems_query,
     query_parameters,
+    removed_query,
     upsert_query,
 )
-from openknowledge_contracts.tables import DatasetContract
+from openknowledge_contracts.tables import PROVENANCE, DatasetContract
 from openknowledge_contracts.tables.clickhouse import NULL_FLAG_SUFFIX, table_columns
 from openknowledge_contracts.tables.fields import ArrowField, fields_of
-from openknowledge_contracts.tables.s2 import CONTRACTS
-from tests.clickhouse_local import MIGRATIONS, clickhouse_local, needs_clickhouse, run, section
+from openknowledge_contracts.tables.s2 import CONTRACTS, PUBLICATION_VENUES
+from tests.clickhouse_local import (
+    MIGRATIONS,
+    clickhouse_local,
+    needs_clickhouse,
+    run,
+    section,
+    up,
+)
 
 FIXTURES = Path(__file__).resolve().parents[1] / "packages" / "contracts" / "tests" / "fixtures"
 RELEASE = "2026-10-06"
@@ -348,6 +357,75 @@ def test_an_upsert_stops_at_a_refused_record(contract: DatasetContract, tmp_path
 
 @needs_clickhouse
 @contracts
+def test_a_delete_hides_its_upsert_and_leaves_every_other_column_at_its_default(
+    contract: DatasetContract, tmp_path: Path
+) -> None:
+    record = accepted(contract)[0]
+    key = {name: record[name] for name in contract.key}
+    provenance = {"source_release": RELEASE, "source_object": OBJECT, "is_deleted": 1}
+    upserts = gz(tmp_path / "upserts.gz", [json.dumps(record)])
+    deletes = gz(tmp_path / "deletes.gz", [json.dumps(key)])
+    columns = ", ".join([*contract.key, *PROVENANCE.names])
+    table = contract.table
+    db = tmp_path / "db"
+    upsert = f"{migration(contract)}\n{upsert_query(contract, 'file')};"
+    clickhouse_local(upsert, db, **params(upserts))
+    tombstone, bare, live = clickhouse_local(
+        f"""
+        {delete_query(contract, "file")};
+        CREATE TABLE bare AS {table};
+        INSERT INTO bare ({columns}) SELECT {columns} FROM {table} WHERE is_deleted = 1;
+        SELECT * FROM {table} WHERE is_deleted = 1 FORMAT JSONEachRow;
+        SELECT * FROM bare FORMAT JSONEachRow;
+        SELECT count() AS live FROM {table} FINAL FORMAT JSONEachRow;
+        """,
+        db,
+        **params(deletes),
+    )
+    assert {name: tombstone[name] for name in (*key, *provenance)} == {**key, **provenance}
+    assert tombstone == bare
+    assert live == {"live": 0}
+
+
+@needs_clickhouse
+@contracts
+def test_a_delete_record_holds_the_key_and_nothing_else(
+    contract: DatasetContract, tmp_path: Path
+) -> None:
+    record = accepted(contract)[0]
+    key = {name: record[name] for name in contract.key}
+    types = {field.name: field.type for field in fields_of(contract.source)}
+    table = contract.table
+    extra = next(name for name in record if name not in key)
+    cases = [
+        Refused(
+            f"{extra} beside the key",
+            json.dumps({**key, extra: record[extra]}),
+            f"{table}: a record has a key the contract does not declare",
+        )
+    ]
+    for name in key:
+        without = {other: value for other, value in key.items() if other != name}
+        _, wrong = next(wrong_types(types[name]))
+        cases += [
+            Refused(
+                f"{name} missing", json.dumps(without), f"{table}: a record lacks a required field"
+            ),
+            Refused(
+                f"{name} of a wrong type",
+                json.dumps({**key, name: wrong}),
+                f"{table}: {name} breaks the contract",
+            ),
+        ]
+    sql = f"{migration(contract)}\n{delete_query(contract, 'file')};"
+    for case in cases:
+        source = gz(tmp_path / "deletes.gz", [case.line])
+        result = run(sql, tmp_path, **params(source))
+        assert f"Code: 395. DB::Exception: {case.problem}: " in result.stderr, case.name
+
+
+@needs_clickhouse
+@contracts
 def test_a_repeated_key_is_identical_or_conflicting(
     contract: DatasetContract, tmp_path: Path
 ) -> None:
@@ -389,8 +467,53 @@ def test_a_repeated_key_is_identical_or_conflicting(
 
 
 @contracts
-def test_an_upsert_writes_every_column_but_version(contract: DatasetContract) -> None:
+def test_an_upsert_writes_every_column_the_table_does_not_fill(contract: DatasetContract) -> None:
     match = re.match(r"INSERT INTO `\w+` \(([^)]*)\)", upsert_query(contract))
     assert match is not None
     written = [name.strip("`") for name in match.group(1).split(", ")]
-    assert written == [c.name for c in table_columns(contract) if not c.materialized]
+    assert written == [c.name for c in table_columns(contract) if not (c.materialized or c.default)]
+
+
+@needs_clickhouse
+def test_a_snapshot_flags_the_keys_a_newer_release_no_longer_lists(tmp_path: Path) -> None:
+    venue = {**accepted(PUBLICATION_VENUES)[0], "issn": None}
+    db = tmp_path / "db"
+    first, second, third, fourth = "2026-09-29", "2026-10-06", "2026-10-13", "2026-10-20"
+    upsert = upsert_query(PUBLICATION_VENUES, "file")
+    flag = removed_query(PUBLICATION_VENUES)
+
+    def at(release: str, ids: list[str], sql: str) -> None:
+        source = gz(tmp_path / f"{release}.gz", [json.dumps({**venue, "id": id_}) for id_ in ids])
+        arguments = query_parameters(source_file=str(source), release=release, source_object=OBJECT)
+        clickhouse_local(sql, db, **arguments)
+
+    def table() -> tuple[int, dict[str, tuple[str, bool]]]:
+        """The rows written with ``removed`` set, and the live row of each key."""
+        flagged, *live = clickhouse_local(
+            "SELECT count() AS n FROM publication_venues WHERE removed FORMAT JSONEachRow;"
+            "SELECT id, toString(source_release) AS release, removed FROM publication_venues FINAL"
+            " FORMAT JSONEachRow;",
+            db,
+        )
+        return flagged["n"], {row["id"]: (row["release"], row["removed"]) for row in live}
+
+    clickhouse_local(up(), db)
+    at(first, ["a", "b"], upsert)
+    at(second, ["a"], upsert)
+    at(second, [], flag)
+    flagged = (1, {"a": (second, False), "b": (second, True)})
+    assert table() == flagged
+    (kept,) = clickhouse_local(
+        "SELECT * EXCEPT (source_release, removed) FROM publication_venues FINAL WHERE id = 'b'"
+        " FORMAT JSONEachRow",
+        db,
+    )
+    (original,) = rows(PUBLICATION_VENUES, [{**venue, "id": "b"}])
+    assert kept == {name: value for name, value in original.items() if name != "source_release"}
+    at(second, [], flag)
+    assert table() == flagged
+    at(third, ["a"], upsert)
+    at(third, [], flag)
+    assert table() == (1, {"a": (third, False), "b": (second, True)})
+    at(fourth, ["b"], upsert)
+    assert table()[1]["b"] == (fourth, False)

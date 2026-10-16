@@ -9,7 +9,7 @@ import os
 import shutil
 import socket
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +19,12 @@ from click.testing import CliRunner
 from prefect.testing.utilities import prefect_test_harness
 
 from openknowledge_adapters import gcs
-from openknowledge_core.ingestion import DownloadDataset, DownloadDatasetService
+from openknowledge_core.ingestion import (
+    DownloadDataset,
+    DownloadDatasetService,
+    DownloadDiff,
+    PinnedDataset,
+)
 from openknowledge_pipelines import cli
 from tests.clickhouse_local import up
 from tests.fakes.ports import PRODUCER, FakeSource, clock
@@ -30,6 +35,7 @@ FIXTURE = (
 )
 BUCKET = "openknowledge-508216-raw"
 DATASET = "publication-venues"
+TLDRS = "tldrs"
 DOCKER = shutil.which("docker")
 
 pytestmark = pytest.mark.skipif(
@@ -81,12 +87,16 @@ def ports() -> Iterator[dict[str, str]]:
         subprocess.run([*compose, "down", "--volumes"], env=env, check=True)
 
 
-def archive(ports: dict[str, str], release: str, lines: list[str]) -> None:
-    """Archive one shard per line through the download service, as okp s2 download would."""
-    source = FakeSource()
-    source.releases = [release]
-    for index, line in enumerate(lines):
-        source.add(DATASET, f"part-{index}.gz", gzip.compress(line.encode() + b"\n", mtime=0))
+def packed(lines: list[str]) -> bytes:
+    return gzip.compress("".join(f"{line}\n" for line in lines).encode(), mtime=0)
+
+
+def archiving(
+    ports: dict[str, str],
+    source: FakeSource,
+    work: Callable[[DownloadDatasetService], Awaitable[None]],
+) -> None:
+    """Run ``work`` on the download service that archives ``source`` into the fake GCS."""
     config = gcs.GcsConfig(
         request_timeout_seconds=60,
         min_transfer_rate=1024,
@@ -95,20 +105,57 @@ def archive(ports: dict[str, str], release: str, lines: list[str]) -> None:
 
     async def run() -> None:
         async with gcs.connect(config) as store:
-            service = DownloadDatasetService(
-                catalog=source, downloads=source, store=store, producer=PRODUCER, clock=clock
+            await work(
+                DownloadDatasetService(
+                    catalog=source, downloads=source, store=store, producer=PRODUCER, clock=clock
+                )
             )
-            pinned = await service.pin_dataset(
-                DownloadDataset(release=release, dataset=DATASET, bucket=BUCKET)
-            )
-            for shard in pinned.shards:
-                await service.archive_shard(pinned, shard)
-            await service.write_manifest(pinned)
 
     asyncio.run(run())
 
 
-def okp_load(ports: dict[str, str], release: str) -> tuple[int, str]:
+async def archive_part(service: DownloadDatasetService, pinned: PinnedDataset) -> None:
+    for shard in pinned.shards:
+        await service.archive_shard(pinned, shard)
+    await service.write_manifest(pinned)
+
+
+def archive(ports: dict[str, str], release: str, lines: list[str], dataset: str = DATASET) -> None:
+    """Archive one shard per line through the download service, as okp s2 download would."""
+    source = FakeSource()
+    source.releases = [release]
+    for index, line in enumerate(lines):
+        source.add(dataset, f"part-{index}.gz", packed([line]))
+
+    async def work(service: DownloadDatasetService) -> None:
+        command = DownloadDataset(release=release, dataset=dataset, bucket=BUCKET)
+        await archive_part(service, await service.pin_dataset(command))
+
+    archiving(ports, source, work)
+
+
+def archive_diff(
+    ports: dict[str, str], from_release: str, release: str, updates: list[str], deletes: list[str]
+) -> None:
+    """Archive one update file and one delete file with the given records."""
+    source = FakeSource()
+    source.releases = [release]
+    source.add_diff(
+        TLDRS, from_release, release, {"part-0.gz": packed(updates)}, {"part-0.gz": packed(deletes)}
+    )
+
+    async def work(service: DownloadDatasetService) -> None:
+        command = DownloadDiff(
+            from_release=from_release, release=release, dataset=TLDRS, bucket=BUCKET
+        )
+        pinned = await service.pin_diff(command)
+        await archive_part(service, pinned.updates)
+        await archive_part(service, pinned.deletes)
+
+    archiving(ports, source, work)
+
+
+def okp(ports: dict[str, str], *args: str) -> tuple[int, str]:
     env = {
         "OKP_CLICKHOUSE_URL": f"http://127.0.0.1:{ports['CLICKHOUSE_PORT']}",
         "CLICKHOUSE_PASSWORD": "openknowledge",
@@ -116,24 +163,33 @@ def okp_load(ports: dict[str, str], release: str) -> tuple[int, str]:
         "OKP_GCS_API_ROOT": f"http://127.0.0.1:{ports['GCS_PORT']}",
         "OKP_TASK_RETRY_DELAY_SECONDS": "0",
     }
-    args = ["s2", "load", "--release", release, "--dataset", DATASET, "--bucket", BUCKET]
-    result = CliRunner().invoke(cli.main, args, env=env)
+    result = CliRunner().invoke(cli.main, ["s2", *args, "--bucket", BUCKET], env=env)
     return result.exit_code, result.output
 
 
-def loaded(ports: dict[str, str], release: str) -> dict[str, Any]:
-    code, output = okp_load(ports, release)
+def okp_load(ports: dict[str, str], release: str) -> tuple[int, str]:
+    return okp(ports, "load", "--release", release, "--dataset", DATASET)
+
+
+def ran(ports: dict[str, str], *args: str) -> dict[str, Any]:
+    code, output = okp(ports, *args)
     assert code == 0, output
     return json.loads(output.splitlines()[-1])
 
 
-def query(ports: dict[str, str], sql: str) -> None:
-    httpx.post(
+def loaded(ports: dict[str, str], release: str) -> dict[str, Any]:
+    return ran(ports, "load", "--release", release, "--dataset", DATASET)
+
+
+def query(ports: dict[str, str], sql: str) -> str:
+    response = httpx.post(
         f"http://127.0.0.1:{ports['CLICKHOUSE_PORT']}",
         params={"database": "openknowledge"},
         headers={"X-ClickHouse-User": "openknowledge", "X-ClickHouse-Key": "openknowledge"},
         content=sql,
-    ).raise_for_status()
+    )
+    response.raise_for_status()
+    return response.text
 
 
 def test_a_load_is_repeatable_and_rebuilt_from_raw(ports: dict[str, str]) -> None:
@@ -159,3 +215,26 @@ def test_a_key_repeated_identically_is_counted(ports: dict[str, str]) -> None:
     archive(ports, "2026-10-20", [json.dumps(record), json.dumps(dict(reversed(record.items())))])
     result = loaded(ports, "2026-10-20")
     assert (result["live_rows"], result["identical_duplicates"]) == (1, 1)
+
+
+def test_a_diff_upserts_and_deletes_and_is_repeatable(ports: dict[str, str]) -> None:
+    old, new = "2026-11-03", "2026-11-10"
+
+    def tldr(key: int, text: str) -> str:
+        return json.dumps({"corpusid": key, "model": "tldr@v2.0.0", "text": text})
+
+    archive(ports, old, [tldr(1, "old"), tldr(2, "gone")], TLDRS)
+    ran(ports, "load", "--release", old, "--dataset", TLDRS)
+    archive_diff(
+        ports, old, new, updates=[tldr(1, "new"), tldr(3, "added")], deletes=['{"corpusid": 2}']
+    )
+    diff = ["load-diff", "--from-release", old, "--release", new, "--dataset", TLDRS]
+    first = ran(ports, *diff)
+    assert (first["loaded"], first["upserted"], first["deleted"]) == (2, 2, 1)
+    assert query(ports, "SELECT corpusid, text FROM tldrs FINAL ORDER BY corpusid") == (
+        "1\tnew\n3\tadded\n"
+    )
+    applied = "SELECT release, from_release FROM applied WHERE target = 'tldrs'"
+    assert query(ports, f"{applied} ORDER BY applied_at DESC LIMIT 1") == f"{new}\t{old}\n"
+    again = ran(ports, *diff)
+    assert (again["loaded"], again["already_loaded"]) == (0, 2)

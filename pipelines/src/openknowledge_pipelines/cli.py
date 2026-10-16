@@ -1,4 +1,4 @@
-"""The ``okp`` command line, where only ``download``, ``load`` and ``serve`` load Prefect."""
+"""The ``okp`` command line, where only the commands that run flows load Prefect."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from openknowledge_core.ingestion import (
     DownloadShard,
     IngestionError,
     LoadDataset,
+    LoadDiff,
     PinRelease,
 )
 from openknowledge_pipelines import bootstrap
@@ -28,6 +29,7 @@ PIN_HELP = "Archive a release's metadata and print it as JSON, with the explicit
 DOWNLOAD_HELP = "Archive a whole dataset through the Prefect flow."
 DOWNLOAD_SHARD_HELP = "Archive one shard of a dataset, or one file of its diff, without Prefect."
 LOAD_HELP = "Load an archived dataset into its ClickHouse table through the Prefect flow."
+LOAD_DIFF_HELP = "Load an archived diff into its ClickHouse table through the Prefect flow."
 SERVE_HELP = "Serve the flows the control VM runs, until stopped."
 RELEASE_HELP = "The release_id that okp s2 pin printed, such as 2026-10-06."
 DATASET_HELP = "Dataset name, such as publication-venues."
@@ -191,6 +193,32 @@ def load(release: str, dataset: str, bucket: str, prefix: str) -> None:
     from openknowledge_pipelines.deployments import s2_load
 
     _run(lambda: s2_load(command))
+
+
+@s2.command("load-diff", help=LOAD_DIFF_HELP, short_help=LOAD_DIFF_HELP)
+@click.option(
+    "--from-release",
+    required=True,
+    help="The release the diff starts from, right before --release.",
+)
+@click.option("--release", required=True, help=RELEASE_HELP)
+@click.option("--dataset", required=True, help=DATASET_HELP)
+@click.option("--bucket", required=True, help="Bucket holding the archive, without gs://.")
+@click.option("--prefix", default=_default(LoadDiff, "prefix"), show_default=True, help=PREFIX_HELP)
+def load_diff(from_release: str, release: str, dataset: str, bucket: str, prefix: str) -> None:
+    command = _command(
+        LoadDiff,
+        OPTION_RULES,
+        from_release=from_release,
+        release=release,
+        dataset=dataset,
+        bucket=bucket,
+        prefix=prefix,
+    )
+    _settings(LoadSettings)
+    from openknowledge_pipelines.deployments import s2_load_diff
+
+    _run(lambda: s2_load_diff(command))
 
 
 @main.command(help=SERVE_HELP, short_help=SERVE_HELP)

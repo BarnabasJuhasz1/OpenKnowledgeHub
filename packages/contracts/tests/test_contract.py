@@ -34,7 +34,7 @@ def test_refuses_repeated_field_names() -> None:
         contract(required("id", pa.uint64()), required("id", pa.uint64()))
 
 
-@pytest.mark.parametrize("name", ["source_release", "version"])
+@pytest.mark.parametrize("name", ["source_release", "version", "removed"])
 def test_refuses_source_fields_named_like_table_columns(name: str) -> None:
     with pytest.raises(ValueError, match=name):
         contract(required("id", pa.uint64()), required(name, pa.string()))

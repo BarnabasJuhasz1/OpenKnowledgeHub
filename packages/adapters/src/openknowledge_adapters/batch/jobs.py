@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import uuid
+import asyncio
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -10,7 +10,12 @@ import aiohttp
 from gcloud.aio.auth import Token
 
 from openknowledge_adapters.batch.config import BatchConfig
-from openknowledge_core.ingestion.errors import TRANSIENT_STATUSES, BatchRejected, BatchUnavailable
+from openknowledge_core.ingestion.errors import (
+    TRANSIENT_STATUSES,
+    BatchRejected,
+    BatchTimedOut,
+    BatchUnavailable,
+)
 from openknowledge_core.ingestion.models import JobOutcome, ShardJob
 
 ENDED = {
@@ -18,6 +23,10 @@ ENDED = {
     "FAILED": JobOutcome.FAILED,
     "CANCELLED": JobOutcome.FAILED,
 }
+
+
+class _JobExists(Exception):
+    """The job ID holds the operation's UUID, so an earlier attempt of it created the job."""
 
 
 class CloudBatchJobs:
@@ -35,27 +44,59 @@ class CloudBatchJobs:
         self._config = config
         self._root = api_root
         self._sleep = sleep
+        self._parent = f"projects/{config.project}/locations/{config.region}"
 
     async def submit(self, job: ShardJob) -> str:
-        parent = f"projects/{self._config.project}/locations/{self._config.region}"
-        body = await self._call(
-            "POST",
-            f"{parent}/jobs",
-            params={"jobId": job_id(job)},
-            json=job_spec(self._config, job),
-        )
-        return str(body["name"])
+        name = f"{self._parent}/jobs/{job_id(job)}"
+        try:
+            await self._call(
+                "POST",
+                f"{self._parent}/jobs",
+                params={"jobId": job_id(job), "requestId": str(job.operation_id)},
+                json=job_spec(self._config, job),
+            )
+        except _JobExists:
+            pass
+        except BatchUnavailable as exc:
+            raise BatchUnavailable(
+                f"Cloud Batch job {name} submission is unconfirmed; it may be running. {exc}"
+            ) from None
+        return name
+
+    async def running(self) -> list[str]:
+        """Download jobs, told apart from other Batch jobs by their operation-id label."""
+        names: list[str] = []
+        params: dict[str, str] = {}
+        while True:
+            body = await self._call("GET", f"{self._parent}/jobs", params=params)
+            names += [
+                str(job["name"])
+                for job in body.get("jobs", [])
+                if "operation-id" in job.get("labels", {})
+                and job.get("status", {}).get("state") not in ENDED
+            ]
+            if not body.get("nextPageToken"):
+                return names
+            params = {"pageToken": body["nextPageToken"]}
 
     async def wait(self, name: str) -> JobOutcome:
-        """Polls until the job ends, through any number of failed polls."""
-        while True:
-            try:
-                state = (await self._call("GET", name)).get("status", {}).get("state")
-            except BatchUnavailable:
-                state = None
-            if state in ENDED:
-                return ENDED[state]
-            await self._sleep(self._config.poll_seconds)
+        """Bound the whole wait, including failed or stalled polls."""
+        try:
+            async with asyncio.timeout(self._config.wait_timeout_seconds):
+                while True:
+                    try:
+                        state = (await self._call("GET", name)).get("status", {}).get("state")
+                    except BatchUnavailable:
+                        state = None
+                    if state in ENDED:
+                        return ENDED[state]
+                    await self._sleep(self._config.poll_seconds)
+        except TimeoutError:
+            raise BatchTimedOut(
+                f"Cloud Batch job {name} did not finish within "
+                f"{self._config.wait_timeout_seconds:g}s and may still be running; "
+                "every download waits for it, so cancel it if it hangs"
+            ) from None
 
     async def _call(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
         try:
@@ -74,15 +115,17 @@ class CloudBatchJobs:
             return body
         if status in TRANSIENT_STATUSES:
             raise BatchUnavailable(f"Cloud Batch answered HTTP {status}; rerun later")
+        if status == 409 and method == "POST":
+            raise _JobExists
         message = str(body.get("error", {}).get("message", "no message"))
         raise BatchRejected(f"Cloud Batch refused {method} {path} with HTTP {status}: {message}")
 
 
 def job_id(job: ShardJob) -> str:
-    """Lowercase letters, digits and hyphens, at most 63, and new for every submission."""
+    """At most 63 lowercase characters, stable for retries of the same operation."""
     part = f"-{job.part}" if job.part else ""
-    name = f"s2-{job.dataset.replace('_', '-')}-{job.release_id}{part}"[:54]
-    return f"{name}-{uuid.uuid4().hex[:8]}"
+    name = f"s2-{job.dataset.replace('_', '-')}-{job.release_id}{part}"[:30].rstrip("-")
+    return f"{name}-{job.operation_id.hex}"
 
 
 def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
@@ -110,7 +153,14 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
         ],
         "allocationPolicy": {
             "serviceAccount": {"email": config.service_account},
-            "instances": [{"policy": {"machineType": config.machine_type}}],
+            "instances": [
+                {
+                    "policy": {
+                        "machineType": config.machine_type,
+                        "provisioningModel": config.provisioning_model,
+                    }
+                }
+            ],
             "network": {
                 "networkInterfaces": [{"network": config.network, "subnetwork": config.subnetwork}]
             },
@@ -119,6 +169,7 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
             "dataset": job.dataset.replace("_", "-"),
             "release": job.release_id,
             "part": job.part or "base",
+            "operation-id": job.operation_id.hex,
         },
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
     }

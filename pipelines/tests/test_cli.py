@@ -8,13 +8,22 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from prefect.client.orchestration import get_client
 from prefect.deployments.runner import RunnerDeployment
 from prefect.flows import load_flow_from_entrypoint
 
 from openknowledge_core.ingestion import DownloadDatasetService, LoadDatasetService
 from openknowledge_pipelines import bootstrap, cli, deployments
 from openknowledge_pipelines.settings import LoadSettings, PipelineSettings
-from tests.fakes.ports import PAPERS, PRODUCER, FakeSource, FakeStore, FakeTables, clock
+from tests.fakes.ports import (
+    PAPERS,
+    PRODUCER,
+    FakeApplied,
+    FakeSource,
+    FakeStore,
+    FakeTables,
+    clock,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 TARGET = ["--bucket", "raw", "--prefix", "s2"]
@@ -130,7 +139,11 @@ def test_load_runs_the_flow_without_an_s2_key(
     @asynccontextmanager
     async def open_load_service(settings: LoadSettings) -> AsyncGenerator[LoadDatasetService]:
         yield LoadDatasetService(
-            store=store, tables=FakeTables(store), producer=PRODUCER, clock=clock
+            store=store,
+            tables=FakeTables(store),
+            applied=FakeApplied(),
+            producer=PRODUCER,
+            clock=clock,
         )
 
     monkeypatch.setattr(bootstrap, "open_load_service", open_load_service)
@@ -142,6 +155,7 @@ def test_load_runs_the_flow_without_an_s2_key(
     assert json.loads(output.splitlines()[-1])["loaded"] == 2
 
 
+@pytest.mark.usefixtures("prefect_server")
 def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPatch) -> None:
     served: list[RunnerDeployment] = []
 
@@ -155,10 +169,13 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
     assert result.exit_code == 0, result.output
     assert [load_flow_from_entrypoint(str(found.entrypoint)) for found in served] == [
         deployments.s2_load,
+        deployments.s2_load_diff,
         deployments.s2_batch_download,
         deployments.s2_batch_download_diff,
     ]
-    assert [found.concurrency_limit for found in served] == [None, 1, 1]
+    assert [found.concurrency_limit for found in served] == [None, None, 1, 1]
+    with get_client(sync_client=True) as client:
+        assert client.read_global_concurrency_limit_by_name(deployments.S2_LIMIT).limit == 1
 
 
 def test_a_missing_key_fails_before_anything_opens(monkeypatch: pytest.MonkeyPatch) -> None:

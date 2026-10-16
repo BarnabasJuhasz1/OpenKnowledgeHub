@@ -13,7 +13,7 @@ from typing import Any
 import pytest
 
 from openknowledge_contracts.tables import DatasetContract
-from openknowledge_contracts.tables.clickhouse import table_columns
+from openknowledge_contracts.tables.clickhouse import Column, table_columns
 from openknowledge_contracts.tables.s2 import CONTRACTS
 from tests.clickhouse_local import (
     MIGRATIONS,
@@ -27,8 +27,9 @@ from tests.clickhouse_local import (
 
 type Catalog = dict[str, list[dict[str, Any]]]
 
-# Tables that hold no dataset: which objects were loaded into which table.
-BOOKKEEPING = {"loads"}
+# Tables that hold no dataset: which objects were loaded into which table, and which release each
+# table holds.
+BOOKKEEPING = {"loads", "applied"}
 
 
 def test_every_migration_is_a_numbered_goose_file_with_up_and_down() -> None:
@@ -65,6 +66,12 @@ def test_the_migrations_create_one_table_per_contract_and_the_bookkeeping(
     assert created == sorted({contract.table for contract in CONTRACTS.values()} | BOOKKEEPING)
 
 
+def expression(column: Column) -> tuple[str, str]:
+    if column.materialized:
+        return "MATERIALIZED", column.materialized
+    return ("DEFAULT", column.default) if column.default else ("", "")
+
+
 @needs_clickhouse
 @pytest.mark.parametrize("contract", CONTRACTS.values(), ids=list(CONTRACTS))
 def test_columns_match_the_contract(catalog: Catalog, contract: DatasetContract) -> None:
@@ -73,10 +80,7 @@ def test_columns_match_the_contract(catalog: Catalog, contract: DatasetContract)
         for c in catalog["columns"]
         if c["table"] == contract.table
     ]
-    expected = [
-        (c.name, c.type, "MATERIALIZED" if c.materialized else "", c.materialized)
-        for c in table_columns(contract)
-    ]
+    expected = [(c.name, c.type, *expression(c)) for c in table_columns(contract)]
     assert actual == expected
 
 
@@ -94,10 +98,8 @@ def test_tables_keep_the_highest_version_per_key(
 def test_up_and_down_rerun_and_down_drops_every_table_up_created(tmp_path: Path) -> None:
     """Goose records a version only after a file ran, so a crashed migration runs again."""
     sql = f"""
-        {up()}
-        {up()}
-        {down()}
-        {down()}
+        {up(2)}
+        {down(2)}
         SELECT name FROM system.tables WHERE database = currentDatabase() FORMAT JSONEachRow;
     """
     assert clickhouse_local(sql, tmp_path) == []
