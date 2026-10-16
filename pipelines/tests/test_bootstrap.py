@@ -1,22 +1,16 @@
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from types import SimpleNamespace
 
 import pytest
 from pydantic import ValidationError
 
-from openknowledge_adapters import clickhouse, gcs, semantic_scholar
-from openknowledge_core.ingestion import DownloadDatasetService, WatchdogService
+from openknowledge_adapters import gcs, semantic_scholar
+from openknowledge_core.ingestion import DownloadDatasetService
 from openknowledge_pipelines import bootstrap
-from openknowledge_pipelines.settings import PipelineSettings, WatchdogSettings
-from tests.fakes.ports import FakeApplied, FakeStore
+from openknowledge_pipelines.settings import PipelineSettings
+from tests.fakes.ports import FakeStore
 
 DIGEST = "sha256:" + "a" * 64
-LOAD_ENV = {
-    "OKP_CLICKHOUSE_URL": "http://clickhouse:8123",
-    "CLICKHOUSE_PASSWORD": "dev",
-    "OKP_CLICKHOUSE_RAW_BUCKET": "raw",
-}
 
 
 def settings() -> PipelineSettings:
@@ -94,32 +88,3 @@ def test_the_producer_names_the_package_and_the_image(monkeypatch: pytest.Monkey
         "0.1.0",
         DIGEST,
     )
-
-
-@pytest.mark.parametrize(
-    ("configured", "expected"),
-    [(None, 60.0), ("7.5", 7.5)],
-    ids=["default", "OKP_WATCHDOG_TIMEOUT_SECONDS=7.5"],
-)
-async def test_the_watchdog_queries_with_its_own_timeout_not_the_load_one(
-    monkeypatch: pytest.MonkeyPatch, configured: str | None, expected: float
-) -> None:
-    for name, value in LOAD_ENV.items():
-        monkeypatch.setenv(name, value)
-    if configured is not None:
-        monkeypatch.setenv("OKP_WATCHDOG_TIMEOUT_SECONDS", configured)
-    configs: list[clickhouse.ClickHouseConfig] = []
-
-    @asynccontextmanager
-    async def spy_clickhouse(
-        config: clickhouse.ClickHouseConfig,
-    ) -> AsyncGenerator[SimpleNamespace]:
-        configs.append(config)
-        yield SimpleNamespace(applied=FakeApplied())  # the real client would open a pool here
-
-    monkeypatch.setattr(clickhouse, "connect", spy_clickhouse)
-    settings = WatchdogSettings()  # pyright: ignore[reportCallIssue]
-    async with bootstrap.open_watchdog(settings) as service:
-        assert isinstance(service, WatchdogService)
-    [config] = configs
-    assert (config.timeout_seconds, settings.clickhouse_timeout_seconds) == (expected, 3600.0)

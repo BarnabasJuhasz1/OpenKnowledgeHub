@@ -191,8 +191,9 @@ def load(release: str, dataset: str, bucket: str, prefix: str) -> None:
         prefix=prefix,
     )
     _settings(LoadSettings)
-    from openknowledge_pipelines.deployments import s2_load
+    from openknowledge_pipelines.deployments import ensure_limits, s2_load
 
+    ensure_limits()
     _run(lambda: s2_load(command))
 
 
@@ -217,14 +218,14 @@ def load_diff(from_release: str, release: str, dataset: str, bucket: str, prefix
         prefix=prefix,
     )
     _settings(LoadSettings)
-    from openknowledge_pipelines.deployments import s2_load_diff
+    from openknowledge_pipelines.deployments import ensure_limits, s2_load_diff
 
+    ensure_limits()
     _run(lambda: s2_load_diff(command))
 
 
 @main.command(help=SERVE_HELP, short_help=SERVE_HELP)
 def serve() -> None:
-    _settings(LoadSettings)
     _settings(BatchSettings)
     _settings(WatchdogSettings)
     from openknowledge_pipelines import deployments

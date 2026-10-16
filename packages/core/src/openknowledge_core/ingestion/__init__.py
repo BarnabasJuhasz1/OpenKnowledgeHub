@@ -27,7 +27,6 @@ from openknowledge_core.ingestion.models import (
     PreparedLoad,
     ShardJob,
     ShardOutcome,
-    TableFreshness,
 )
 from openknowledge_core.ingestion.ports import (
     AppliedReleases,
@@ -70,7 +69,6 @@ __all__ = [
     "ShardJob",
     "ShardJobs",
     "ShardOutcome",
-    "TableFreshness",
     "TableLoader",
     "TransientError",
     "WatchdogResult",

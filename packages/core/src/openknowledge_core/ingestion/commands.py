@@ -8,7 +8,7 @@ from pydantic import AwareDatetime, BaseModel, ConfigDict, NonNegativeInt, model
 
 from openknowledge_contracts.datasets import DatasetName, DiffPart, ReleaseId, ShardRef
 from openknowledge_contracts.manifests import BucketName, ObjectPath, ObjectPrefix
-from openknowledge_core.ingestion.models import ShardOutcome, TableFreshness, check_diff
+from openknowledge_core.ingestion.models import AppliedRelease, ShardOutcome, check_diff
 
 DEFAULT_PREFIX = "semantic-scholar"
 
@@ -188,10 +188,10 @@ class BatchDiffDownloadResult(BaseModel):
 
 
 class WatchdogResult(BaseModel):
-    """``stale`` names the tables whose last load is too old, in ``checked`` order."""
+    """The last record of each table loaded too long ago, and the names of tables never loaded."""
 
     model_config = ConfigDict(frozen=True)
 
     checked_at: AwareDatetime
-    checked: tuple[TableFreshness, ...]
-    stale: tuple[str, ...]
+    stale: tuple[AppliedRelease, ...]
+    never_loaded: tuple[str, ...]

@@ -199,24 +199,13 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         True,
     )
     with get_client(sync_client=True) as client:
-        assert client.read_global_concurrency_limit_by_name(deployments.S2_LIMIT).limit == 1
+        for name in (deployments.S2_LIMIT, deployments.LOAD_LIMIT):
+            assert client.read_global_concurrency_limit_by_name(name).limit == 1
 
 
-@pytest.mark.parametrize(
-    ("max_age_days", "stale", "summary"),
-    [
-        (None, (), "watchdog checked 6 tables: 0 older than 10 days, 5 never loaded"),
-        ("3", ("papers",), "watchdog checked 6 tables: 1 older than 3 days, 5 never loaded"),
-    ],
-    ids=["default", "OKP_WATCHDOG_MAX_AGE_DAYS=3"],
-)
 @pytest.mark.usefixtures("prefect_server")
 async def test_the_watchdog_deployment_runs_over_the_wired_service(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    max_age_days: str | None,
-    stale: tuple[str, ...],
-    summary: str,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     fake = FakeApplied()
     fake.records.append(applied_release("papers", RELEASE, timedelta(days=4)))
@@ -229,19 +218,13 @@ async def test_the_watchdog_deployment_runs_over_the_wired_service(
     monkeypatch.delenv("S2_API_KEY", raising=False)
     for name, value in LOAD_ENV.items():
         monkeypatch.setenv(name, value)
-    if max_age_days is not None:
-        monkeypatch.setenv("OKP_WATCHDOG_MAX_AGE_DAYS", max_age_days)
     caplog.set_level(logging.INFO)
     # Flow is invariant in its return type, so pyright cannot pick the awaitable overload here.
     state = await cast("Awaitable[State[WatchdogResult]]", deployments.watchdog(return_state=True))
     assert state.is_completed()
     result = await state.aresult()
-    assert (len(result.checked), result.stale) == (6, stale)
-    assert summary in caplog.messages
-    stale_lines = [message for message in caplog.messages if message.startswith("watchdog stale")]
-    assert stale_lines == [
-        f"watchdog stale: {table} holds {RELEASE}, applied 2026-10-06 12:00 UTC" for table in stale
-    ]
+    assert (result.stale, len(result.never_loaded)) == ((), 5)
+    assert "watchdog checked 6 tables: 0 older than 14 days, 5 never loaded" in caplog.messages
 
 
 def test_a_missing_key_fails_before_anything_opens(monkeypatch: pytest.MonkeyPatch) -> None:

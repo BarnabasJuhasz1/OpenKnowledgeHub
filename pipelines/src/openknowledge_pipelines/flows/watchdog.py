@@ -48,23 +48,20 @@ def watchdog_flow(
     async def check_freshness() -> WatchdogResult:
         logger = get_run_logger()
         result = await service.freshness(TABLES, max_age)
-        for found in result.checked:
-            # TableFreshness refuses a stale table without these, so the checks only narrow types.
-            if found.stale and found.release is not None and found.applied_at is not None:
-                logger.error(
-                    "%s: %s holds %s, applied %s",
-                    STALE,
-                    found.table,
-                    found.release,
-                    found.applied_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC"),
-                )
-        never_loaded = sum(found.release is None for found in result.checked)
+        for record in result.stale:
+            logger.error(
+                "%s: %s holds %s, applied %s",
+                STALE,
+                record.target,
+                record.release,
+                record.applied_at.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC"),
+            )
         logger.info(
             "watchdog checked %d tables: %d older than %d days, %d never loaded",
-            len(result.checked),
+            len(TABLES),
             len(result.stale),
             max_age.days,
-            never_loaded,
+            len(result.never_loaded),
         )
         return result
 

@@ -54,7 +54,7 @@ class LoadSettings(CommonSettings):
 
 
 class WatchdogSettings(LoadSettings):
-    watchdog_max_age_days: PositiveInt = 10
+    watchdog_max_age_days: PositiveInt = 14
     """Days since its last load after which a table gets a ``watchdog stale`` line."""
     watchdog_timeout_seconds: PositiveFloat = 60.0
     """Per query, in place of the load timeout, which allows for an insert of hours."""
