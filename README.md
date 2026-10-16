@@ -59,7 +59,7 @@ Each submission keeps the same operation ID and job name across task retries, so
 If that wait expires, the run fails and names the job.
 
 Both download deployments take the Prefect global concurrency limit `semantic-scholar`, which `okp serve` creates with a limit of 1, so their runs never overlap.
-Before submitting a job, a run waits for any download job still queued or running in Batch, such as one left by a run that failed or was cancelled.
+Before submitting a job, a run deletes any download job still queued in Batch, such as one left by a run that failed or was cancelled, and waits for any still running.
 
 ## Loading into ClickHouse
 
