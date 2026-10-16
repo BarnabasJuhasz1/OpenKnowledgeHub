@@ -49,3 +49,19 @@ class LoadSettings(CommonSettings):
     clickhouse_raw_bucket: BucketName
     """The bucket the server's ``raw`` named collection reads."""
     clickhouse_timeout_seconds: PositiveFloat = 3600.0
+
+
+class BatchSettings(PipelineSettings):
+    image_digest: ImageDigest  # pyright: ignore[reportIncompatibleVariableOverride, reportGeneralTypeIssues]
+    """Batch tasks run the image at this digest."""
+    batch_project: str
+    batch_region: str
+    batch_service_account: str
+    batch_network: str
+    batch_subnetwork: str
+    batch_image_repository: str
+    batch_s2_key_secret: str
+    """The Secret Manager version Batch puts in each task's S2_API_KEY."""
+    batch_machine_type: str = "e2-standard-2"
+    batch_max_run_seconds: PositiveInt = 6 * 60 * 60
+    batch_poll_seconds: PositiveFloat = 30.0

@@ -94,3 +94,13 @@ class LoadDatasetResult(BaseModel):
     live_rows: NonNegativeInt
     identical_duplicates: NonNegativeInt
     manifest: ObjectPath
+
+
+class BatchDownloadResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    release_id: ReleaseId
+    dataset: DatasetName
+    shards: NonNegativeInt
+    jobs: tuple[str, ...]
+    manifest: ObjectPath

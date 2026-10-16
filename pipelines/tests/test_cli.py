@@ -23,6 +23,17 @@ LOAD_ENV = {
     "CLICKHOUSE_PASSWORD": "dev",
     "OKP_CLICKHOUSE_RAW_BUCKET": "raw",
 }
+BATCH_ENV = {
+    "S2_API_KEY": "k",
+    "OKP_IMAGE_DIGEST": "sha256:" + "a" * 64,
+    "OKP_BATCH_PROJECT": "p",
+    "OKP_BATCH_REGION": "europe-west4",
+    "OKP_BATCH_SERVICE_ACCOUNT": "download@p.iam.gserviceaccount.com",
+    "OKP_BATCH_NETWORK": "n",
+    "OKP_BATCH_SUBNETWORK": "s",
+    "OKP_BATCH_IMAGE_REPOSITORY": "repo/pipelines",
+    "OKP_BATCH_S2_KEY_SECRET": "projects/p/secrets/s2-api-key/versions/latest",
+}
 
 
 def okp(*args: str) -> tuple[int, str]:
@@ -59,10 +70,9 @@ def test_download_runs_the_flow_and_prints_the_result() -> None:
 
 
 @pytest.mark.usefixtures("wired")
-def test_download_shard_archives_one_shard() -> None:
-    code, output = okp(
-        "download-shard", "--release", "2026-10-06", "--dataset", "papers", "--shard", "1", *TARGET
-    )
+def test_download_shard_archives_one_shard(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OKP_SHARD", "1")
+    code, output = okp("download-shard", "--release", "2026-10-06", "--dataset", "papers", *TARGET)
     assert code == 0, output
     result = json.loads(output)
     assert (result["index"], result["outcome"]) == (1, "created")
@@ -134,13 +144,15 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         served.extend(found)
 
     monkeypatch.setattr(deployments, "prefect_serve", fake_serve)
-    for name, value in LOAD_ENV.items():
+    for name, value in {**LOAD_ENV, **BATCH_ENV}.items():
         monkeypatch.setenv(name, value)
     result = CliRunner().invoke(cli.main, ["serve"])
     assert result.exit_code == 0, result.output
-    [deployment] = served
-    assert deployment.entrypoint is not None
-    assert load_flow_from_entrypoint(deployment.entrypoint) is deployments.s2_load
+    assert [load_flow_from_entrypoint(str(found.entrypoint)) for found in served] == [
+        deployments.s2_load,
+        deployments.s2_batch_download,
+    ]
+    assert [found.concurrency_limit for found in served] == [None, 1]
 
 
 def test_a_missing_key_fails_before_anything_opens(monkeypatch: pytest.MonkeyPatch) -> None:

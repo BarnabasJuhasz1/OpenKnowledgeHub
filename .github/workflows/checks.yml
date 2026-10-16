@@ -69,6 +69,10 @@ jobs:
             extra: clickhouse
             module: openknowledge_adapters.clickhouse
             tests: packages/adapters/tests/clickhouse
+          - package: openknowledge-adapters
+            extra: batch
+            module: openknowledge_adapters.batch
+            tests: packages/adapters/tests/batch
           - package: openknowledge-pipelines
             tests: pipelines/tests
     steps:

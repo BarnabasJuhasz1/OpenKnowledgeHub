@@ -12,6 +12,7 @@ gcs = ["gcloud-aio-storage>=9.6,<10", "gcloud-aio-auth>=5.4.4,<6", "aiohttp>=3.1
 semantic-scholar = ["httpx>=0.28,<1"]
 # pyarrow is imported directly, in the range openknowledge-contracts requires.
 clickhouse = ["httpx>=0.28,<1", "pyarrow>=26,<27"]
+batch = ["gcloud-aio-auth>=5.4.4,<6", "aiohttp>=3.12,<4"]
 
 [dependency-groups]
 dev = ["pytest>=9,<10", "pytest-asyncio>=1.4,<2"]

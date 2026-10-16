@@ -17,7 +17,12 @@ from openknowledge_core.ingestion import (
     PinRelease,
 )
 from openknowledge_pipelines import bootstrap
-from openknowledge_pipelines.settings import CommonSettings, LoadSettings, PipelineSettings
+from openknowledge_pipelines.settings import (
+    BatchSettings,
+    CommonSettings,
+    LoadSettings,
+    PipelineSettings,
+)
 
 PIN_HELP = "Archive a release's metadata and print it as JSON, with the explicit release_id."
 DOWNLOAD_HELP = "Archive a whole dataset through the Prefect flow."
@@ -119,8 +124,9 @@ def download(release: str, dataset: str, bucket: str, prefix: str) -> None:
 @click.option(
     "--shard",
     required=True,
+    envvar="OKP_SHARD",
     metavar="N",
-    help="Index into the dataset's archived inventory, dataset.json.",
+    help="Index into the dataset's archived inventory, dataset.json; Batch tasks set OKP_SHARD.",
 )
 @click.option("--bucket", required=True, help="Target bucket name, without gs://.")
 @click.option(
@@ -170,6 +176,7 @@ def load(release: str, dataset: str, bucket: str, prefix: str) -> None:
 @main.command(help=SERVE_HELP, short_help=SERVE_HELP)
 def serve() -> None:
     _settings(LoadSettings)
+    _settings(BatchSettings)
     from openknowledge_pipelines import deployments
 
     deployments.serve()

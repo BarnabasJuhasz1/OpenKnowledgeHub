@@ -118,6 +118,7 @@ forbidden_modules = [
     "aiohttp",
     "openknowledge_adapters.gcs",
     "openknowledge_adapters.clickhouse",
+    "openknowledge_adapters.batch",
 ]
 
 [[tool.importlinter.contracts]]
@@ -129,6 +130,7 @@ forbidden_modules = [
     "google",
     "openknowledge_adapters.semantic_scholar",
     "openknowledge_adapters.clickhouse",
+    "openknowledge_adapters.batch",
 ]
 
 [[tool.importlinter.contracts]]
@@ -141,6 +143,19 @@ forbidden_modules = [
     "aiohttp",
     "openknowledge_adapters.gcs",
     "openknowledge_adapters.semantic_scholar",
+    "openknowledge_adapters.batch",
+]
+
+[[tool.importlinter.contracts]]
+name = "The Batch adapter imports only its own extra"
+type = "forbidden"
+source_modules = ["openknowledge_adapters.batch"]
+forbidden_modules = [
+    "httpx",
+    "google",
+    "openknowledge_adapters.gcs",
+    "openknowledge_adapters.semantic_scholar",
+    "openknowledge_adapters.clickhouse",
 ]
 
 [[tool.importlinter.contracts]]

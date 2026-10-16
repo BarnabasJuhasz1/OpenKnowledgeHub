@@ -8,12 +8,18 @@ from datetime import UTC, datetime
 from importlib.metadata import version
 from typing import TYPE_CHECKING
 
-from openknowledge_adapters import clickhouse, gcs, semantic_scholar
+from openknowledge_adapters import batch, clickhouse, gcs, semantic_scholar
 from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
-from openknowledge_core.ingestion import DownloadDatasetService, LoadDatasetService
-from openknowledge_pipelines.settings import CommonSettings, LoadSettings, PipelineSettings
+from openknowledge_core.ingestion import DownloadDatasetService, LoadDatasetService, ShardJobs
+from openknowledge_pipelines.settings import (
+    BatchSettings,
+    CommonSettings,
+    LoadSettings,
+    PipelineSettings,
+)
 
 if TYPE_CHECKING:
+    from openknowledge_pipelines.flows.s2_batch_download import S2BatchDownloadFlow
     from openknowledge_pipelines.flows.s2_download import S2DownloadFlow
     from openknowledge_pipelines.flows.s2_load import S2LoadFlow
 
@@ -94,6 +100,41 @@ def load_flow(service: LoadDatasetService, settings: LoadSettings) -> S2LoadFlow
 
     return s2_load_flow(
         service,
+        task_retries=settings.task_retries,
+        retry_delay_seconds=settings.task_retry_delay_seconds,
+    )
+
+
+@asynccontextmanager
+async def open_batch_download(
+    settings: BatchSettings,
+) -> AsyncGenerator[tuple[DownloadDatasetService, ShardJobs], None]:
+    config = batch.BatchConfig(
+        project=settings.batch_project,
+        region=settings.batch_region,
+        service_account=settings.batch_service_account,
+        network=settings.batch_network,
+        subnetwork=settings.batch_subnetwork,
+        image=f"{settings.batch_image_repository}@{settings.image_digest}",
+        machine_type=settings.batch_machine_type,
+        max_run_seconds=settings.batch_max_run_seconds,
+        poll_seconds=settings.batch_poll_seconds,
+        environment={"OKP_IMAGE_DIGEST": settings.image_digest},
+        secrets={"S2_API_KEY": settings.batch_s2_key_secret},
+    )
+    async with open_service(settings) as service, batch.connect(config) as jobs:
+        yield service, jobs
+
+
+def batch_download_flow(
+    service: DownloadDatasetService, jobs: ShardJobs, settings: BatchSettings
+) -> S2BatchDownloadFlow:
+    from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flow
+
+    return s2_batch_download_flow(
+        service,
+        jobs,
+        rounds=settings.task_retries + 1,
         task_retries=settings.task_retries,
         retry_delay_seconds=settings.task_retry_delay_seconds,
     )

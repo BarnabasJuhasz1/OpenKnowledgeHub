@@ -24,6 +24,10 @@ class TableUnavailable(TransientError):
     """A ClickHouse call failed in a way a retry may fix."""
 
 
+class BatchUnavailable(TransientError):
+    """A Cloud Batch call failed in a way a retry may fix."""
+
+
 class CredentialRejected(IngestionError):
     pass
 
@@ -54,6 +58,10 @@ class StoreRejected(IngestionError):
 
 class TableRejected(IngestionError):
     """ClickHouse refused a call in a way a retry will not fix."""
+
+
+class BatchRejected(IngestionError):
+    """Cloud Batch refused a call in a way a retry will not fix."""
 
 
 class ContractViolation(IngestionError):
