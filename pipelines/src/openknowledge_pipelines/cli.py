@@ -23,6 +23,7 @@ from openknowledge_pipelines.settings import (
     CommonSettings,
     LoadSettings,
     PipelineSettings,
+    WatchdogSettings,
 )
 
 PIN_HELP = "Archive a release's metadata and print it as JSON, with the explicit release_id."
@@ -225,6 +226,7 @@ def load_diff(from_release: str, release: str, dataset: str, bucket: str, prefix
 def serve() -> None:
     _settings(LoadSettings)
     _settings(BatchSettings)
+    _settings(WatchdogSettings)
     from openknowledge_pipelines import deployments
 
     deployments.serve()

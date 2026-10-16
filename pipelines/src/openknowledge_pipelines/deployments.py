@@ -22,13 +22,17 @@ from openknowledge_core.ingestion import (
     LoadDatasetResult,
     LoadDiff,
     LoadDiffResult,
+    WatchdogResult,
 )
 from openknowledge_pipelines import bootstrap
-from openknowledge_pipelines.settings import BatchSettings, LoadSettings
+from openknowledge_pipelines.settings import BatchSettings, LoadSettings, WatchdogSettings
 
 DEPLOYMENT = "control-vm"
-RUNS_AT_ONCE = 2
+# A third slot beside one load and one download, so the watchdog's cron run seldom waits for one;
+# three runs started by hand would still hold it back.
+RUNS_AT_ONCE = 3
 S2_LIMIT = "semantic-scholar"
+WATCHDOG_CRON = "0 */6 * * *"
 
 
 def one_s2_user() -> AbstractAsyncContextManager[None]:
@@ -66,6 +70,13 @@ async def s2_batch_download_diff(command: DownloadDiff) -> BatchDiffDownloadResu
         return await bootstrap.batch_download_flows(service, jobs, settings).diff.fn(command)
 
 
+@flow(name="watchdog", persist_result=False)
+async def watchdog() -> WatchdogResult:
+    settings = WatchdogSettings()  # pyright: ignore[reportCallIssue]
+    async with bootstrap.open_watchdog(settings) as service:
+        return await bootstrap.watchdog_flow(service, settings).fn()
+
+
 def serve() -> None:
     with get_client(sync_client=True) as client:
         try:
@@ -89,6 +100,13 @@ def serve() -> None:
                 concurrency_limit=1,
             )
             for download in (s2_batch_download, s2_batch_download_diff)
+        ),
+        # Every 6 hours, for a log alert; it needs no S2 key, so it takes no limit.
+        RunnerDeployment.from_flow(
+            watchdog,
+            DEPLOYMENT,
+            entrypoint_type=EntrypointType.MODULE_PATH,
+            cron=WATCHDOG_CRON,
         ),
         limit=RUNS_AT_ONCE,
     )

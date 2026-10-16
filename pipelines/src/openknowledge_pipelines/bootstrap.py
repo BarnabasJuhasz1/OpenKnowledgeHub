@@ -4,24 +4,31 @@ from __future__ import annotations
 
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from typing import TYPE_CHECKING
 
 from openknowledge_adapters import batch, clickhouse, gcs, semantic_scholar
 from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
-from openknowledge_core.ingestion import DownloadDatasetService, LoadDatasetService, ShardJobs
+from openknowledge_core.ingestion import (
+    DownloadDatasetService,
+    LoadDatasetService,
+    ShardJobs,
+    WatchdogService,
+)
 from openknowledge_pipelines.settings import (
     BatchSettings,
     CommonSettings,
     LoadSettings,
     PipelineSettings,
+    WatchdogSettings,
 )
 
 if TYPE_CHECKING:
     from openknowledge_pipelines.flows.s2_batch_download import S2BatchDownloadFlows
     from openknowledge_pipelines.flows.s2_download import S2DownloadFlow
     from openknowledge_pipelines.flows.s2_load import S2LoadFlows
+    from openknowledge_pipelines.flows.watchdog import WatchdogFlow
 
 
 @asynccontextmanager
@@ -48,16 +55,9 @@ async def open_service(settings: PipelineSettings) -> AsyncGenerator[DownloadDat
 
 @asynccontextmanager
 async def open_load_service(settings: LoadSettings) -> AsyncGenerator[LoadDatasetService, None]:
-    clickhouse_config = clickhouse.ClickHouseConfig(
-        url=settings.clickhouse_url,
-        user=settings.clickhouse_user,
-        password=settings.clickhouse_password,
-        raw_bucket=settings.clickhouse_raw_bucket,
-        timeout_seconds=settings.clickhouse_timeout_seconds,
-    )
     async with (
         gcs.connect(_gcs(settings)) as store,
-        clickhouse.connect(clickhouse_config) as ch,
+        clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
     ):
         yield LoadDatasetService(
             store=store,
@@ -68,11 +68,28 @@ async def open_load_service(settings: LoadSettings) -> AsyncGenerator[LoadDatase
         )
 
 
+@asynccontextmanager
+async def open_watchdog(settings: WatchdogSettings) -> AsyncGenerator[WatchdogService, None]:
+    config = _clickhouse(settings, settings.watchdog_timeout_seconds)
+    async with clickhouse.connect(config) as ch:
+        yield WatchdogService(applied=ch.applied, clock=lambda: datetime.now(UTC))
+
+
 def _gcs(settings: CommonSettings) -> gcs.GcsConfig:
     return gcs.GcsConfig(
         request_timeout_seconds=settings.gcs_request_timeout_seconds,
         min_transfer_rate=settings.gcs_min_transfer_bytes_per_second,
         api_root=settings.gcs_api_root,
+    )
+
+
+def _clickhouse(settings: LoadSettings, timeout_seconds: float) -> clickhouse.ClickHouseConfig:
+    return clickhouse.ClickHouseConfig(
+        url=settings.clickhouse_url,
+        user=settings.clickhouse_user,
+        password=settings.clickhouse_password,
+        raw_bucket=settings.clickhouse_raw_bucket,
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -101,6 +118,17 @@ def load_flows(service: LoadDatasetService, settings: LoadSettings) -> S2LoadFlo
 
     return s2_load_flows(
         service,
+        task_retries=settings.task_retries,
+        retry_delay_seconds=settings.task_retry_delay_seconds,
+    )
+
+
+def watchdog_flow(service: WatchdogService, settings: WatchdogSettings) -> WatchdogFlow:
+    from openknowledge_pipelines.flows import watchdog
+
+    return watchdog.watchdog_flow(
+        service,
+        max_age=timedelta(days=settings.watchdog_max_age_days),
         task_retries=settings.task_retries,
         retry_delay_seconds=settings.task_retry_delay_seconds,
     )

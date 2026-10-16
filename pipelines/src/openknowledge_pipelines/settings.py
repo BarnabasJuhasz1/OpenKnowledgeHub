@@ -53,6 +53,13 @@ class LoadSettings(CommonSettings):
     clickhouse_timeout_seconds: PositiveFloat = 3600.0
 
 
+class WatchdogSettings(LoadSettings):
+    watchdog_max_age_days: PositiveInt = 10
+    """Days since its last load after which a table gets a ``watchdog stale`` line."""
+    watchdog_timeout_seconds: PositiveFloat = 60.0
+    """Per query, in place of the load timeout, which allows for an insert of hours."""
+
+
 class BatchSettings(PipelineSettings):
     image_digest: ImageDigest  # pyright: ignore[reportIncompatibleVariableOverride, reportGeneralTypeIssues]
     """Batch tasks run the image at this digest."""
