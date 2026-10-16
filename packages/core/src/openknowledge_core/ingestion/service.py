@@ -11,9 +11,12 @@ from datetime import datetime
 from pydantic import BaseModel, ValidationError
 
 from openknowledge_contracts.datasets import (
+    DIFF_INVENTORY_NAME,
     INVENTORY_NAME,
     ArchiveDocument,
     DatasetInventory,
+    DiffInventory,
+    DiffPart,
     ReleaseRecord,
     ShardRef,
     SignedMaterialError,
@@ -30,6 +33,7 @@ from openknowledge_contracts.manifests import (
 from openknowledge_core.ingestion.commands import (
     DownloadDataset,
     DownloadDatasetResult,
+    DownloadDiff,
     DownloadShard,
     DownloadShardResult,
     PinnedRelease,
@@ -52,11 +56,14 @@ from openknowledge_core.ingestion.integrity import IntegrityReport, StreamCheck
 from openknowledge_core.ingestion.models import (
     ByteStream,
     CheckedStream,
+    DiffListing,
     PinnedDataset,
+    PinnedDiff,
     ShardLink,
     ShardOutcome,
     StoredObject,
     dataset_file_path,
+    diff_file_path,
     release_record_path,
 )
 from openknowledge_core.ingestion.ports import ArtifactStore, ReleaseCatalog, ShardDownloader
@@ -86,7 +93,7 @@ class DownloadDatasetService:
         self._store = store
         self._producer = producer
         self._clock = clock
-        self._links: dict[tuple[str, str], dict[str, ShardLink]] = {}
+        self._links: dict[tuple[str | None, str, str], dict[str, ShardLink]] = {}
 
     async def pin_release(self, command: PinRelease) -> PinnedRelease:
         """``latest`` is resolved here and nowhere else."""
@@ -152,8 +159,55 @@ class DownloadDatasetService:
             prefix=command.prefix,
             shards=stored.shards,
         )
-        self._links[(pinned.release_id, pinned.dataset)] = _by_path(listing.links)
+        self._links[(None, pinned.release_id, pinned.dataset)] = _by_path(listing.links)
         return pinned
+
+    async def pin_diff(self, command: DownloadDiff) -> PinnedDiff:
+        """A stored diff.json wins over a fresh listing, which only has to name the same files."""
+        await self.pin_release(
+            PinRelease(release=command.release, bucket=command.bucket, prefix=command.prefix)
+        )
+        diff = await self._diff(command.from_release, command.release, command.dataset)
+        updates = tuple(link.shard for link in diff.updates)
+        deletes = tuple(link.shard for link in diff.deletes)
+        try:
+            inventory = DiffInventory(
+                from_release=command.from_release,
+                release_id=command.release,
+                dataset=command.dataset,
+                retrieved_at=self._clock(),
+                updates=updates,
+                deletes=deletes,
+            )
+        except ValidationError:
+            raise SourceRejected(
+                f"the diff of {command.dataset} from {command.from_release} to {command.release} "
+                f"names two files with the same path or file name; {AGAIN}"
+            ) from None
+        path = diff_file_path(
+            command.bucket,
+            command.prefix,
+            command.from_release,
+            command.release,
+            command.dataset,
+            DIFF_INVENTORY_NAME,
+        )
+        stored = await self._archive(
+            path,
+            inventory,
+            lambda stored: _differing(
+                ("dataset", stored.dataset != command.dataset),
+                ("set of update files", _identities(stored.updates) != _identities(updates)),
+                ("set of delete files", _identities(stored.deletes) != _identities(deletes)),
+            ),
+            compare_with=SERVED_NOW,
+        )
+        key = (command.from_release, command.release, command.dataset)
+        self._links[key] = _by_path(diff.updates + diff.deletes)
+        return PinnedDiff(
+            updates=_part(command, "updates", stored.updates),
+            deletes=_part(command, "deletes", stored.deletes),
+        )
 
     async def archive_shard(self, pinned: PinnedDataset, shard: ShardRef) -> ShardOutcome:
         """Leave ``shard`` archived with a valid receipt: verified, recovered or downloaded."""
@@ -175,19 +229,39 @@ class DownloadDatasetService:
         return ShardOutcome.RECOVERED
 
     async def archive_shard_at(self, command: DownloadShard) -> DownloadShardResult:
-        pinned = await self.pin_dataset(
-            DownloadDataset(
-                release=command.release,
-                dataset=command.dataset,
-                bucket=command.bucket,
-                prefix=command.prefix,
+        if command.from_release is None or command.part is None:
+            pinned = await self.pin_dataset(
+                DownloadDataset(
+                    release=command.release,
+                    dataset=command.dataset,
+                    bucket=command.bucket,
+                    prefix=command.prefix,
+                )
             )
-        )
+        else:
+            diff = await self.pin_diff(
+                DownloadDiff(
+                    from_release=command.from_release,
+                    release=command.release,
+                    dataset=command.dataset,
+                    bucket=command.bucket,
+                    prefix=command.prefix,
+                )
+            )
+            pinned = diff.part(command.part)
         if command.shard >= len(pinned.shards):
             last = len(pinned.shards) - 1
-            numbered = "one shard, numbered 0" if last == 0 else f"shards numbered 0 to {last}"
+            numbered = (
+                "no shard"
+                if last < 0
+                else "one shard, numbered 0"
+                if last == 0
+                else f"shards numbered 0 to {last}"
+            )
+            among = "" if pinned.part is None else f" among its {pinned.part}"
             raise ShardNotListed(
-                f"{pinned.inventory_path} has {numbered}, so there is no shard {command.shard}"
+                f"{pinned.inventory_path} has {numbered}{among}, so there is no shard "
+                f"{command.shard}"
             )
         shard = pinned.shards[command.shard]
         outcome = await self.archive_shard(pinned, shard)
@@ -306,18 +380,39 @@ class DownloadDatasetService:
         raise LinkExpired(f"{message}; {AGAIN}")
 
     async def _link(self, pinned: PinnedDataset, shard: ShardRef, *, refresh: bool) -> ShardLink:
-        key = (pinned.release_id, pinned.dataset)
+        key = (pinned.from_release, pinned.release_id, pinned.dataset)
         links = None if refresh else self._links.get(key)
         if links is None:
-            listing = await self._catalog.list_dataset(pinned.release_id, pinned.dataset)
-            listed = (link.shard for link in listing.links)
-            if _identities(listed) != _identities(pinned.shards):
+            listed, every = await self._listed(pinned)
+            if _identities(link.shard for link in listed) != _identities(pinned.shards):
                 raise InventoryChanged(
-                    f"a fresh listing of {pinned.dataset} {pinned.release_id} names other shards "
+                    f"a fresh listing of {_about(pinned)} names other shards "
                     f"than {pinned.inventory_path}"
                 )
-            links = self._links[key] = _by_path(listing.links)
+            links = self._links[key] = _by_path(every)
         return links[shard.source_path]
+
+    async def _listed(
+        self, pinned: PinnedDataset
+    ) -> tuple[tuple[ShardLink, ...], tuple[ShardLink, ...]]:
+        """The links to ``pinned``'s shards as listed now, and every link of that listing."""
+        if pinned.from_release is None:
+            listing = await self._catalog.list_dataset(pinned.release_id, pinned.dataset)
+            return listing.links, listing.links
+        diff = await self._diff(pinned.from_release, pinned.release_id, pinned.dataset)
+        listed = diff.updates if pinned.part == "updates" else diff.deletes
+        return listed, diff.updates + diff.deletes
+
+    async def _diff(self, from_release: str, release: str, dataset: str) -> DiffListing:
+        chain = await self._catalog.list_diffs(from_release, release, dataset)
+        steps = [(diff.from_release, diff.release_id) for diff in chain.diffs]
+        if chain.dataset != dataset or steps != [(from_release, release)]:
+            raise SourceRejected(
+                f"Semantic Scholar did not list exactly one diff of {dataset} from "
+                f"{from_release} to {release}; check that {release} is the release right after "
+                f"{from_release}"
+            )
+        return chain.diffs[0]
 
     async def _recover(
         self, pinned: PinnedDataset, shard: ShardRef, existing: StoredObject
@@ -527,7 +622,28 @@ def _identities(shards: Iterable[ShardRef]) -> frozenset[tuple[str, str]]:
 
 
 def _schema_ref(pinned: PinnedDataset) -> str:
-    return f"{SOURCE}/{pinned.dataset}@{pinned.release_id}"
+    ref = f"{SOURCE}/{pinned.dataset}@{pinned.release_id}"
+    return f"{ref}/deletes" if pinned.part == "deletes" else ref
+
+
+def _about(pinned: PinnedDataset) -> str:
+    if pinned.from_release is None:
+        return f"{pinned.dataset} {pinned.release_id}"
+    return (
+        f"the {pinned.part} of {pinned.dataset} from {pinned.from_release} to {pinned.release_id}"
+    )
+
+
+def _part(command: DownloadDiff, part: DiffPart, shards: tuple[ShardRef, ...]) -> PinnedDataset:
+    return PinnedDataset(
+        release_id=command.release,
+        dataset=command.dataset,
+        bucket=command.bucket,
+        prefix=command.prefix,
+        shards=shards,
+        from_release=command.from_release,
+        part=part,
+    )
 
 
 def _reason(exc: ValueError, kind: type[BaseModel]) -> str:

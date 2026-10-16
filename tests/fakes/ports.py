@@ -14,7 +14,7 @@ from pydantic import SecretStr
 
 from openknowledge_contracts.datasets import DatasetSummary, ReleaseMetadata, ShardRef
 from openknowledge_contracts.manifests import ObjectPath, ObjectRef, Producer
-from openknowledge_core.ingestion.commands import DownloadDataset
+from openknowledge_core.ingestion.commands import DownloadDataset, DownloadDiff
 from openknowledge_core.ingestion.errors import (
     IncompleteTransfer,
     IngestionError,
@@ -26,6 +26,8 @@ from openknowledge_core.ingestion.models import (
     ByteStream,
     CheckedStream,
     DatasetListing,
+    DiffChain,
+    DiffListing,
     Duplicates,
     LoadObject,
     LoadRecord,
@@ -48,6 +50,8 @@ def gz(payload: bytes) -> bytes:
 
 PAPERS = {"part-0.gz": gz(b'{"id": 1}\n'), "part-1.gz": gz(b'{"id": 2}\n' * 50)}
 COMMAND = DownloadDataset(release=RELEASE, dataset="papers", bucket="raw", prefix="s2")
+NEXT = "2026-10-13"
+DIFF = DownloadDiff(from_release=RELEASE, release=NEXT, dataset="papers", bucket="raw", prefix="s2")
 
 
 def clock() -> datetime:
@@ -83,9 +87,19 @@ class FakeSource:
         self.cut: set[str] = set()
         self.declared: dict[str, int | None] = {}
         self.reorder = False
+        self.diffs: dict[str, list[tuple[str, str, list[str], list[str]]]] = {}
+        self.diff_files: dict[str, bytes] = {}
 
     def add(self, dataset: str, name: str, data: bytes) -> None:
         self.files.setdefault(dataset, {})[name] = data
+
+    def add_diff(
+        self, dataset: str, old: str, new: str, updates: dict[str, bytes], deletes: dict[str, bytes]
+    ) -> None:
+        for part, files in (("updates", updates), ("deletes", deletes)):
+            for name, data in files.items():
+                self.diff_files[diff_ref(part, old, new, dataset, name).source_path] = data
+        self.diffs.setdefault(dataset, []).append((old, new, list(updates), list(deletes)))
 
     async def resolve_release(self, selector: str | Literal["latest"]) -> ReleaseMetadata:
         self.resolved.append(selector)
@@ -127,6 +141,31 @@ class FakeSource:
         )
         return DatasetListing(summary=summary, links=links)
 
+    async def list_diffs(self, start: str, end: str, dataset: str) -> DiffChain:
+        self.listings += 1
+        end = self.releases[-1] if end == "latest" else end
+        return DiffChain(
+            dataset=dataset,
+            diffs=tuple(
+                DiffListing(
+                    from_release=old,
+                    release_id=new,
+                    updates=tuple(
+                        self._link(diff_ref("updates", old, new, dataset, name)) for name in updates
+                    ),
+                    deletes=tuple(
+                        self._link(diff_ref("deletes", old, new, dataset, name)) for name in deletes
+                    ),
+                )
+                for old, new, updates, deletes in self.diffs.get(dataset, [])
+                if start <= old and new <= end
+            ),
+        )
+
+    def _link(self, shard: ShardRef) -> ShardLink:
+        url = f"https://files.test{shard.source_path}?Signature=secret{self.listings}"
+        return ShardLink(shard=shard, url=SecretStr(url))
+
     async def open(self, link: ShardLink) -> ByteStream:
         shard = link.shard
         self.opened.append(shard.file_name)
@@ -137,7 +176,9 @@ class FakeSource:
             self.unavailable.remove(shard.file_name)
             raise SourceUnavailable(f"HTTP 503 from https://files.test{shard.source_path}")
         dataset = shard.source_path.split("/")[-2]
-        data = self.files[dataset][shard.file_name]
+        data = self.diff_files.get(shard.source_path)
+        if data is None:
+            data = self.files[dataset][shard.file_name]
         size = self.declared.get(shard.file_name, len(data))
         return ByteStream(expected_size=size, chunks=self._chunks(shard.file_name, data))
 
@@ -152,6 +193,10 @@ class FakeSource:
 
 def shard_ref(dataset: str, name: str) -> ShardRef:
     return ShardRef(source_path=f"/staging/{RELEASE}/{dataset}/{name}", file_name=name)
+
+
+def diff_ref(part: str, old: str, new: str, dataset: str, name: str) -> ShardRef:
+    return ShardRef(source_path=f"/{part}/{old}-to-{new}/{dataset}/{name}", file_name=name)
 
 
 @dataclass

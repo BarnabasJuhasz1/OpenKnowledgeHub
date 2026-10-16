@@ -19,7 +19,7 @@ from openknowledge_pipelines.settings import (
 )
 
 if TYPE_CHECKING:
-    from openknowledge_pipelines.flows.s2_batch_download import S2BatchDownloadFlow
+    from openknowledge_pipelines.flows.s2_batch_download import S2BatchDownloadFlows
     from openknowledge_pipelines.flows.s2_download import S2DownloadFlow
     from openknowledge_pipelines.flows.s2_load import S2LoadFlow
 
@@ -126,12 +126,12 @@ async def open_batch_download(
         yield service, jobs
 
 
-def batch_download_flow(
+def batch_download_flows(
     service: DownloadDatasetService, jobs: ShardJobs, settings: BatchSettings
-) -> S2BatchDownloadFlow:
-    from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flow
+) -> S2BatchDownloadFlows:
+    from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flows
 
-    return s2_batch_download_flow(
+    return s2_batch_download_flows(
         service,
         jobs,
         rounds=settings.task_retries + 1,

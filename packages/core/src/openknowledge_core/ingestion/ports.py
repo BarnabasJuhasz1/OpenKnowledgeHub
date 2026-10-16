@@ -11,6 +11,7 @@ from openknowledge_core.ingestion.models import (
     ByteStream,
     CheckedStream,
     DatasetListing,
+    DiffChain,
     Duplicates,
     JobOutcome,
     LoadObject,
@@ -29,6 +30,12 @@ class ReleaseCatalog(Protocol):
 
     async def list_dataset(self, release_id: ReleaseId, dataset: DatasetName) -> DatasetListing:
         """The dataset's metadata and a freshly signed link per shard."""
+        ...
+
+    async def list_diffs(
+        self, start: ReleaseId, end: ReleaseId | Literal["latest"], dataset: DatasetName
+    ) -> DiffChain:
+        """The diffs from ``start`` to ``end`` in order, with freshly signed links."""
         ...
 
 

@@ -1,7 +1,8 @@
-"""The s2-batch-download flow: it pins and writes the manifest, and Batch archives the shards."""
+"""The s2-batch-download flows: they pin and write manifests, and Batch archives the shards."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from types import CoroutineType
 from typing import Any
 
@@ -10,27 +11,39 @@ from prefect.cache_policies import NO_CACHE
 
 from openknowledge_contracts.manifests import ObjectPath
 from openknowledge_core.ingestion import (
+    BatchDiffDownloadResult,
     BatchDownloadResult,
     DownloadDataset,
     DownloadDatasetService,
+    DownloadDiff,
     JobOutcome,
     PinnedDataset,
+    PinnedDiff,
     ShardJob,
     ShardJobs,
 )
 from openknowledge_pipelines.flows.s2_download import retry_transient
 
 type S2BatchDownloadFlow = Flow[[DownloadDataset], CoroutineType[Any, Any, BatchDownloadResult]]
+type S2BatchDiffDownloadFlow = Flow[
+    [DownloadDiff], CoroutineType[Any, Any, BatchDiffDownloadResult]
+]
 
 
-def s2_batch_download_flow(
+@dataclass(frozen=True)
+class S2BatchDownloadFlows:
+    dataset: S2BatchDownloadFlow
+    diff: S2BatchDiffDownloadFlow
+
+
+def s2_batch_download_flows(
     service: DownloadDatasetService,
     jobs: ShardJobs,
     *,
     rounds: int,
     task_retries: int,
     retry_delay_seconds: float,
-) -> S2BatchDownloadFlow:
+) -> S2BatchDownloadFlows:
     @task(
         name="pin-dataset",
         retries=task_retries,
@@ -41,6 +54,17 @@ def s2_batch_download_flow(
     )
     async def pin_dataset(command: DownloadDataset) -> PinnedDataset:
         return await service.pin_dataset(command)
+
+    @task(
+        name="pin-diff",
+        retries=task_retries,
+        retry_delay_seconds=retry_delay_seconds,
+        retry_condition_fn=retry_transient,
+        cache_policy=NO_CACHE,
+        persist_result=False,
+    )
+    async def pin_diff(command: DownloadDiff) -> PinnedDiff:
+        return await service.pin_diff(command)
 
     @task(
         name="find-unfinished",
@@ -69,6 +93,8 @@ def s2_batch_download_flow(
             bucket=pinned.bucket,
             prefix=pinned.prefix,
             shards=shards,
+            from_release=pinned.from_release,
+            part=pinned.part,
         )
         name = await jobs.submit(job)
         logger = get_run_logger()
@@ -88,16 +114,19 @@ def s2_batch_download_flow(
     async def write_manifest(pinned: PinnedDataset) -> ObjectPath:
         return await service.write_manifest(pinned)
 
-    @flow(name="s2-batch-download", persist_result=False)
-    async def s2_batch_download(command: DownloadDataset) -> BatchDownloadResult:
-        pinned = await pin_dataset(command)
+    async def archive(pinned: PinnedDataset) -> tuple[list[str], ObjectPath]:
         names: list[str] = []
         for round_ in range(1, rounds + 1):
             shards = await find_unfinished(pinned)
             if not shards:
                 break
             names.append(await run_job(pinned, shards, round_))
-        manifest = await write_manifest(pinned)
+        return names, await write_manifest(pinned)
+
+    @flow(name="s2-batch-download", persist_result=False)
+    async def s2_batch_download(command: DownloadDataset) -> BatchDownloadResult:
+        pinned = await pin_dataset(command)
+        names, manifest = await archive(pinned)
         return BatchDownloadResult(
             release_id=pinned.release_id,
             dataset=pinned.dataset,
@@ -106,4 +135,24 @@ def s2_batch_download_flow(
             manifest=manifest,
         )
 
-    return s2_batch_download
+    @flow(name="s2-batch-download-diff", persist_result=False)
+    async def s2_batch_download_diff(command: DownloadDiff) -> BatchDiffDownloadResult:
+        pinned = await pin_diff(command)
+        names: list[str] = []
+        manifests: list[ObjectPath] = []
+        for part in (pinned.updates, pinned.deletes):
+            if part.shards:
+                part_names, manifest = await archive(part)
+                names += part_names
+                manifests.append(manifest)
+        return BatchDiffDownloadResult(
+            from_release=command.from_release,
+            release_id=command.release,
+            dataset=command.dataset,
+            updates=len(pinned.updates.shards),
+            deletes=len(pinned.deletes.shards),
+            jobs=tuple(names),
+            manifests=tuple(manifests),
+        )
+
+    return S2BatchDownloadFlows(dataset=s2_batch_download, diff=s2_batch_download_diff)

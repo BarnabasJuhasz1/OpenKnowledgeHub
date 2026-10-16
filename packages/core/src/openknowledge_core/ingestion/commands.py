@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, NonNegativeInt
+from pydantic import BaseModel, ConfigDict, NonNegativeInt, model_validator
 
-from openknowledge_contracts.datasets import DatasetName, ReleaseId, ShardRef
+from openknowledge_contracts.datasets import DatasetName, DiffPart, ReleaseId, ShardRef
 from openknowledge_contracts.manifests import BucketName, ObjectPath, ObjectPrefix
-from openknowledge_core.ingestion.models import ShardOutcome
+from openknowledge_core.ingestion.models import ShardOutcome, check_diff
 
 DEFAULT_PREFIX = "semantic-scholar"
 
@@ -38,7 +38,10 @@ class DownloadDataset(BaseModel):
 
 
 class DownloadShard(BaseModel):
-    """``shard`` indexes the archived inventory, whose order is fixed once it is written."""
+    """``shard`` indexes the archived inventory, whose order is fixed once it is written.
+
+    With ``from_release`` and ``part``, it indexes that part of the diff in ``diff.json``.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -47,6 +50,31 @@ class DownloadShard(BaseModel):
     shard: NonNegativeInt
     bucket: BucketName
     prefix: ObjectPrefix = DEFAULT_PREFIX
+    from_release: ReleaseId | None = None
+    part: DiffPart | None = None
+
+    @model_validator(mode="after")
+    def _diff(self) -> Self:
+        check_diff(self.from_release, self.part, self.release)
+        return self
+
+
+class DownloadDiff(BaseModel):
+    """One dataset's changes from ``from_release`` to ``release``, the release right after it."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    from_release: ReleaseId
+    release: ReleaseId
+    dataset: DatasetName
+    bucket: BucketName
+    prefix: ObjectPrefix = DEFAULT_PREFIX
+
+    @model_validator(mode="after")
+    def _ordered(self) -> Self:
+        if self.from_release >= self.release:
+            raise ValueError("a diff must start from a release before the one it brings")
+        return self
 
 
 class DownloadDatasetResult(BaseModel):
@@ -104,3 +132,17 @@ class BatchDownloadResult(BaseModel):
     shards: NonNegativeInt
     jobs: tuple[str, ...]
     manifest: ObjectPath
+
+
+class BatchDiffDownloadResult(BaseModel):
+    """``manifests`` has one per part with files; a part without files has none."""
+
+    model_config = ConfigDict(frozen=True)
+
+    from_release: ReleaseId
+    release_id: ReleaseId
+    dataset: DatasetName
+    updates: NonNegativeInt
+    deletes: NonNegativeInt
+    jobs: tuple[str, ...]
+    manifests: tuple[ObjectPath, ...]

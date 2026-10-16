@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Annotated, Self, cast
+from typing import Annotated, Literal, Self, cast
 from urllib.parse import unquote
 
 from pydantic import (
@@ -19,11 +19,14 @@ from pydantic import (
 ReleaseId = Annotated[str, StringConstraints(pattern=r"^\d{4}-\d{2}-\d{2}$")]
 DatasetName = Annotated[str, StringConstraints(pattern=r"^[a-z0-9][a-z0-9_-]{0,63}$")]
 FileName = Annotated[str, StringConstraints(pattern=r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$")]
+DiffPart = Literal["updates", "deletes"]
 
 RELEASE_RECORD_NAME = "release.json"
 INVENTORY_NAME = "dataset.json"
 MANIFEST_NAME = "manifest.json"
 RECEIPT_SUFFIX = ".receipt.json"
+DIFF_INVENTORY_NAME = "diff.json"
+DIFFS_FOLDER = "diffs"
 
 _PLAIN_KEY = re.compile(r"[A-Za-z0-9_-]{1,64}")
 _DECODE_ROUNDS = 3
@@ -146,9 +149,31 @@ class DatasetInventory(ArchiveDocument):
 
     @model_validator(mode="after")
     def _unique(self) -> Self:
-        count = len(self.shards)
-        paths = {shard.source_path for shard in self.shards}
-        names = {shard.file_name for shard in self.shards}
-        if len(paths) != count or len(names) != count:
+        if not _distinct(self.shards):
             raise ValueError("every shard needs its own source path and file name")
         return self
+
+
+class DiffInventory(ArchiveDocument):
+    """``diff.json``: one dataset's update and delete files from one release to the next."""
+
+    from_release: ReleaseId
+    release_id: ReleaseId
+    dataset: DatasetName
+    retrieved_at: AwareDatetime
+    updates: tuple[ShardRef, ...]
+    deletes: tuple[ShardRef, ...]
+
+    @model_validator(mode="after")
+    def _ordered_and_unique(self) -> Self:
+        if self.from_release >= self.release_id:
+            raise ValueError("from_release must come before release_id")
+        if not (_distinct(self.updates) and _distinct(self.deletes)):
+            raise ValueError("every file of a part needs its own source path and file name")
+        return self
+
+
+def _distinct(shards: tuple[ShardRef, ...]) -> bool:
+    paths = {shard.source_path for shard in shards}
+    names = {shard.file_name for shard in shards}
+    return len(paths) == len(names) == len(shards)

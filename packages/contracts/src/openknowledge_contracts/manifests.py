@@ -92,7 +92,10 @@ class ShardReceipt(ArchiveDocument):
     md5: Md5Base64
     crc32c: Crc32cBase64
     schema_ref: Annotated[str, StringConstraints(min_length=1, max_length=256)]
-    """The source's schema for this dataset and release, as semantic-scholar/<dataset>@<release>."""
+    """The source's schema for this dataset and release, as semantic-scholar/<dataset>@<release>.
+
+    A diff's delete files hold only keys, so theirs ends in /deletes.
+    """
     gzip_members: PositiveInt
     records: NonNegativeInt
     uncompressed_size: NonNegativeInt

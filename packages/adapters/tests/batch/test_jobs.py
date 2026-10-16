@@ -7,6 +7,7 @@ from aiohttp import web
 from gcloud.aio.auth import Token
 
 from openknowledge_adapters import batch
+from openknowledge_adapters.batch.jobs import job_id
 from openknowledge_core.ingestion.errors import BatchRejected
 from openknowledge_core.ingestion.models import JobOutcome, ShardJob
 
@@ -99,3 +100,12 @@ async def test_a_refused_job_says_why() -> None:
     ):
         with pytest.raises(BatchRejected, match="HTTP 403: actAs denied"):
             await jobs.submit(JOB)
+
+
+def test_a_diff_part_names_the_release_it_starts_from_and_its_part() -> None:
+    job = JOB.model_copy(update={"from_release": "2026-09-29", "part": "deletes"})
+    spec = batch.job_spec(CONFIG, job)
+    command = spec["taskGroups"][0]["taskSpec"]["runnables"][0]["container"]["commands"]
+    assert command[-4:] == ["--from-release", "2026-09-29", "--part", "deletes"]
+    assert spec["labels"]["part"] == "deletes"
+    assert job_id(job).startswith("s2-s2orc-v2-2026-10-06-deletes-")

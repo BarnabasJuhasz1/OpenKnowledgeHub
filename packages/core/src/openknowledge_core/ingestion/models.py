@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import AsyncGenerator
 from enum import StrEnum
-from typing import Annotated
+from typing import Annotated, Self
 from uuid import UUID
 
 from pydantic import (
@@ -17,15 +17,19 @@ from pydantic import (
     NonNegativeInt,
     PositiveInt,
     SecretStr,
+    model_validator,
 )
 
 from openknowledge_contracts.datasets import (
+    DIFF_INVENTORY_NAME,
+    DIFFS_FOLDER,
     INVENTORY_NAME,
     MANIFEST_NAME,
     RECEIPT_SUFFIX,
     RELEASE_RECORD_NAME,
     DatasetName,
     DatasetSummary,
+    DiffPart,
     ReleaseId,
     ShardRef,
 )
@@ -68,6 +72,26 @@ class DatasetListing(BaseModel):
     links: tuple[ShardLink, ...]
 
 
+class DiffListing(BaseModel):
+    """One listed diff: the files that bring a dataset from ``from_release`` to ``release_id``."""
+
+    model_config = ConfigDict(frozen=True)
+
+    from_release: ReleaseId
+    release_id: ReleaseId
+    updates: tuple[ShardLink, ...]
+    deletes: tuple[ShardLink, ...]
+
+
+class DiffChain(BaseModel):
+    """The diffs listed between two releases, one per release that followed the first."""
+
+    model_config = ConfigDict(frozen=True)
+
+    dataset: DatasetName
+    diffs: tuple[DiffListing, ...]
+
+
 class ByteStream(BaseModel):
     """A body being read, where closing ``chunks`` closes the response behind it."""
 
@@ -97,7 +121,11 @@ class StoredObject(BaseModel):
 
 
 class PinnedDataset(BaseModel):
-    """One dataset of one release, with the shards of its archived inventory."""
+    """One dataset of one release, with the shards of its archived inventory.
+
+    With ``from_release`` and ``part``, it is instead that part of the dataset's diff from
+    ``from_release`` to ``release_id``, whose shards ``diff.json`` lists.
+    """
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -106,9 +134,28 @@ class PinnedDataset(BaseModel):
     bucket: BucketName
     prefix: ObjectPrefix
     shards: tuple[ShardRef, ...]
+    from_release: ReleaseId | None = None
+    part: DiffPart | None = None
+
+    @model_validator(mode="after")
+    def _diff(self) -> Self:
+        check_diff(self.from_release, self.part, self.release_id)
+        return self
 
     def path(self, file_name: str) -> ObjectPath:
-        return dataset_file_path(self.bucket, self.prefix, self.release_id, self.dataset, file_name)
+        if self.from_release is None or self.part is None:
+            return dataset_file_path(
+                self.bucket, self.prefix, self.release_id, self.dataset, file_name
+            )
+        return diff_file_path(
+            self.bucket,
+            self.prefix,
+            self.from_release,
+            self.release_id,
+            self.dataset,
+            self.part,
+            file_name,
+        )
 
     def object_path(self, shard: ShardRef) -> ObjectPath:
         return self.path(shard.file_name)
@@ -118,7 +165,16 @@ class PinnedDataset(BaseModel):
 
     @property
     def inventory_path(self) -> ObjectPath:
-        return self.path(INVENTORY_NAME)
+        if self.from_release is None:
+            return self.path(INVENTORY_NAME)
+        return diff_file_path(
+            self.bucket,
+            self.prefix,
+            self.from_release,
+            self.release_id,
+            self.dataset,
+            DIFF_INVENTORY_NAME,
+        )
 
     @property
     def manifest_path(self) -> ObjectPath:
@@ -133,6 +189,32 @@ def dataset_file_path(
     bucket: str, prefix: str, release_id: str, dataset: str, file_name: str
 ) -> ObjectPath:
     return ObjectPath.under(bucket, prefix, release_id, dataset, file_name)
+
+
+def diff_file_path(
+    bucket: str, prefix: str, from_release: str, release_id: str, dataset: str, *names: str
+) -> ObjectPath:
+    return ObjectPath.under(bucket, prefix, DIFFS_FOLDER, from_release, release_id, dataset, *names)
+
+
+def check_diff(from_release: str | None, part: str | None, release_id: str) -> None:
+    """A diff part names the release it starts from and its part, and a base names neither."""
+    if (from_release is None) != (part is None):
+        raise ValueError("a diff file needs both the release it starts from and its part")
+    if from_release is not None and from_release >= release_id:
+        raise ValueError("a diff must start from a release before the one it brings")
+
+
+class PinnedDiff(BaseModel):
+    """One dataset's diff from one release to the next, as its archived ``diff.json`` lists it."""
+
+    model_config = ConfigDict(frozen=True)
+
+    updates: PinnedDataset
+    deletes: PinnedDataset
+
+    def part(self, name: DiffPart) -> PinnedDataset:
+        return self.updates if name == "updates" else self.deletes
 
 
 class ShardOutcome(StrEnum):
@@ -210,7 +292,7 @@ class LoadOutcome(StrEnum):
 
 
 class ShardJob(BaseModel):
-    """Archive these shards of a pinned dataset, each in its own task."""
+    """Archive these shards of a pinned dataset or diff part, each in its own task."""
 
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -219,6 +301,13 @@ class ShardJob(BaseModel):
     bucket: BucketName
     prefix: ObjectPrefix
     shards: tuple[NonNegativeInt, ...] = Field(min_length=1)
+    from_release: ReleaseId | None = None
+    part: DiffPart | None = None
+
+    @model_validator(mode="after")
+    def _diff(self) -> Self:
+        check_diff(self.from_release, self.part, self.release_id)
+        return self
 
 
 class JobOutcome(StrEnum):

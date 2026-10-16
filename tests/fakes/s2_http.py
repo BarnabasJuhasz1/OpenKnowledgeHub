@@ -64,14 +64,18 @@ class FakeS2:
         self.keys_sent: list[str | None] = []
         self.fail_next: list[int | Exception | httpx.Response] = []
         self.cut_next: set[str] = set()
+        self.diffs: dict[str, list[tuple[str, str, list[str], list[str]]]] = {}
         self.transport = httpx.MockTransport(self.handle)
 
     def add(self, dataset: str, name: str, data: bytes) -> None:
         self.files.setdefault(dataset, {})[name] = data
 
     def sign(self, dataset: str, name: str, release: str) -> str:
+        return self.sign_path(f"staging/{release}/{dataset}/{name}")
+
+    def sign_path(self, path: str) -> str:
         return (
-            f"https://{FILE_HOST}/staging/{release}/{dataset}/{name}"
+            f"https://{FILE_HOST}/{path}"
             f"?AWSAccessKeyId=AKIAFAKE&Signature=c2lnbmF0dXJl&Expires={self.now + LINK_TTL}"
         )
 
@@ -118,6 +122,29 @@ class FakeS2:
             files = [self.sign(dataset, name, release) for name in self.files[dataset]]
             body = {"name": dataset, "description": "", "README": f"About {dataset}"}
             return httpx.Response(200, json={**body, **self.extra_fields, "files": files})
+        if len(parts) == 5 and parts[0] == "diffs" and parts[2] == "to":
+            if key != KEY:
+                return httpx.Response(403, json={"message": "Forbidden"})
+            start, end, dataset = parts[1], parts[3], parts[4]
+            end = self.releases[-1] if end == "latest" else end
+            diffs = [
+                {
+                    "from_release": old,
+                    "to_release": new,
+                    "update_files": [
+                        self.sign_path(f"updates/{old}-to-{new}/{dataset}/{name}")
+                        for name in updates
+                    ],
+                    "delete_files": [
+                        self.sign_path(f"deletes/{old}-to-{new}/{dataset}/{name}")
+                        for name in deletes
+                    ],
+                }
+                for old, new, updates, deletes in self.diffs.get(dataset, [])
+                if start <= old and new <= end
+            ]
+            body = {"dataset": dataset, "start_release": start, "end_release": end, "diffs": diffs}
+            return httpx.Response(200, json=body)
         return httpx.Response(404, json={"error": "unknown path"})
 
     def _file(self, request: httpx.Request) -> httpx.Response:

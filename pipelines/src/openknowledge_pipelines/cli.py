@@ -26,7 +26,7 @@ from openknowledge_pipelines.settings import (
 
 PIN_HELP = "Archive a release's metadata and print it as JSON, with the explicit release_id."
 DOWNLOAD_HELP = "Archive a whole dataset through the Prefect flow."
-DOWNLOAD_SHARD_HELP = "Archive one shard of a dataset without Prefect."
+DOWNLOAD_SHARD_HELP = "Archive one shard of a dataset, or one file of its diff, without Prefect."
 LOAD_HELP = "Load an archived dataset into its ClickHouse table through the Prefect flow."
 SERVE_HELP = "Serve the flows the control VM runs, until stopped."
 RELEASE_HELP = "The release_id that okp s2 pin printed, such as 2026-10-06."
@@ -44,6 +44,7 @@ OPTION_RULES = {
         "and underscores, without gs://"
     ),
     "prefix": "--prefix must look like semantic-scholar, with no empty, '.' or '..' part",
+    "from_release": "--from-release must look like 2026-09-29, the release before --release",
 }
 PIN_RULES = {**OPTION_RULES, "release": "--release must be latest or look like 2026-10-06"}
 SETTING_RULES = {
@@ -132,7 +133,24 @@ def download(release: str, dataset: str, bucket: str, prefix: str) -> None:
 @click.option(
     "--prefix", default=_default(DownloadShard, "prefix"), show_default=True, help=PREFIX_HELP
 )
-def download_shard(release: str, dataset: str, shard: str, bucket: str, prefix: str) -> None:
+@click.option(
+    "--from-release",
+    help="For a diff file: the release the diff starts from, right before --release.",
+)
+@click.option(
+    "--part",
+    type=click.Choice(["updates", "deletes"]),
+    help="For a diff file: whether --shard counts the diff's update or delete files.",
+)
+def download_shard(
+    release: str,
+    dataset: str,
+    shard: str,
+    bucket: str,
+    prefix: str,
+    from_release: str | None,
+    part: str | None,
+) -> None:
     command = _command(
         DownloadShard,
         OPTION_RULES,
@@ -141,6 +159,8 @@ def download_shard(release: str, dataset: str, shard: str, bucket: str, prefix: 
         shard=shard,
         bucket=bucket,
         prefix=prefix,
+        from_release=from_release,
+        part=part,
     )
     settings = _settings(PipelineSettings)
 
@@ -188,8 +208,11 @@ def _command[C: BaseModel](kind: type[C], rules: Mapping[str, str], **values: ob
     except ValidationError as exc:
         errors = exc.errors(include_input=False, include_url=False)
         options = dict.fromkeys(str(error["loc"][0]) for error in errors if error["loc"])
+        together = [
+            error["msg"].removeprefix("Value error, ") for error in errors if not error["loc"]
+        ]
     messages = [rules.get(option, f"--{option} is not valid") for option in options]
-    raise click.UsageError("; ".join(messages) or "these options do not fit together")
+    raise click.UsageError("; ".join(messages + together) or "these options do not fit together")
 
 
 def _settings[S: CommonSettings](kind: type[S]) -> S:
