@@ -23,10 +23,16 @@ ENDED = {
     "FAILED": JobOutcome.FAILED,
     "CANCELLED": JobOutcome.FAILED,
 }
+# No VM yet, so no task of the job has used the S2 key.
+QUEUED = {"QUEUED", "SCHEDULED"}
 
 
 class _JobExists(Exception):
     """The job ID holds the operation's UUID, so an earlier attempt of it created the job."""
+
+
+class _JobGone(BatchRejected):
+    """Batch has no such job, for instance once it was deleted."""
 
 
 class CloudBatchJobs:
@@ -63,21 +69,22 @@ class CloudBatchJobs:
             ) from None
         return name
 
-    async def running(self) -> list[str]:
+    async def running(self) -> dict[str, bool]:
         """Download jobs, told apart from other Batch jobs by their operation-id label."""
-        names: list[str] = []
+        found: dict[str, bool] = {}
         params: dict[str, str] = {}
         while True:
             body = await self._call("GET", f"{self._parent}/jobs", params=params)
-            names += [
-                str(job["name"])
-                for job in body.get("jobs", [])
-                if "operation-id" in job.get("labels", {})
-                and job.get("status", {}).get("state") not in ENDED
-            ]
+            for job in body.get("jobs", []):
+                state = job.get("status", {}).get("state")
+                if "operation-id" in job.get("labels", {}) and state not in ENDED:
+                    found[str(job["name"])] = state in QUEUED
             if not body.get("nextPageToken"):
-                return names
+                return found
             params = {"pageToken": body["nextPageToken"]}
+
+    async def delete(self, name: str) -> None:
+        await self._call("DELETE", name)
 
     async def wait(self, name: str) -> JobOutcome:
         """Bound the whole wait, including failed or stalled polls."""
@@ -88,6 +95,8 @@ class CloudBatchJobs:
                         state = (await self._call("GET", name)).get("status", {}).get("state")
                     except BatchUnavailable:
                         state = None
+                    except _JobGone:
+                        return JobOutcome.FAILED
                     if state in ENDED:
                         return ENDED[state]
                     await self._sleep(self._config.poll_seconds)
@@ -95,7 +104,7 @@ class CloudBatchJobs:
             raise BatchTimedOut(
                 f"Cloud Batch job {name} did not finish within "
                 f"{self._config.wait_timeout_seconds:g}s and may still be running; "
-                "every download waits for it, so cancel it if it hangs"
+                "later downloads wait for it once it has started, so cancel it if it hangs"
             ) from None
 
     async def _call(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -118,7 +127,8 @@ class CloudBatchJobs:
         if status == 409 and method == "POST":
             raise _JobExists
         message = str(body.get("error", {}).get("message", "no message"))
-        raise BatchRejected(f"Cloud Batch refused {method} {path} with HTTP {status}: {message}")
+        error = _JobGone if status == 404 else BatchRejected
+        raise error(f"Cloud Batch refused {method} {path} with HTTP {status}: {message}")
 
 
 def job_id(job: ShardJob) -> str:

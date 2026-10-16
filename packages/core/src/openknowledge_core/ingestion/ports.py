@@ -103,10 +103,14 @@ class ShardJobs(Protocol):
         """Start one task per shard and return the job's name."""
         ...
 
-    async def running(self) -> list[str]:
-        """Name every download job still queued or running, such as one a failed run left."""
+    async def running(self) -> dict[str, bool]:
+        """Map each unended download job, such as one a failed run left, to whether it is queued."""
+        ...
+
+    async def delete(self, name: str) -> None:
+        """Delete the job, ending it."""
         ...
 
     async def wait(self, name: str) -> JobOutcome:
-        """Return once the job has ended."""
+        """Return once the job has ended or is gone."""
         ...

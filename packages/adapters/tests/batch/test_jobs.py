@@ -69,6 +69,10 @@ async def batch_api(
             return web.Response(status=state)
         return web.json_response({"status": {"state": state}})
 
+    async def delete(request: web.Request) -> web.Response:
+        states[:] = [404]
+        return web.json_response({})
+
     async def list_jobs(request: web.Request) -> web.Response:
         page = int(request.query.get("pageToken", "0"))
         last = page == len(pages) - 1
@@ -80,6 +84,7 @@ async def batch_api(
     app.router.add_post(f"/{PARENT}/jobs", create)
     app.router.add_get(f"/{PARENT}/jobs", list_jobs)
     app.router.add_get(f"/{PARENT}/jobs/{{job_id}}", get)
+    app.router.add_delete(f"/{PARENT}/jobs/{{job_id}}", delete)
     async with serving(app) as root:
         yield root, posted
 
@@ -124,7 +129,17 @@ async def test_running_names_download_jobs_that_have_not_ended_on_every_page() -
         batch_api(web.json_response({}), [], pages) as (root, _),
         batch.connect(CONFIG, api_root=root, token=cast(Token, FakeToken())) as jobs,
     ):
-        assert await jobs.running() == ["a", "d"]
+        assert await jobs.running() == {"a": False, "d": True}
+
+
+async def test_a_deleted_job_ends_its_wait() -> None:
+    name = f"{PARENT}/jobs/j"
+    async with (
+        batch_api(web.json_response({}), ["QUEUED"]) as (root, _),
+        batch.connect(CONFIG, api_root=root, token=cast(Token, FakeToken())) as jobs,
+    ):
+        await jobs.delete(name)
+        assert await asyncio.wait_for(jobs.wait(name), timeout=1) is JobOutcome.FAILED
 
 
 async def test_a_refused_job_says_why() -> None:

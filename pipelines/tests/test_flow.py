@@ -142,12 +142,16 @@ class FakeJobs:
         self.jobs: list[ShardJob] = []
         self.parts: list[str | None] = []
         self.outcomes: dict[str, JobOutcome] = {}
-        self.left: list[str] = []
+        self.left: dict[str, bool] = {}
+        self.deleted: list[str] = []
         self.waited: list[str] = []
 
-    async def running(self) -> list[str]:
-        left, self.left = self.left, []
+    async def running(self) -> dict[str, bool]:
+        left, self.left = self.left, {}
         return left
+
+    async def delete(self, name: str) -> None:
+        self.deleted.append(name)
 
     async def submit(self, job: ShardJob) -> str:
         self.jobs.append(job)
@@ -208,15 +212,16 @@ async def test_a_diff_runs_a_job_for_each_part_with_files(
     assert len(DatasetManifest.from_json(store.data(manifest)).entries) == 2
 
 
-async def test_a_round_first_waits_for_a_download_job_that_has_not_ended(
+async def test_a_round_first_deletes_queued_download_jobs_and_waits_for_running_ones(
     service: DownloadDatasetService,
 ) -> None:
     jobs = FakeJobs(service, failing=set())
-    jobs.left = ["earlier"]
-    jobs.outcomes["earlier"] = JobOutcome.FAILED
+    jobs.left = {"queued": True, "running": False}
+    jobs.outcomes |= {"queued": JobOutcome.FAILED, "running": JobOutcome.FAILED}
     flows = s2_batch_download_flows(service, jobs, rounds=1, task_retries=0, retry_delay_seconds=0)
     await flows.dataset(COMMAND)
-    assert jobs.waited == ["earlier", "job-1"]
+    assert jobs.deleted == ["queued"]
+    assert jobs.waited == ["queued", "running", "job-1"]
 
 
 async def test_a_lost_submission_reply_retries_the_same_operation(

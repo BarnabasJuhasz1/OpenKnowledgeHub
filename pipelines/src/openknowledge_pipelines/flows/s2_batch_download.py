@@ -79,6 +79,25 @@ def s2_batch_download_flows(
         return await service.unfinished(pinned)
 
     @task(
+        name="clear-earlier-jobs",
+        retries=task_retries,
+        retry_delay_seconds=retry_delay_seconds,
+        retry_condition_fn=retry_transient,
+        cache_policy=NO_CACHE,
+        persist_result=False,
+    )
+    async def clear_earlier_jobs() -> None:
+        """Not part of run-job, whose retry could find its own queued job and delete it."""
+        logger = get_run_logger()
+        for earlier, queued in (await jobs.running()).items():
+            if queued:
+                logger.info("Deleting %s, a download job that has not started", earlier)
+                await jobs.delete(earlier)
+            else:
+                logger.info("Waiting for %s, a download job that has not ended", earlier)
+            await jobs.wait(earlier)
+
+    @task(
         name="run-job",
         task_run_name="round {round_}",
         retries=task_retries,
@@ -89,9 +108,6 @@ def s2_batch_download_flows(
     )
     async def run_job(job: ShardJob, round_: int) -> str:
         logger = get_run_logger()
-        for earlier in await jobs.running():
-            logger.info("Waiting for %s, a download job that has not ended", earlier)
-            await jobs.wait(earlier)
         logger.info("Submitting Batch operation %s", job.operation_id)
         name = await jobs.submit(job)
         logger.info("%s archives shards %s", name, ", ".join(map(str, job.shards)))
@@ -122,6 +138,7 @@ def s2_batch_download_flows(
     async def archive(pinned: PinnedDataset) -> tuple[list[str], ObjectPath]:
         names: list[str] = []
         for round_ in range(1, rounds + 1):
+            await clear_earlier_jobs()
             shards = await find_unfinished(pinned)
             if not shards:
                 break
