@@ -17,7 +17,6 @@ from pydantic import (
     NonNegativeInt,
     PositiveInt,
     SecretStr,
-    field_validator,
     model_validator,
 )
 
@@ -357,13 +356,6 @@ class ShardJob(BaseModel):
     shards: tuple[NonNegativeInt, ...] = Field(min_length=1)
     from_release: ReleaseId | None = None
     part: DiffPart | None = None
-
-    @field_validator("operation_id")
-    @classmethod
-    def _nonzero_operation_id(cls, value: UUID) -> UUID:
-        if value.int == 0:
-            raise ValueError("an operation id must not be zero")
-        return value
 
     @model_validator(mode="after")
     def _diff(self) -> Self:

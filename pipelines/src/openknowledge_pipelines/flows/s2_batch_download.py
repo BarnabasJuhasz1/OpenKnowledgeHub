@@ -89,6 +89,9 @@ def s2_batch_download_flows(
     )
     async def run_job(job: ShardJob, round_: int) -> str:
         logger = get_run_logger()
+        for earlier in await jobs.running():
+            logger.info("Waiting for %s, a download job that has not ended", earlier)
+            await jobs.wait(earlier)
         logger.info("Submitting Batch operation %s", job.operation_id)
         name = await jobs.submit(job)
         logger.info("%s archives shards %s", name, ", ".join(map(str, job.shards)))

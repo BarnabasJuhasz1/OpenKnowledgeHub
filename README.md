@@ -55,17 +55,11 @@ Its tasks add `--from-release` and `--part` to `okp s2 download-shard`.
 
 Batch VMs use Spot by default; `OKP_BATCH_PROVISIONING_MODEL=STANDARD` selects standard VMs.
 Each submission keeps the same operation ID and job name across task retries, so a lost creation reply resumes that job rather than creating another one.
-The operation ID is logged before submission, and uncertain submission errors include the expected job name for recovery.
 `OKP_BATCH_WAIT_TIMEOUT_SECONDS` bounds each job's whole wait, including queued time and API outages, to 24 hours by default, separately from each task's `OKP_BATCH_MAX_RUN_SECONDS`.
-If that wait expires, the flow fails without submitting another job automatically: check the named job and let it finish or cancel it before starting another download run.
+If that wait expires, the run fails and names the job.
 
-Both Batch download deployments require the same persistent `PREFECT_API_URL` and share the global concurrency limit `s2-downloads`; load deployments remain independent.
-The first download creates this limit only if absent, with `active=true`, `limit=1` and no slot decay.
-Each download reserves a persistent slot before pinning or submitting work and releases it only after the whole download succeeds. Counter mutations never retry an uncertain response.
-Overlapping downloads are refused while the slot is occupied. Errors, timeouts and cancellation leave it occupied across worker restarts; it has no lease to expire and startup never resets it.
-To recover, inspect the failed flow's logged Batch job names and confirm every submitted job is terminal (`SUCCEEDED`, `FAILED` or `CANCELLED`); cancel and wait for any job still running.
-Then use Prefect's global concurrency limit UI to clear the active slot on `s2-downloads`, keeping `active=true`, `limit=1` and `slot_decay_per_second=0`, and rerun the download.
-Do not disable or delete the limit, change it during a download, or clear the slot while any prior job's state is unknown.
+Both download deployments take the Prefect global concurrency limit `semantic-scholar`, which `okp serve` creates with a limit of 1, so their runs never overlap.
+Before submitting a job, a run waits for any download job still queued or running in Batch, such as one left by a run that failed or was cancelled.
 
 ## Loading into ClickHouse
 

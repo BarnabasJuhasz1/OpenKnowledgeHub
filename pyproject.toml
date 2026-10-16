@@ -74,7 +74,6 @@ type = "layers"
 layers = [
     "openknowledge_pipelines.cli",
     "openknowledge_pipelines.deployments",
-    "openknowledge_pipelines.download_coordination",
     "openknowledge_pipelines.bootstrap",
     "openknowledge_pipelines.flows | openknowledge_pipelines.settings | openknowledge_adapters",
     "openknowledge_core",

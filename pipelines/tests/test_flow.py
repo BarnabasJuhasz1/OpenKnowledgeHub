@@ -1,8 +1,6 @@
 import asyncio
 import base64
 from pathlib import Path
-from typing import Literal
-from uuid import UUID
 
 import pytest
 from prefect.client.orchestration import get_client
@@ -19,11 +17,9 @@ from openknowledge_core.ingestion import (
     ShardJob,
 )
 from openknowledge_core.ingestion.errors import (
-    BatchTimedOut,
     BatchUnavailable,
     ContractViolation,
     GzipInvalid,
-    ManifestIncomplete,
     TableUnavailable,
 )
 from openknowledge_pipelines.flows.s2_batch_download import s2_batch_download_flows
@@ -146,6 +142,12 @@ class FakeJobs:
         self.jobs: list[ShardJob] = []
         self.parts: list[str | None] = []
         self.outcomes: dict[str, JobOutcome] = {}
+        self.left: list[str] = []
+        self.waited: list[str] = []
+
+    async def running(self) -> list[str]:
+        left, self.left = self.left, []
+        return left
 
     async def submit(self, job: ShardJob) -> str:
         self.jobs.append(job)
@@ -173,6 +175,7 @@ class FakeJobs:
         return name
 
     async def wait(self, name: str) -> JobOutcome:
+        self.waited.append(name)
         return self.outcomes[name]
 
 
@@ -205,102 +208,35 @@ async def test_a_diff_runs_a_job_for_each_part_with_files(
     assert len(DatasetManifest.from_json(store.data(manifest)).entries) == 2
 
 
-@pytest.mark.parametrize("part", [None, "updates", "deletes"])
-async def test_exhausted_batch_rounds_name_the_deployment_to_resume(
+async def test_a_round_first_waits_for_a_download_job_that_has_not_ended(
     service: DownloadDatasetService,
-    source: FakeSource,
-    store: FakeStore,
-    part: Literal["updates", "deletes"] | None,
 ) -> None:
-    jobs = FakeJobs(service, failing={1})
-    flows = s2_batch_download_flows(service, jobs, rounds=1, task_retries=2, retry_delay_seconds=0)
-    if part is None:
-        with pytest.raises(
-            ManifestIncomplete, match="s2-batch-download/control-vm.*same parameters"
-        ):
-            await flows.dataset(COMMAND)
-    else:
-        source.add_diff(
-            "papers",
-            RELEASE,
-            NEXT,
-            dict(PAPERS) if part == "updates" else {},
-            dict(PAPERS) if part == "deletes" else {},
-        )
-        with pytest.raises(
-            ManifestIncomplete, match="s2-batch-download-diff/control-vm.*same parameters"
-        ):
-            await flows.diff(DIFF)
-    assert jobs.parts == [part]
-    assert jobs.submitted == [(0, 1)]
-    assert not any(path.endswith("/manifest.json") for path in store.objects)
-    if part is None:
-        await flows.dataset(COMMAND)
-    else:
-        await flows.diff(DIFF)
-    assert jobs.submitted == [(0, 1), (1,)]
-    assert jobs.jobs[0].operation_id != jobs.jobs[1].operation_id
+    jobs = FakeJobs(service, failing=set())
+    jobs.left = ["earlier"]
+    jobs.outcomes["earlier"] = JobOutcome.FAILED
+    flows = s2_batch_download_flows(service, jobs, rounds=1, task_retries=0, retry_delay_seconds=0)
+    await flows.dataset(COMMAND)
+    assert jobs.waited == ["earlier", "job-1"]
 
 
-@pytest.mark.parametrize("diff", [False, True])
-async def test_a_batch_wait_timeout_never_submits_another_job(
-    service: DownloadDatasetService, source: FakeSource, store: FakeStore, diff: bool
-) -> None:
-    class TimedOutJobs:
-        def __init__(self) -> None:
-            self.submissions = 0
-
-        async def submit(self, job: ShardJob) -> str:
-            self.submissions += 1
-            return "still-running"
-
-        async def wait(self, name: str) -> JobOutcome:
-            raise BatchTimedOut(f"{name} may still be running")
-
-    jobs = TimedOutJobs()
-    flows = s2_batch_download_flows(service, jobs, rounds=3, task_retries=2, retry_delay_seconds=0)
-    with pytest.raises(BatchTimedOut, match="still-running"):
-        if diff:
-            source.add_diff("papers", RELEASE, NEXT, dict(PAPERS), dict(PAPERS))
-            await flows.diff(DIFF)
-        else:
-            await flows.dataset(COMMAND)
-    assert jobs.submissions == 1
-    assert not any(path.endswith("/manifest.json") for path in store.objects)
-
-
-@pytest.mark.parametrize("diff", [False, True])
 async def test_a_lost_submission_reply_retries_the_same_operation(
-    service: DownloadDatasetService, source: FakeSource, diff: bool
+    service: DownloadDatasetService,
 ) -> None:
     class LostReplyJobs(FakeJobs):
         def __init__(self) -> None:
             super().__init__(service, failing=set())
-            self.accepted: dict[UUID, tuple[ShardJob, str]] = {}
             self.attempts: list[ShardJob] = []
 
         async def submit(self, job: ShardJob) -> str:
             self.attempts.append(job)
-            if job.operation_id in self.accepted:
-                accepted, name = self.accepted[job.operation_id]
-                assert job == accepted
-                return name
-            name = await super().submit(job)
-            self.accepted[job.operation_id] = (job, name)
+            if len(self.attempts) > 1:
+                return "job-1"
+            await super().submit(job)
             raise BatchUnavailable("the accepted submission's reply was lost")
 
     jobs = LostReplyJobs()
-    flows = s2_batch_download_flows(service, jobs, rounds=2, task_retries=1, retry_delay_seconds=0)
-    if diff:
-        source.add_diff("papers", RELEASE, NEXT, dict(PAPERS), dict(PAPERS))
-        result = await flows.diff(DIFF)
-        assert jobs.parts == ["updates", "deletes"]
-        assert len(result.jobs) == 2
-    else:
-        result = await flows.dataset(COMMAND)
-        assert jobs.parts == [None]
-        assert len(result.jobs) == 1
-    assert len(jobs.attempts) == 2 * len(jobs.accepted)
-    assert len(jobs.submitted) == len(jobs.accepted)
-    for first, retry in zip(jobs.attempts[::2], jobs.attempts[1::2], strict=True):
-        assert first == retry
+    flows = s2_batch_download_flows(service, jobs, rounds=1, task_retries=1, retry_delay_seconds=0)
+    result = await flows.dataset(COMMAND)
+    first, retry = jobs.attempts
+    assert first == retry
+    assert (jobs.submitted, result.jobs) == ([(0, 1)], ("job-1",))

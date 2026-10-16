@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
@@ -28,7 +26,7 @@ ENDED = {
 
 
 class _JobExists(Exception):
-    """Creation conflicted with a job whose identity must be checked before resuming."""
+    """The job ID holds the operation's UUID, so an earlier attempt of it created the job."""
 
 
 class CloudBatchJobs:
@@ -46,34 +44,40 @@ class CloudBatchJobs:
         self._config = config
         self._root = api_root
         self._sleep = sleep
+        self._parent = f"projects/{config.project}/locations/{config.region}"
 
     async def submit(self, job: ShardJob) -> str:
-        parent = f"projects/{self._config.project}/locations/{self._config.region}"
-        name = f"{parent}/jobs/{job_id(job)}"
-        spec = job_spec(self._config, job)
+        name = f"{self._parent}/jobs/{job_id(job)}"
         try:
-            try:
-                body = await self._call(
-                    "POST",
-                    f"{parent}/jobs",
-                    params={"jobId": job_id(job), "requestId": str(job.operation_id)},
-                    json=spec,
-                )
-            except _JobExists:
-                body = await self._call("GET", name)
+            await self._call(
+                "POST",
+                f"{self._parent}/jobs",
+                params={"jobId": job_id(job), "requestId": str(job.operation_id)},
+                json=job_spec(self._config, job),
+            )
+        except _JobExists:
+            pass
         except BatchUnavailable as exc:
             raise BatchUnavailable(
                 f"Cloud Batch job {name} submission is unconfirmed; it may be running. {exc}"
             ) from None
-        labels = body.get("labels", {})
-        if body.get("name") != name or any(
-            labels.get(key) != spec["labels"][key] for key in ("operation-id", "payload-hash")
-        ):
-            raise BatchRejected(
-                f"Cloud Batch job {name} has a different operation or payload; "
-                "refusing to resume it"
-            )
         return name
+
+    async def running(self) -> list[str]:
+        """Download jobs, told apart from other Batch jobs by their operation-id label."""
+        names: list[str] = []
+        params: dict[str, str] = {}
+        while True:
+            body = await self._call("GET", f"{self._parent}/jobs", params=params)
+            names += [
+                str(job["name"])
+                for job in body.get("jobs", [])
+                if "operation-id" in job.get("labels", {})
+                and job.get("status", {}).get("state") not in ENDED
+            ]
+            if not body.get("nextPageToken"):
+                return names
+            params = {"pageToken": body["nextPageToken"]}
 
     async def wait(self, name: str) -> JobOutcome:
         """Bound the whole wait, including failed or stalled polls."""
@@ -90,9 +94,8 @@ class CloudBatchJobs:
         except TimeoutError:
             raise BatchTimedOut(
                 f"Cloud Batch job {name} did not finish within "
-                f"{self._config.wait_timeout_seconds:g}s; it may still be running. "
-                "Check its status and wait for it to end or cancel it "
-                "before starting another download"
+                f"{self._config.wait_timeout_seconds:g}s and may still be running; "
+                "every download waits for it, so cancel it if it hangs"
             ) from None
 
     async def _call(self, method: str, path: str, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401
@@ -130,7 +133,7 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
     command += ["--bucket", job.bucket, "--prefix", job.prefix]
     if job.from_release is not None and job.part is not None:
         command += ["--from-release", job.from_release, "--part", job.part]
-    spec: dict[str, Any] = {
+    return {
         "taskGroups": [
             {
                 # One task per entry; okp reads its shard from OKP_SHARD.
@@ -170,8 +173,3 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
         },
         "logsPolicy": {"destination": "CLOUD_LOGGING"},
     }
-    # Hash the submitted payload, before the hash label itself is added. Batch may expand
-    # defaults in GET responses, so comparing their complete JSON would reject valid retries.
-    payload = json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
-    spec["labels"]["payload-hash"] = hashlib.sha256(payload).hexdigest()[:63]
-    return spec

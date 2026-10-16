@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from prefect.client.orchestration import get_client
 from prefect.deployments.runner import RunnerDeployment
 from prefect.flows import load_flow_from_entrypoint
 
@@ -154,6 +155,7 @@ def test_load_runs_the_flow_without_an_s2_key(
     assert json.loads(output.splitlines()[-1])["loaded"] == 2
 
 
+@pytest.mark.usefixtures("prefect_server")
 def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPatch) -> None:
     served: list[RunnerDeployment] = []
 
@@ -172,6 +174,8 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_batch_download_diff,
     ]
     assert [found.concurrency_limit for found in served] == [None, None, 1, 1]
+    with get_client(sync_client=True) as client:
+        assert client.read_global_concurrency_limit_by_name(deployments.S2_LIMIT).limit == 1
 
 
 def test_a_missing_key_fails_before_anything_opens(monkeypatch: pytest.MonkeyPatch) -> None:
