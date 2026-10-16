@@ -138,6 +138,7 @@ def s2_batch_download_flows(
     async def archive(pinned: PinnedDataset) -> tuple[list[str], ObjectPath]:
         names: list[str] = []
         for round_ in range(1, rounds + 1):
+            await clear_earlier_jobs()
             shards = await find_unfinished(pinned)
             if not shards:
                 break
@@ -150,7 +151,6 @@ def s2_batch_download_flows(
                 from_release=pinned.from_release,
                 part=pinned.part,
             )
-            await clear_earlier_jobs()
             names.append(await run_job(job, round_))
         return names, await write_manifest(pinned)
 
