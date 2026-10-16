@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, NonNegativeInt, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, NonNegativeInt, model_validator
 
 from openknowledge_contracts.datasets import DatasetName, DiffPart, ReleaseId, ShardRef
 from openknowledge_contracts.manifests import BucketName, ObjectPath, ObjectPrefix
-from openknowledge_core.ingestion.models import ShardOutcome, check_diff
+from openknowledge_core.ingestion.models import ShardOutcome, TableFreshness, check_diff
 
 DEFAULT_PREFIX = "semantic-scholar"
 
@@ -185,3 +185,13 @@ class BatchDiffDownloadResult(BaseModel):
     deletes: NonNegativeInt
     jobs: tuple[str, ...]
     manifests: tuple[ObjectPath, ...]
+
+
+class WatchdogResult(BaseModel):
+    """``stale`` names the tables whose last load is too old, in ``checked`` order."""
+
+    model_config = ConfigDict(frozen=True)
+
+    checked_at: AwareDatetime
+    checked: tuple[TableFreshness, ...]
+    stale: tuple[str, ...]

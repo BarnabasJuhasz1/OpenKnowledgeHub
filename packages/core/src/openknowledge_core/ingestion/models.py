@@ -366,3 +366,20 @@ class ShardJob(BaseModel):
 class JobOutcome(StrEnum):
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+
+
+class TableFreshness(BaseModel):
+    """A table's last applied release, or none when it was never loaded, and whether it is stale."""
+
+    model_config = ConfigDict(frozen=True)
+
+    table: str
+    release: ReleaseId | None
+    applied_at: AwareDatetime | None
+    stale: bool
+
+    @model_validator(mode="after")
+    def _loaded_when_stale(self) -> Self:
+        if self.stale and (self.release is None or self.applied_at is None):
+            raise ValueError("a stale table has a release and the time it was applied")
+        return self

@@ -6,7 +6,7 @@ import gzip
 from collections.abc import AsyncGenerator, Sequence
 from contextlib import aclosing
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -59,6 +59,19 @@ DIFF = DownloadDiff(from_release=RELEASE, release=NEXT, dataset="papers", bucket
 
 def clock() -> datetime:
     return datetime(2026, 10, 10, 12, 0, tzinfo=UTC)
+
+
+def applied_release(table: str, release: str, age: timedelta) -> AppliedRelease:
+    """A record of ``release`` applied to ``table``, ``age`` before ``clock()``."""
+    return AppliedRelease(
+        target=table,
+        target_uuid=UUID(int=1),
+        release=release,
+        from_release=None,
+        software_version=PRODUCER.software_version,
+        image_digest=None,
+        applied_at=clock() - age,
+    )
 
 
 def body_of(data: bytes, *, error: Exception | None = None, complete: bool = True) -> CheckedStream:
