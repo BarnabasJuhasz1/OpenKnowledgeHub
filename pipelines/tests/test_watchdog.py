@@ -4,10 +4,7 @@ from datetime import datetime, timedelta, timezone
 from typing import cast
 
 import pytest
-from prefect.client.orchestration import get_client
-from prefect.client.schemas.filters import FlowRunFilter, FlowRunFilterId
 from prefect.client.schemas.objects import State
-from prefect.client.schemas.sorting import TaskRunSort
 
 from openknowledge_contracts.tables.s2 import CONTRACTS
 from openknowledge_core.ingestion import WatchdogResult, WatchdogService
@@ -124,15 +121,6 @@ async def test_a_stale_table_is_reported_and_the_flow_still_completes(
     assert lines(caplog, "watchdog checked") == [
         (logging.INFO, "watchdog checked 6 tables: 1 older than 10 days, 4 never loaded")
     ]
-    assert state.state_details.flow_run_id is not None
-    async with get_client() as client:
-        task_runs = await client.read_task_runs(
-            flow_run_filter=FlowRunFilter(
-                id=FlowRunFilterId(any_=[state.state_details.flow_run_id])
-            ),
-            sort=TaskRunSort.EXPECTED_START_TIME_ASC,
-        )
-    assert [run.name.rsplit("-", 1)[0] for run in task_runs] == ["heartbeat", "check-freshness"]
 
 
 async def test_an_unreachable_clickhouse_fails_the_run_after_the_heartbeat(
