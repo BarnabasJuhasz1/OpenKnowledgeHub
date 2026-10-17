@@ -15,6 +15,7 @@ from openknowledge_core.ingestion.errors import (
     BatchRejected,
     BatchTimedOut,
     BatchUnavailable,
+    SharedCapacityError,
 )
 from openknowledge_core.ingestion.families import ARCHIVE_DATASETS, ArchiveFamily, archive_family
 from openknowledge_core.ingestion.models import JobOutcome, ShardJob
@@ -87,7 +88,7 @@ class CloudBatchJobs:
                     ):
                         job_family = ArchiveFamily.CORE.value
                     if job_family != family.value:
-                        raise BatchRejected(
+                        raise SharedCapacityError(
                             f"Active foreign or legacy download job {job['name']}; "
                             "drain it to a terminal state before retrying. "
                             "This lookup did not cancel or wait on jobs"

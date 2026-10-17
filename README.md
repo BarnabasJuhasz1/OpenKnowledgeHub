@@ -81,6 +81,15 @@ for an explicit diff.
 | `okp s2 archive-fulltext` | `s2-batch-download-fulltext/control-vm`; `s2-batch-download-fulltext-diff/control-vm` |
 | `okp s2 archive-specter2` | `s2-batch-download-embeddings/control-vm`; `s2-batch-download-embeddings-diff/control-vm` |
 
+## Coordinated sync
+
+The Prefect deployment `s2-sync/control-vm` updates the seven core datasets in ClickHouse, then
+archives full text and SPECTER2 in GCS. It selects a release per dataset, catches up through
+contiguous diffs, and resumes from verified progress. Core failures block both large archives.
+Existing bases are required; core diffs above 30% of their verified baseline size are not loaded.
+The daily 01:30 Europe/Zurich schedule and both large-archive stages default disabled.
+Only one cycle runs at a time, so a long archive can delay the next cycle.
+
 ## Loading into ClickHouse
 
 ```sh
