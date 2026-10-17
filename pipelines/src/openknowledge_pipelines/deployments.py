@@ -22,13 +22,19 @@ from openknowledge_core.ingestion import (
     LoadDatasetResult,
     LoadDiff,
     LoadDiffResult,
+    WatchdogResult,
 )
 from openknowledge_pipelines import bootstrap
-from openknowledge_pipelines.settings import BatchSettings, LoadSettings
+from openknowledge_pipelines.settings import BatchSettings, LoadSettings, WatchdogSettings
 
 DEPLOYMENT = "control-vm"
-RUNS_AT_ONCE = 2
+# One load, one download and the watchdog at once. The two global limits below hold the loads and
+# the downloads to one each, so this cap no longer guards ClickHouse or the S2 key; a run waiting
+# on a limit still holds a slot, so three runs started by hand delay the watchdog's cron run.
+RUNS_AT_ONCE = 3
 S2_LIMIT = "semantic-scholar"
+LOAD_LIMIT = "clickhouse"
+WATCHDOG_CRON = "0 */6 * * *"
 
 
 def one_s2_user() -> AbstractAsyncContextManager[None]:
@@ -37,10 +43,16 @@ def one_s2_user() -> AbstractAsyncContextManager[None]:
     return concurrency(S2_LIMIT, strict=True, raise_on_lease_renewal_failure=False)
 
 
+def one_clickhouse_loader() -> AbstractAsyncContextManager[None]:
+    # Strict for the same reason. A failed lease renewal must not cancel a load in the middle of
+    # an insert of hours.
+    return concurrency(LOAD_LIMIT, strict=True, raise_on_lease_renewal_failure=False)
+
+
 @flow(name="s2-load", persist_result=False)
 async def s2_load(command: LoadDataset) -> LoadDatasetResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]  # fields come from the environment
-    async with bootstrap.open_load_service(settings) as service:
+    async with one_clickhouse_loader(), bootstrap.open_load_service(settings) as service:
         # fn runs the body in this flow run, so its tasks do not start a subflow.
         return await bootstrap.load_flows(service, settings).dataset.fn(command)
 
@@ -48,7 +60,7 @@ async def s2_load(command: LoadDataset) -> LoadDatasetResult:
 @flow(name="s2-load-diff", persist_result=False)
 async def s2_load_diff(command: LoadDiff) -> LoadDiffResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]
-    async with bootstrap.open_load_service(settings) as service:
+    async with one_clickhouse_loader(), bootstrap.open_load_service(settings) as service:
         return await bootstrap.load_flows(service, settings).diff.fn(command)
 
 
@@ -66,15 +78,29 @@ async def s2_batch_download_diff(command: DownloadDiff) -> BatchDiffDownloadResu
         return await bootstrap.batch_download_flows(service, jobs, settings).diff.fn(command)
 
 
-def serve() -> None:
+@flow(name="watchdog", persist_result=False)
+async def watchdog() -> WatchdogResult:
+    settings = WatchdogSettings()  # pyright: ignore[reportCallIssue]
+    async with bootstrap.open_watchdog(settings) as service:
+        return await bootstrap.watchdog_flow(service, settings).fn()
+
+
+def ensure_limits() -> None:
+    """Create the global limits the flows take, since a strict limit must exist before a run."""
     with get_client(sync_client=True) as client:
-        try:
-            client.read_global_concurrency_limit_by_name(S2_LIMIT)
-        except ObjectNotFound:
-            client.create_global_concurrency_limit(
-                GlobalConcurrencyLimitCreate(name=S2_LIMIT, limit=1)
-            )
+        for name in (S2_LIMIT, LOAD_LIMIT):
+            try:
+                client.read_global_concurrency_limit_by_name(name)
+            except ObjectNotFound:
+                client.create_global_concurrency_limit(
+                    GlobalConcurrencyLimitCreate(name=name, limit=1)
+                )
+
+
+def serve() -> None:
+    ensure_limits()
     prefect_serve(
+        # The loads take LOAD_LIMIT inside the flow, so one run of either load goes at a time.
         RunnerDeployment.from_flow(s2_load, DEPLOYMENT, entrypoint_type=EntrypointType.MODULE_PATH),
         RunnerDeployment.from_flow(
             s2_load_diff, DEPLOYMENT, entrypoint_type=EntrypointType.MODULE_PATH
@@ -89,6 +115,13 @@ def serve() -> None:
                 concurrency_limit=1,
             )
             for download in (s2_batch_download, s2_batch_download_diff)
+        ),
+        # Every 6 hours, for a log alert; it needs no S2 key, so it takes no limit.
+        RunnerDeployment.from_flow(
+            watchdog,
+            DEPLOYMENT,
+            entrypoint_type=EntrypointType.MODULE_PATH,
+            cron=WATCHDOG_CRON,
         ),
         limit=RUNS_AT_ONCE,
     )

@@ -14,6 +14,7 @@ from openknowledge_core.ingestion.commands import (
     LoadDiffResult,
     PinnedRelease,
     PinRelease,
+    WatchdogResult,
 )
 from openknowledge_core.ingestion.errors import IngestionError, TransientError
 from openknowledge_core.ingestion.load import LoadDatasetService
@@ -36,6 +37,7 @@ from openknowledge_core.ingestion.ports import (
     TableLoader,
 )
 from openknowledge_core.ingestion.service import DownloadDatasetService
+from openknowledge_core.ingestion.watchdog import WatchdogService
 
 __all__ = [
     "AppliedReleases",
@@ -69,4 +71,6 @@ __all__ = [
     "ShardOutcome",
     "TableLoader",
     "TransientError",
+    "WatchdogResult",
+    "WatchdogService",
 ]

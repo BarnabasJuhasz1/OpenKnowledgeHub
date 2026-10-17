@@ -77,9 +77,17 @@ A rerun skips an object whose row matches its generation, its checksum, the tabl
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.
 
 `okp s2 load-diff --from-release <release_id> --release <release_id> --dataset <name> --bucket <bucket>` loads one archived diff, its update files as upserts and then its delete files as tombstones, and `okp serve` serves it as `s2-load-diff/control-vm`.
+Both load deployments take the Prefect global concurrency limit `clickhouse`, which `okp serve` creates with a limit of 1, so no two served loads overlap.
 The `applied` table records each base load and diff that passed its checks, and a diff loads only into a table that holds the release it starts from or the one it brings, which is a rerun.
 When lineage is recorded, a base loads only into an empty table or one holding the same release, and `publication-venues` also into one holding an older release.
 A load of `publication-venues`, which has no diffs, flags the venues its release no longer lists in `removed`.
+
+`okp serve` also serves `watchdog/control-vm`, which runs every 6 hours.
+Each run writes `watchdog heartbeat`, then checks every table that follows diffs.
+It writes one `watchdog stale` line per table whose last load was applied more than `OKP_WATCHDOG_MAX_AGE_DAYS` days ago, 14 by default.
+A table never loaded does not count.
+Stale data never fails a run, but a ClickHouse error does.
+Both texts are fixed so that a log alert can match them.
 
 Load recovery still needs persisted ownership of a begun load and shared coordination per table.
 Until those are implemented, do not load a base over a populated table with missing lineage or overlap base and diff loads for the same dataset.

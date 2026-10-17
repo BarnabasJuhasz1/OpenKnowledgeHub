@@ -14,7 +14,9 @@ from openknowledge_core.ingestion import (
     DownloadShard,
     IngestionError,
     LoadDataset,
+    LoadDatasetResult,
     LoadDiff,
+    LoadDiffResult,
     PinRelease,
 )
 from openknowledge_pipelines import bootstrap
@@ -23,6 +25,7 @@ from openknowledge_pipelines.settings import (
     CommonSettings,
     LoadSettings,
     PipelineSettings,
+    WatchdogSettings,
 )
 
 PIN_HELP = "Archive a release's metadata and print it as JSON, with the explicit release_id."
@@ -189,10 +192,13 @@ def load(release: str, dataset: str, bucket: str, prefix: str) -> None:
         bucket=bucket,
         prefix=prefix,
     )
-    _settings(LoadSettings)
-    from openknowledge_pipelines.deployments import s2_load
+    settings = _settings(LoadSettings)
 
-    _run(lambda: s2_load(command))
+    async def run() -> LoadDatasetResult:
+        async with bootstrap.open_load_service(settings) as service:
+            return await bootstrap.load_flows(service, settings).dataset(command)
+
+    _run(run)
 
 
 @s2.command("load-diff", help=LOAD_DIFF_HELP, short_help=LOAD_DIFF_HELP)
@@ -215,16 +221,19 @@ def load_diff(from_release: str, release: str, dataset: str, bucket: str, prefix
         bucket=bucket,
         prefix=prefix,
     )
-    _settings(LoadSettings)
-    from openknowledge_pipelines.deployments import s2_load_diff
+    settings = _settings(LoadSettings)
 
-    _run(lambda: s2_load_diff(command))
+    async def run() -> LoadDiffResult:
+        async with bootstrap.open_load_service(settings) as service:
+            return await bootstrap.load_flows(service, settings).diff(command)
+
+    _run(run)
 
 
 @main.command(help=SERVE_HELP, short_help=SERVE_HELP)
 def serve() -> None:
-    _settings(LoadSettings)
     _settings(BatchSettings)
+    _settings(WatchdogSettings)
     from openknowledge_pipelines import deployments
 
     deployments.serve()

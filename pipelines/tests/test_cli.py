@@ -1,27 +1,40 @@
 import json
+import logging
 import os
 import subprocess
 import sys
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable
 from contextlib import asynccontextmanager
+from datetime import timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 from click.testing import CliRunner
 from prefect.client.orchestration import get_client
+from prefect.client.schemas.actions import DeploymentScheduleCreate
+from prefect.client.schemas.objects import State
+from prefect.client.schemas.schedules import CronSchedule
 from prefect.deployments.runner import RunnerDeployment
 from prefect.flows import load_flow_from_entrypoint
 
-from openknowledge_core.ingestion import DownloadDatasetService, LoadDatasetService
+from openknowledge_core.ingestion import (
+    DownloadDatasetService,
+    LoadDatasetService,
+    WatchdogResult,
+    WatchdogService,
+)
 from openknowledge_pipelines import bootstrap, cli, deployments
-from openknowledge_pipelines.settings import LoadSettings, PipelineSettings
+from openknowledge_pipelines.settings import LoadSettings, PipelineSettings, WatchdogSettings
 from tests.fakes.ports import (
     PAPERS,
     PRODUCER,
+    RELEASE,
     FakeApplied,
     FakeSource,
     FakeStore,
     FakeTables,
+    applied_release,
     clock,
 )
 
@@ -172,10 +185,46 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_load_diff,
         deployments.s2_batch_download,
         deployments.s2_batch_download_diff,
+        deployments.watchdog,
     ]
-    assert [found.concurrency_limit for found in served] == [None, None, 1, 1]
+    assert [found.concurrency_limit for found in served] == [None, None, 1, 1, None]
+    *unscheduled, watchdog = served
+    assert [found.schedules for found in unscheduled] == [[], [], [], []]
+    [scheduled] = cast("list[DeploymentScheduleCreate]", watchdog.schedules)
+    assert isinstance(scheduled.schedule, CronSchedule)
+    # from_flow stores no timezone for a cron, and the server reads None as UTC.
+    assert (scheduled.schedule.cron, scheduled.schedule.timezone, scheduled.active) == (
+        "0 */6 * * *",
+        None,
+        True,
+    )
     with get_client(sync_client=True) as client:
-        assert client.read_global_concurrency_limit_by_name(deployments.S2_LIMIT).limit == 1
+        for name in (deployments.S2_LIMIT, deployments.LOAD_LIMIT):
+            assert client.read_global_concurrency_limit_by_name(name).limit == 1
+
+
+@pytest.mark.usefixtures("prefect_server")
+async def test_the_watchdog_deployment_runs_over_the_wired_service(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    fake = FakeApplied()
+    fake.records.append(applied_release("papers", RELEASE, timedelta(days=4)))
+
+    @asynccontextmanager
+    async def open_watchdog(settings: WatchdogSettings) -> AsyncGenerator[WatchdogService]:
+        yield WatchdogService(applied=fake, clock=clock)
+
+    monkeypatch.setattr(bootstrap, "open_watchdog", open_watchdog)
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    for name, value in LOAD_ENV.items():
+        monkeypatch.setenv(name, value)
+    caplog.set_level(logging.INFO)
+    # Flow is invariant in its return type, so pyright cannot pick the awaitable overload here.
+    state = await cast("Awaitable[State[WatchdogResult]]", deployments.watchdog(return_state=True))
+    assert state.is_completed()
+    result = await state.aresult()
+    assert (result.stale, len(result.never_loaded)) == ((), 5)
+    assert "watchdog checked 6 tables: 0 older than 14 days, 5 never loaded" in caplog.messages
 
 
 def test_a_missing_key_fails_before_anything_opens(monkeypatch: pytest.MonkeyPatch) -> None:
