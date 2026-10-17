@@ -187,7 +187,7 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_batch_download_diff,
         deployments.watchdog,
     ]
-    assert [found.concurrency_limit for found in served] == [None, None, 1, 1, None]
+    assert [found.concurrency_limit for found in served] == [1, 1, 1, 1, None]
     *unscheduled, watchdog = served
     assert [found.schedules for found in unscheduled] == [[], [], [], []]
     [scheduled] = cast("list[DeploymentScheduleCreate]", watchdog.schedules)
