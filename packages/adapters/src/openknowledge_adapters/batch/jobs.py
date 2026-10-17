@@ -148,9 +148,9 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
             {
                 # One task per entry; okp reads its shard from OKP_SHARD.
                 "taskEnvironments": [{"variables": {"OKP_SHARD": str(s)}} for s in job.shards],
-                # One task at a time: each lists the dataset with the S2 key, which allows
-                # one request per second.
-                "parallelism": 1,
+                # Each task makes one listing call with the S2 key, which allows one request
+                # per second; the retries' jitter spreads the tasks that start together.
+                "parallelism": min(config.parallelism, len(job.shards)),
                 "taskSpec": {
                     "runnables": [{"container": {"imageUri": config.image, "commands": command}}],
                     "environment": {

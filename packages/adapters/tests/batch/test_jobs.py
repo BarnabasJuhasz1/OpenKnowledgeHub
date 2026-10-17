@@ -8,7 +8,7 @@ from aiohttp import web
 from gcloud.aio.auth import Token
 
 from openknowledge_adapters import batch
-from openknowledge_adapters.batch.jobs import job_id
+from openknowledge_adapters.batch.jobs import job_id, job_spec
 from openknowledge_core.ingestion.errors import BatchRejected, BatchTimedOut, BatchUnavailable
 from openknowledge_core.ingestion.models import JobOutcome, ShardJob
 
@@ -22,6 +22,7 @@ CONFIG = batch.BatchConfig(
     subnetwork="projects/p/regions/europe-west4/subnetworks/download",
     image="repo/pipelines@sha256:" + "a" * 64,
     machine_type="e2-standard-2",
+    parallelism=8,
     max_run_seconds=3600,
     poll_seconds=0.01,
     environment={"OKP_IMAGE_DIGEST": "sha256:" + "a" * 64},
@@ -106,7 +107,9 @@ async def test_a_job_runs_one_task_per_shard_and_is_polled_until_it_ends() -> No
         {"OKP_SHARD": "3"},
         {"OKP_SHARD": "7"},
     ]
-    assert group["parallelism"] == 1
+    assert group["parallelism"] == 2  # at most one per shard
+    one = job_spec(CONFIG.model_copy(update={"parallelism": 1}), JOB)
+    assert one["taskGroups"][0]["parallelism"] == 1
     assert group["taskSpec"]["environment"]["secretVariables"] == {"S2_API_KEY": SECRET}
     [runnable] = group["taskSpec"]["runnables"]
     assert runnable["container"]["imageUri"] == CONFIG.image

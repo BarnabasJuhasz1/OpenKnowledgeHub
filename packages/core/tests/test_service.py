@@ -64,7 +64,7 @@ async def test_every_shard_gets_an_object_and_a_receipt(
         assert receipt.schema_ref == "semantic-scholar/papers@2026-10-06"
 
 
-async def test_latest_is_resolved_only_by_pin(
+async def test_latest_is_resolved_only_by_pin_and_a_pinned_release_never_again(
     service: DownloadDatasetService, source: FakeSource
 ) -> None:
     add_papers(source)
@@ -72,7 +72,7 @@ async def test_latest_is_resolved_only_by_pin(
     assert pinned_release.release_id == RELEASE
     assert pinned_release.record.name == "s2/2026-10-06/release.json"
     pinned = await service.pin_dataset(COMMAND)
-    assert source.resolved == ["latest", RELEASE]
+    assert source.resolved == ["latest"]
     assert all(RELEASE in pinned.object_path(shard).name for shard in pinned.shards)
 
 

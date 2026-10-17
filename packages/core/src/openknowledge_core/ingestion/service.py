@@ -97,7 +97,11 @@ class DownloadDatasetService:
         self._links: dict[tuple[str | None, str, str], dict[str, ShardLink]] = {}
 
     async def pin_release(self, command: PinRelease) -> PinnedRelease:
-        """``latest`` is resolved here and nowhere else."""
+        """``latest`` is resolved here and nowhere else; a stored record of a release wins."""
+        if command.release != "latest":
+            path = release_record_path(command.bucket, command.prefix, command.release)
+            if await self._stored_release(path) == command.release:
+                return PinnedRelease(release_id=command.release, record=path)
         metadata = await self._catalog.resolve_release(command.release)
         if command.release != "latest" and metadata.release_id != command.release:
             raise SourceRejected(
@@ -541,6 +545,15 @@ class DownloadDatasetService:
                 f"{path} and {target} disagree on {_listed(differ)}; {_delete_hint(path)}"
             )
         return receipt
+
+    async def _stored_release(self, path: ObjectPath) -> str | None:
+        """The release id of a readable record at ``path``; otherwise pin_release resolves."""
+        stored = await self._store.stat(path)
+        data = None if stored is None else await read_small(self._store, stored, DOCUMENT_LIMIT)
+        try:
+            return None if data is None else ReleaseRecord.from_json(data).metadata.release_id
+        except ValueError:
+            return None
 
     async def _archive[D: ArchiveDocument](
         self,

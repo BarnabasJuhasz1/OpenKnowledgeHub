@@ -86,19 +86,19 @@ async def test_retries_wait_with_awaited_backoff(
 ) -> None:
     s2.fail_next = [429, httpx.ConnectError("reset"), 503]
     assert (await client.catalog.resolve_release("latest")).release_id == "2026-10-06"
-    assert clock.sleeps == [1.0, 2.0, 4.0]
+    assert clock.sleeps == [2.0, 4.0, 8.0]
     assert len(s2.api_calls) == 4
 
 
-async def test_gives_up_after_about_two_minutes(
+async def test_gives_up_within_about_four_minutes(
     client: SemanticScholar, s2: FakeS2, clock: FakeClock
 ) -> None:
     s2.fail_next = [429] * 8
     with pytest.raises(SourceUnavailable, match="8 times, the last time with HTTP 429"):
         await client.catalog.resolve_release("latest")
     assert len(s2.api_calls) == 8
-    assert clock.sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0]
-    assert sum(clock.sleeps) == 127.0
+    assert clock.sleeps == [2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0]
+    assert sum(clock.sleeps) == 254.0
 
 
 async def test_retry_after_is_honoured(
@@ -107,6 +107,26 @@ async def test_retry_after_is_honoured(
     s2.fail_next = [httpx.Response(429, headers={"retry-after": "7"})]
     await client.catalog.resolve_release("latest")
     assert clock.sleeps == [7.0]
+
+
+async def test_a_retry_waits_a_random_part_of_its_backoff_and_says_so(
+    s2: FakeS2, clock: FakeClock, caplog: pytest.LogCaptureFixture
+) -> None:
+    s2.fail_next = [httpx.Response(429, headers={"retry-after": "7"}), 503]
+    async with connect(
+        s2_config(),
+        transport=s2.transport,
+        clock=clock,
+        sleep=clock.sleep,
+        uniform=lambda low, high: low,
+    ) as client:
+        await client.catalog.resolve_release("latest")
+    # Retry-After is a floor, and the rate limiter still spaces the calls.
+    assert clock.sleeps == [7.0, 0.0, 1.0]
+    assert [record.getMessage() for record in caplog.records] == [
+        "Semantic Scholar request for release latest failed with HTTP 429; retrying in 7.0s",
+        "Semantic Scholar request for release latest failed with HTTP 503; retrying in 0.0s",
+    ]
 
 
 async def test_a_body_that_is_not_json_is_an_error(client: SemanticScholar, s2: FakeS2) -> None:

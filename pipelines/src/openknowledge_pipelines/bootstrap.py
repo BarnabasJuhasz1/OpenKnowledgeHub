@@ -146,6 +146,7 @@ async def open_batch_download(
         subnetwork=settings.batch_subnetwork,
         image=f"{settings.batch_image_repository}@{settings.image_digest}",
         machine_type=settings.batch_machine_type,
+        parallelism=settings.batch_parallelism,
         provisioning_model=settings.batch_provisioning_model,
         max_run_seconds=settings.batch_max_run_seconds,
         poll_seconds=settings.batch_poll_seconds,
