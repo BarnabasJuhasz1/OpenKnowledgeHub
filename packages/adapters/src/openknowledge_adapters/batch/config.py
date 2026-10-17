@@ -16,6 +16,8 @@ class BatchConfig(BaseModel):
     image: str
     """The image every task runs, pinned by digest."""
     machine_type: str
+    parallelism: PositiveInt
+    """Tasks of a job that run at once."""
     provisioning_model: Literal["SPOT", "STANDARD"] = "SPOT"
     max_run_seconds: PositiveInt
     poll_seconds: PositiveFloat
