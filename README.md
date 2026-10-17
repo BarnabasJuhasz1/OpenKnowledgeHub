@@ -4,7 +4,12 @@
 
 Needs `uv` and `gcloud auth application-default login` with an account that can create and read objects in the bucket.
 Keep the API key in `~/.config/openknowledge/.env` as `S2_API_KEY=...` and let uv load it.
-Run only `publication-venues` locally. Every other dataset downloads through Batch.
+Use `publication-venues` for local downloads; use managed Batch entry points for large archives.
+The direct `download` and `download-shard` primitives retain their local behavior and settings.
+Manual invocations are operator-managed: do not run them alongside managed jobs or other users
+of the same S2 key. They do not acquire the shared Prefect budget or inspect orphaned Batch jobs.
+Batch invokes `download-shard` internally for its scheduled tasks; those tasks belong to the
+managed job's budget.
 
 ```sh
 uv sync
@@ -59,8 +64,85 @@ Each submission keeps the same operation ID and job name across task retries, so
 `OKP_BATCH_WAIT_TIMEOUT_SECONDS` bounds each job's whole wait, including queued time and API outages, to 24 hours by default, separately from each task's `OKP_BATCH_MAX_RUN_SECONDS`.
 If that wait expires, the run fails and names the job.
 
-Both download deployments take the Prefect global concurrency limit `semantic-scholar`, which `okp serve` creates with a limit of 1, so their runs never overlap.
-Before submitting a job, a run deletes any download job still queued in Batch, such as one left by a run that failed or was cancelled, and waits for any still running.
+All six managed download deployments take the same active Prefect global concurrency limit
+`semantic-scholar` with limit 1 and no slot decay. `okp serve` creates it if missing; verify an
+existing limit has these settings. Separate family entry points do not run dataset jobs simultaneously:
+with `OKP_BATCH_PARALLELISM=8`, one managed job runs at most eight tasks in total, not eight per family.
+Each process still has its own S2 rate limiter; jittered retries handle task startup bursts.
+
+A busy request makes no acquisition retries and times out after one second at most in Prefect's
+acquisition service. It may fail promptly rather than wait in a global queue. Start one managed
+archive at a time; rerun a refused request after the active run ends. Each deployment queues its
+own additional runs. The runner cap stays at three processes; briefly competing download runs can
+still delay loads/watchdog startup, but do not hold runner slots indefinitely waiting for this limit.
+
+Before pinning and before each round, the controller scans active download jobs across all listing
+pages. It deletes queued jobs of its own family and waits for its own running jobs to end. Base and
+diff jobs share family cleanup. An active foreign-family or unlabelled legacy download job causes
+refusal without cancelling or waiting for it. Let that job end, or inspect and drain it manually,
+then retry. A timed-out/cancelled controller may leave Batch work running. Lease renewal failure
+stops the controller; the next run must inspect its orphaned jobs before submitting new work.
+This is conservative recovery under the shared Prefect lease, not a distributed Batch reservation:
+external manual workers, delayed requests and uncoordinated old controllers are outside its budget.
+
+## Full-text and SPECTER2 raw archives
+
+These archives write only to the existing `openknowledge-508216-raw` GCS bucket. They do not load
+ClickHouse, create derived stores, or advance an applied checkpoint. The seven core datasets retain
+`s2-batch-download/control-vm` and `s2-batch-download-diff/control-vm`; those entry points now reject
+non-core datasets before opening clients. Fulltext accepts only `s2orc_v2`; embeddings accepts only
+`embeddings-specter_v2`. Managed routes reject unknown and legacy dataset names.
+
+Before upgrading, stop old controllers and drain **all** their queued/running download jobs to a
+terminal state. Do not overlap old and new controllers: old code can cancel jobs across families.
+Publish/pin an image containing this code for both the control runner and Batch tasks, then restart
+`okp serve` to register the new deployments. No infrastructure changes are required by this code.
+Use the existing Batch permissions, GCS object access and secret configuration. Managed CLI runs
+need `PREFECT_API_URL` pointing at the same server as `okp serve`, ADC, `S2_API_KEY`,
+`OKP_IMAGE_DIGEST`, and `OKP_BATCH_PROJECT`, `OKP_BATCH_REGION`, `OKP_BATCH_SERVICE_ACCOUNT`,
+`OKP_BATCH_NETWORK`, `OKP_BATCH_SUBNETWORK`, `OKP_BATCH_IMAGE_REPOSITORY`,
+`OKP_BATCH_S2_KEY_SECRET`. Use the same compute and key configuration across families.
+`okp serve` also needs the existing ClickHouse/load/watchdog settings. No new schedules are added.
+
+Initial explicit base commands (run one, wait for completion, then run the other):
+
+```sh
+uv run --env-file ~/.config/openknowledge/.env okp s2 archive-fulltext --release 2026-10-13 --bucket openknowledge-508216-raw
+uv run --env-file ~/.config/openknowledge/.env okp s2 archive-specter2 --release 2026-10-06 --bucket openknowledge-508216-raw
+```
+
+Or submit to the served deployments, with the complete `command` parameter:
+
+```sh
+uv run prefect deployment run s2-batch-download-fulltext/control-vm --params '{"command":{"release":"2026-10-13","dataset":"s2orc_v2","bucket":"openknowledge-508216-raw","prefix":"semantic-scholar"}}'
+uv run prefect deployment run s2-batch-download-embeddings/control-vm --params '{"command":{"release":"2026-10-06","dataset":"embeddings-specter_v2","bucket":"openknowledge-508216-raw","prefix":"semantic-scholar"}}'
+```
+
+The CLI runs the guarded flow directly and prints its Batch result; Prefect CLI submits a deployment
+run. Both preserve explicit, source-specific releases. With the default prefix, base objects go to
+`gs://openknowledge-508216-raw/semantic-scholar/2026-10-13/s2orc_v2/` and
+`gs://openknowledge-508216-raw/semantic-scholar/2026-10-06/embeddings-specter_v2/`.
+Receipts, immutable inventories and complete final manifests use the same layout as core archives.
+Rerun the same parameters to recover/verify existing objects and download only unfinished shards.
+
+For an explicit adjacent diff, add `--from-release` to the same CLI command:
+
+```sh
+uv run --env-file ~/.config/openknowledge/.env okp s2 archive-fulltext --from-release "$FROM_RELEASE" --release "$TO_RELEASE" --bucket openknowledge-508216-raw
+uv run --env-file ~/.config/openknowledge/.env okp s2 archive-specter2 --from-release "$FROM_RELEASE" --release "$TO_RELEASE" --bucket openknowledge-508216-raw
+uv run prefect deployment run s2-batch-download-fulltext-diff/control-vm --params "{\"command\":{\"from_release\":\"$FROM_RELEASE\",\"release\":\"$TO_RELEASE\",\"dataset\":\"s2orc_v2\",\"bucket\":\"openknowledge-508216-raw\",\"prefix\":\"semantic-scholar\"}}"
+uv run prefect deployment run s2-batch-download-embeddings-diff/control-vm --params "{\"command\":{\"from_release\":\"$FROM_RELEASE\",\"release\":\"$TO_RELEASE\",\"dataset\":\"embeddings-specter_v2\",\"bucket\":\"openknowledge-508216-raw\",\"prefix\":\"semantic-scholar\"}}"
+```
+
+Set `FROM_RELEASE` and `TO_RELEASE` to a manually verified adjacent pair **for that dataset**;
+these commands do not establish that either archive has diff support for any particular pair.
+Missing diffs fail without producing a diff inventory/final manifest or advancing a checkpoint
+(the destination release metadata may already be pinned). Diff objects retain explicit updates and
+deletes under `semantic-scholar/diffs/<from>/<to>/<dataset>/`; each nonempty part gets its own manifest.
+Full-text inventory, schema, size and access still require manual verification with the production
+key before starting the initial download. No such facts are assumed here. Latest-release discovery,
+automatic schedules, legacy archives, vector indexing and derived-store application remain outside
+this workflow.
 
 ## Loading into ClickHouse
 
