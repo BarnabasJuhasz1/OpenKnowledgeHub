@@ -18,5 +18,12 @@ def clock() -> FakeClock:
 
 @pytest.fixture
 async def client(s2: FakeS2, clock: FakeClock) -> AsyncGenerator[SemanticScholar, None]:
-    async with connect(s2_config(), transport=s2.transport, clock=clock, sleep=clock.sleep) as s2c:
+    # Every retry waits the longest its jitter allows.
+    async with connect(
+        s2_config(),
+        transport=s2.transport,
+        clock=clock,
+        sleep=clock.sleep,
+        uniform=lambda low, high: high,
+    ) as s2c:
         yield s2c

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -31,6 +32,7 @@ async def connect(
     transport: httpx.AsyncBaseTransport | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    uniform: Callable[[float, float], float] = random.uniform,
 ) -> AsyncGenerator[SemanticScholar, None]:
     """Open the API and file-host clients for one run, with keyword arguments as test seams."""
     install_log_redaction()
@@ -57,6 +59,7 @@ async def connect(
             attempts=config.attempts,
             backoff=config.backoff_seconds,
             sleep=sleep,
+            uniform=uniform,
         )
         yield SemanticScholar(catalog=catalog, downloads=SignedLinkDownloads(files))
 

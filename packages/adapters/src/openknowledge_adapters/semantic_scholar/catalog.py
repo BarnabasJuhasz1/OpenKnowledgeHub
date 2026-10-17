@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Awaitable, Callable
 from typing import Literal
 from urllib.parse import quote, urlsplit
@@ -24,6 +25,8 @@ from openknowledge_core.ingestion.errors import (
     SourceUnavailable,
 )
 from openknowledge_core.ingestion.models import DatasetListing, DiffChain, DiffListing, ShardLink
+
+log = logging.getLogger(__name__)
 
 KEY_REFUSED_STATUSES = frozenset({401, 403})
 AGAIN = "rerun later, and report it to Semantic Scholar if it repeats"
@@ -69,6 +72,7 @@ class SemanticScholarCatalog:
         attempts: int,
         backoff: float,
         sleep: Callable[[float], Awaitable[None]],
+        uniform: Callable[[float, float], float],
     ) -> None:
         self._http = http
         self._limiter = limiter
@@ -76,6 +80,7 @@ class SemanticScholarCatalog:
         self._attempts = attempts
         self._backoff = backoff
         self._sleep = sleep
+        self._uniform = uniform
 
     async def resolve_release(self, selector: ReleaseId | Literal["latest"]) -> ReleaseMetadata:
         about = f"release {selector}"
@@ -173,7 +178,15 @@ class SemanticScholarCatalog:
                     "rerun later"
                 )
             if attempt < self._attempts:
-                await self._sleep(max(self._backoff * 2 ** (attempt - 1), retry_after))
+                # Full jitter, so tasks that hit a 429 together do not retry together.
+                wait = max(retry_after, self._uniform(0, self._backoff * 2**attempt))
+                log.warning(
+                    "Semantic Scholar request for %s failed with %s; retrying in %.1fs",
+                    about,
+                    last,
+                    wait,
+                )
+                await self._sleep(wait)
         raise SourceUnavailable(
             f"Semantic Scholar failed the request for {about} {self._attempts} times, "
             f"the last time with {last}; rerun later"
