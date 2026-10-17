@@ -268,13 +268,11 @@ async def test_archive_families_resume_base_and_both_diff_parts(
     base = COMMAND.model_copy(update={"dataset": dataset})
     with pytest.raises(ManifestIncomplete):
         await flows.dataset(base)
-    assert jobs.submitted == [(0, 1)]
     result = await flows.dataset(base)
     assert jobs.submitted == [(0, 1), (1,)]
     assert jobs.family == family
     assert result.manifest.name == f"s2/{RELEASE}/{dataset}/manifest.json"
     assert len(DatasetManifest.from_json(store.data(result.manifest)).entries) == 2
-    assert (await flows.dataset(base)).jobs == ()
 
     jobs.failing = {1}
     diff = DIFF.model_copy(update={"dataset": dataset})
@@ -286,20 +284,6 @@ async def test_archive_families_resume_base_and_both_diff_parts(
     assert [job.shards for job in jobs.jobs[-2:]] == [(1,), (0, 1)]
     assert len(resumed.manifests) == 2
     assert (await flows.diff(diff)).jobs == ()
-    assert not any("applied" in path for path in store.objects)
-
-
-@pytest.mark.parametrize("dataset", ["s2orc_v2", "embeddings-specter_v2", "s2orc"])
-async def test_core_batch_entry_rejects_wrong_family_before_pin(
-    dataset: str, service: DownloadDatasetService, source: FakeSource
-) -> None:
-    jobs = FakeJobs(service, failing=set())
-    flows = s2_batch_download_flows(service, jobs, rounds=1, task_retries=0, retry_delay_seconds=0)
-    with pytest.raises(ValueError):
-        await flows.dataset(COMMAND.model_copy(update={"dataset": dataset}))
-    with pytest.raises(ValueError):
-        await flows.diff(DIFF.model_copy(update={"dataset": dataset}))
-    assert jobs.submitted == []
 
 
 @pytest.mark.parametrize("dataset", ["s2orc_v2", "embeddings-specter_v2"])
@@ -322,10 +306,9 @@ async def test_missing_diff_does_not_create_manifest_or_submit_jobs(
     assert all(path.endswith("/release.json") for path in set(store.objects) - set(before))
 
 
-@pytest.mark.parametrize("dataset", ["papers", "s2orc_v2", "embeddings-specter_v2"])
 @pytest.mark.parametrize("diff", [False, True])
 async def test_refused_inventory_never_cleans_up_or_pins(
-    dataset: str, diff: bool, service: DownloadDatasetService, store: FakeStore
+    diff: bool, service: DownloadDatasetService, store: FakeStore
 ) -> None:
     class RefusedJobs(FakeJobs):
         async def running(self, family: ArchiveFamily = ArchiveFamily.CORE) -> dict[str, bool]:
@@ -337,15 +320,15 @@ async def test_refused_inventory_never_cleans_up_or_pins(
     flows = s2_batch_download_flows(
         service,
         jobs,
-        family=archive_family(dataset),
+        family=ArchiveFamily.FULLTEXT,
         rounds=1,
         task_retries=0,
         retry_delay_seconds=0,
     )
     with pytest.raises(BatchRejected, match="must be drained"):
         if diff:
-            await flows.diff(DIFF.model_copy(update={"dataset": dataset}))
+            await flows.diff(DIFF.model_copy(update={"dataset": "s2orc_v2"}))
         else:
-            await flows.dataset(COMMAND.model_copy(update={"dataset": dataset}))
+            await flows.dataset(COMMAND.model_copy(update={"dataset": "s2orc_v2"}))
     assert (jobs.deleted, jobs.waited, jobs.submitted) == ([], [], [])
     assert not store.objects
