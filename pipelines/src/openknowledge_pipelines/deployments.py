@@ -100,10 +100,20 @@ def ensure_limits() -> None:
 def serve() -> None:
     ensure_limits()
     prefect_serve(
-        # The loads take LOAD_LIMIT inside the flow, so one run of either load goes at a time.
-        RunnerDeployment.from_flow(s2_load, DEPLOYMENT, entrypoint_type=EntrypointType.MODULE_PATH),
+        # One run of each load at a time, held in Prefect's queue, so a second run of the same load
+        # holds no serve slot. LOAD_LIMIT keeps the two deployments apart, so no two served loads
+        # hit ClickHouse at once; a load waiting on it does hold a slot.
+        # The deployment limit gives a running load a lease that Prefect renews every 225 seconds,
+        # up to three attempts per renewal, and cancels the run when all three fail. The global
+        # limit's raise_on_lease_renewal_failure=False does not cover that lease.
         RunnerDeployment.from_flow(
-            s2_load_diff, DEPLOYMENT, entrypoint_type=EntrypointType.MODULE_PATH
+            s2_load, DEPLOYMENT, entrypoint_type=EntrypointType.MODULE_PATH, concurrency_limit=1
+        ),
+        RunnerDeployment.from_flow(
+            s2_load_diff,
+            DEPLOYMENT,
+            entrypoint_type=EntrypointType.MODULE_PATH,
+            concurrency_limit=1,
         ),
         # One run of each download at a time, held in Prefect's queue; S2_LIMIT keeps the two
         # deployments apart, since their tasks share the S2 key's one request per second.
