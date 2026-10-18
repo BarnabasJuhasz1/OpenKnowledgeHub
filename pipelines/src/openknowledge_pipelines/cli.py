@@ -293,7 +293,8 @@ def verify_base_manifest(dataset: str, release: str, bucket: str, prefix: str) -
 def sync() -> None:
     from openknowledge_pipelines import deployments
 
-    _run(deployments.s2_sync)
+    _require_managed_server((deployments.S2_LIMIT, deployments.LOAD_LIMIT))
+    _run_managed(deployments.s2_sync)
 
 
 @s2.command("download-shard", help=DOWNLOAD_SHARD_HELP, short_help=DOWNLOAD_SHARD_HELP)

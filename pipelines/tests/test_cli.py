@@ -392,13 +392,19 @@ def test_archive_cli_routes_explicit_commands(
         assert command.from_release == "2026-10-06"
 
 
-def test_archive_requires_effective_server_before_flow(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def forbidden(command: DownloadDataset) -> DownloadDataset:
+@pytest.mark.parametrize(
+    "arguments", [["archive-fulltext", "--release", "2026-10-13", *TARGET], ["sync"]]
+)
+def test_managed_requires_effective_server_before_flow(
+    monkeypatch: pytest.MonkeyPatch, arguments: list[str]
+) -> None:
+    async def forbidden(command: DownloadDataset | None = None) -> DownloadDataset:
         pytest.fail("must validate server before starting the flow")
 
     monkeypatch.setattr(deployments, "s2_batch_download_fulltext", forbidden)
+    monkeypatch.setattr(deployments, "s2_sync", forbidden)
     with temporary_settings({PREFECT_API_URL: None}):
-        code, output = okp("archive-fulltext", "--release", "2026-10-13", *TARGET)
+        code, output = okp(*arguments)
     assert code == 1
     assert "shared control VM Prefect server" in output
     assert "PREFECT_API_URL" in output

@@ -83,8 +83,9 @@ for an explicit diff.
 
 ## Coordinated sync
 
-The Prefect deployment `s2-sync/control-vm` updates the seven core datasets in ClickHouse, then
-archives full text and SPECTER2 in GCS. It selects a release per dataset, catches up through
+The Prefect deployment `s2-sync/control-vm` (or `okp s2 sync` on the same shared server) updates
+the seven core datasets in ClickHouse, then archives full text and SPECTER2 in GCS.
+It selects a release per dataset, catches up through
 contiguous diffs, and resumes from verified progress. Core failures block both large archives.
 Existing bases are required; core diffs above 30% of their verified baseline size are not loaded.
 The daily 01:30 Europe/Zurich schedule and both large-archive stages default disabled.
