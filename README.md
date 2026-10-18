@@ -120,6 +120,12 @@ It loads every object in the dataset's `manifest.json` into the dataset's table.
 ClickHouse reads each object itself through its `raw` named collection and checks every record against the dataset's contract.
 It needs `OKP_CLICKHOUSE_URL`, `CLICKHOUSE_PASSWORD` and `OKP_CLICKHOUSE_RAW_BUCKET`, the bucket that collection reads, but no S2 key.
 
+`okp s2 load --measurement-report` optionally writes a new JSON report for that single
+load. It distinguishes acknowledged inserts from skipped checkpoints and unknown partial
+writes; memory values are snapshot gauges, not peaks. Use
+`--measurement-kind synthetic-validation` for disposable development loads. Measurement errors are reported
+separately and preserve the load outcome.
+
 Each loaded object leaves a row in `loads`.
 A rerun skips an object whose row matches its generation, its checksum, the table and the load SQL, so a table created again or emptied loads everything again.
 Apply migrations 00011 and 00012 before starting loads with the new image. Inserts reject NULL into non-nullable columns. The shared insert safety setting changes upsert and delete SQL hashes for all seven supported datasets. Eligible base files for all seven and diff update/delete files for the six datasets with diffs replay when next loaded, including files already loaded with the previous image. Allow an idle window for the 00012 journal rewrite and these replays.

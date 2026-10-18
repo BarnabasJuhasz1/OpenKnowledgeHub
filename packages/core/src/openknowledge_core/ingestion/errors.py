@@ -60,6 +60,10 @@ class TableRejected(IngestionError):
     """ClickHouse refused a call in a way a retry will not fix."""
 
 
+class TableAccessDenied(TableRejected):
+    """The account lacks permission for a database operation."""
+
+
 class BatchRejected(IngestionError):
     """Cloud Batch refused a call in a way a retry will not fix."""
 

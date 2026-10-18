@@ -17,6 +17,10 @@
             <quota>default</quota>
             <grants>
                 <query>GRANT ALL ON openknowledge.*</query>
+                <query>GRANT SELECT ON system.parts</query>
+                <query>GRANT SELECT ON system.metrics</query>
+                <query>GRANT SELECT ON system.merges</query>
+                <query>GRANT SELECT ON system.events</query>
                 <query>GRANT NAMED COLLECTION ON raw</query>
                 <query>GRANT READ ON S3('^http://gcs:4443/openknowledge-508216-raw/.*$')</query>
             </grants>

@@ -5,7 +5,8 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable, Coroutine, Mapping
 from contextlib import aclosing
-from typing import Any
+from pathlib import Path
+from typing import Any, Literal, TextIO
 
 import click
 from pydantic import BaseModel, ValidationError
@@ -363,7 +364,25 @@ def download_shard(
 @click.option(
     "--prefix", default=_default(LoadDataset, "prefix"), show_default=True, help=PREFIX_HELP
 )
-def load(release: str, dataset: str, bucket: str, prefix: str) -> None:
+@click.option(
+    "--measurement-report",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write measurements for this one load to a new JSON file.",
+)
+@click.option(
+    "--measurement-kind",
+    type=click.Choice(["explicit-load", "synthetic-validation"]),
+    default="explicit-load",
+    show_default=True,
+)
+def load(
+    release: str,
+    dataset: str,
+    bucket: str,
+    prefix: str,
+    measurement_report: Path | None = None,
+    measurement_kind: Literal["explicit-load", "synthetic-validation"] = "explicit-load",
+) -> None:
     command = _command(
         LoadDataset,
         OPTION_RULES,
@@ -378,7 +397,38 @@ def load(release: str, dataset: str, bucket: str, prefix: str) -> None:
         async with bootstrap.open_load_service(settings) as service:
             return await bootstrap.load_flows(service, settings).dataset(command)
 
-    _run(run)
+    if measurement_report is None:
+        _run(run)
+    else:
+        from openknowledge_pipelines.flows.measure_load import measured_load
+
+        async def measured(report_file: TextIO) -> LoadDatasetResult:
+            async with bootstrap.open_measured_load(settings) as (service, observation, telemetry):
+                return await measured_load(
+                    lambda: bootstrap.load_flows(service, settings).dataset(command),
+                    command=command,
+                    observation=observation,
+                    telemetry=telemetry,
+                    report_file=report_file,
+                    validation_kind=measurement_kind,
+                    warn=lambda message: click.echo(message, err=True),
+                )
+
+        path = measurement_report.resolve()
+        try:
+            report_file = path.open("x", encoding="utf-8")
+        except OSError as exc:
+            raise click.ClickException(
+                f"Cannot create measurement report ({type(exc).__name__}); "
+                "choose a new writable file"
+            ) from None
+        try:
+            _run(lambda: measured(report_file))
+        finally:
+            try:
+                report_file.close()
+            except OSError as exc:
+                click.echo(f"Measurement report close failed ({type(exc).__name__}).", err=True)
 
 
 @s2.command("load-diff", help=LOAD_DIFF_HELP, short_help=LOAD_DIFF_HELP)

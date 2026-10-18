@@ -20,6 +20,8 @@ from openknowledge_core.ingestion.archive_progress import ArchiveProgress
 from openknowledge_core.ingestion.consumers import ArchiveConsumer
 from openknowledge_core.ingestion.coordinator import CORE_ORDER, LARGE_ORDER
 from openknowledge_core.ingestion.families import ArchiveFamily
+from openknowledge_core.ingestion.measurement import LoadObservation
+from openknowledge_core.ingestion.ports import LoadTelemetry
 from openknowledge_pipelines.settings import (
     BatchSettings,
     CommonSettings,
@@ -232,3 +234,26 @@ async def open_sync(
 async def open_archive_consumer(settings: CommonSettings) -> AsyncGenerator[ArchiveConsumer]:
     async with gcs.connect(_gcs(settings)) as store:
         yield ArchiveConsumer(store)
+
+
+@asynccontextmanager
+async def open_measured_load(
+    settings: LoadSettings,
+) -> AsyncGenerator[tuple[LoadDatasetService, LoadObservation, LoadTelemetry]]:
+    observation = LoadObservation()
+    async with (
+        gcs.connect(_gcs(settings)) as store,
+        clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
+    ):
+        yield (
+            LoadDatasetService(
+                store=store,
+                tables=ch.tables,
+                applied=ch.applied,
+                producer=producer(settings),
+                clock=lambda: datetime.now(UTC),
+                observer=observation,
+            ),
+            observation,
+            ch.telemetry,
+        )

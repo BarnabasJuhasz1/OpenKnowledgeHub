@@ -6,8 +6,9 @@ from collections.abc import Sequence
 from typing import Literal, Protocol
 
 from openknowledge_contracts.datasets import DatasetName, ReleaseId, ReleaseMetadata
-from openknowledge_contracts.manifests import ObjectPath, ObjectRef
+from openknowledge_contracts.manifests import ManifestEntry, ObjectPath, ObjectRef
 from openknowledge_core.ingestion.families import ArchiveFamily
+from openknowledge_core.ingestion.measurement import LoadSnapshot
 from openknowledge_core.ingestion.models import (
     AppliedRelease,
     ByteStream,
@@ -18,6 +19,7 @@ from openknowledge_core.ingestion.models import (
     JobOutcome,
     LoadObject,
     LoadRecord,
+    PreparedLoad,
     ShardJob,
     ShardLink,
     StoredObject,
@@ -121,3 +123,15 @@ class ShardJobs(Protocol):
     async def wait(self, name: str) -> JobOutcome:
         """Return once the job has ended or is gone."""
         ...
+
+
+class LoadObserver(Protocol):
+    async def planned(self, prepared: PreparedLoad) -> None: ...
+
+    async def started(self, entry: ManifestEntry) -> None: ...
+
+    async def written(self, rows: int) -> None: ...
+
+
+class LoadTelemetry(Protocol):
+    async def snapshot(self, dataset: DatasetName) -> LoadSnapshot: ...

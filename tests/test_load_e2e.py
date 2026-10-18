@@ -61,8 +61,8 @@ def ports() -> Iterator[dict[str, str]]:
         "-f",
         str(E2E / "compose.yaml"),
     ]
-    subprocess.run([*compose, "up", "-d", "--wait"], env=env, check=True)
     try:
+        subprocess.run([*compose, "up", "-d", "--wait"], env=env, check=True)
         subprocess.run(
             [
                 *compose,
@@ -286,3 +286,67 @@ def test_a_diff_upserts_and_deletes_and_is_repeatable(ports: dict[str, str]) -> 
     assert query(ports, f"{applied} ORDER BY applied_at DESC LIMIT 1") == f"{new}\t{old}\n"
     again = ran(ports, *diff)
     assert (again["loaded"], again["already_loaded"]) == (0, 2)
+
+
+def test_measured_single_load_and_replay(ports: dict[str, str], tmp_path: Path) -> None:
+    release = "2027-01-05"
+    archive(ports, release, FIXTURE.read_text().splitlines())
+    reports = [tmp_path / "first.json", tmp_path / "replay.json"]
+    for report in reports:
+        ran(
+            ports,
+            "load",
+            "--release",
+            release,
+            "--dataset",
+            DATASET,
+            "--measurement-report",
+            str(report),
+            "--measurement-kind",
+            "synthetic-validation",
+        )
+    first, replay = [json.loads(path.read_text()) for path in reports]
+    assert first["status"] == replay["status"] == "completed"
+    assert first["validation_kind"] == "synthetic-validation"
+    assert first["counters"]["acknowledged_written_rows"] == 2
+    assert first["counters"]["attempted_compressed_source_bytes"] > 0
+    assert first["coverage"] == "full-manifest"
+    assert first["before"]["active_table_bytes"] is not None
+    assert first["after"]["active_table_bytes"] > 0
+    assert first["before"]["server_memory_tracking_bytes"] is not None
+    assert first["after"]["table_running_merges"] is not None
+    assert replay["counters"]["acknowledged_written_rows"] == 0
+    assert replay["acknowledged_rows_per_second"] == 0
+    assert replay["counters"]["attempted_compressed_source_bytes"] == 0
+    assert replay["coverage"] == "partial-or-resumed"
+
+
+def test_measured_failure_retains_partial_writes_and_failure(
+    ports: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    release = "2027-01-12"
+    record = json.loads(FIXTURE.read_text().splitlines()[0])
+    archive(ports, release, [json.dumps(record), json.dumps({**record, "surprise": 1})])
+    report_file = tmp_path / "failed.json"
+    code, output = okp(
+        ports,
+        "load",
+        "--release",
+        release,
+        "--dataset",
+        DATASET,
+        "--measurement-report",
+        str(report_file),
+        "--measurement-kind",
+        "synthetic-validation",
+    )
+    assert code == 1 and "contract" in output
+    report = json.loads(report_file.read_text())
+    assert report["status"] == "failed" and report["error_type"] == "ContractViolation"
+    assert report["counters"]["acknowledged_written_rows"] == 1
+    assert report["counters"]["attempts_without_acknowledged_row_count"] == 1
+    assert report["coverage"] == "partial-or-resumed"
+    assert report["before"]["active_table_bytes"] is not None
+    assert report["after"]["active_table_bytes"] > 0
+    assert query(ports, f"SELECT count() FROM applied WHERE release = '{release}'") == "0\n"
