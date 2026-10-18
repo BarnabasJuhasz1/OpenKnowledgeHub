@@ -189,6 +189,7 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
     result = CliRunner().invoke(cli.main, ["serve"])
     assert result.exit_code == 0, result.output
     assert [load_flow_from_entrypoint(str(found.entrypoint)) for found in served] == [
+        deployments.s2_sync,
         deployments.s2_load,
         deployments.s2_load_diff,
         deployments.s2_batch_download,
@@ -199,8 +200,8 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_batch_download_embeddings_diff,
         deployments.watchdog,
     ]
-    assert [found.concurrency_limit for found in served] == [1] * 8 + [None]
-    *unscheduled, watchdog = served
+    assert [found.concurrency_limit for found in served] == [1] * 9 + [None]
+    _coordinator, *unscheduled, watchdog = served
     assert [found.schedules for found in unscheduled] == [[]] * 8
     [scheduled] = cast("list[DeploymentScheduleCreate]", watchdog.schedules)
     assert isinstance(scheduled.schedule, CronSchedule)
@@ -391,13 +392,19 @@ def test_archive_cli_routes_explicit_commands(
         assert command.from_release == "2026-10-06"
 
 
-def test_archive_requires_effective_server_before_flow(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def forbidden(command: DownloadDataset) -> DownloadDataset:
+@pytest.mark.parametrize(
+    "arguments", [["archive-fulltext", "--release", "2026-10-13", *TARGET], ["sync"]]
+)
+def test_managed_requires_effective_server_before_flow(
+    monkeypatch: pytest.MonkeyPatch, arguments: list[str]
+) -> None:
+    async def forbidden(command: DownloadDataset | None = None) -> DownloadDataset:
         pytest.fail("must validate server before starting the flow")
 
     monkeypatch.setattr(deployments, "s2_batch_download_fulltext", forbidden)
+    monkeypatch.setattr(deployments, "s2_sync", forbidden)
     with temporary_settings({PREFECT_API_URL: None}):
-        code, output = okp("archive-fulltext", "--release", "2026-10-13", *TARGET)
+        code, output = okp(*arguments)
     assert code == 1
     assert "shared control VM Prefect server" in output
     assert "PREFECT_API_URL" in output

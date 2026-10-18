@@ -43,6 +43,18 @@ def _flow_name(family: ArchiveFamily, *, diff: bool = False) -> str:
     return f"s2-batch-download{suffix}{'-diff' if diff else ''}"
 
 
+async def recover_jobs(jobs: ShardJobs, family: ArchiveFamily) -> None:
+    """Drain this family's orphaned work; running() refuses foreign or unlabelled jobs."""
+    logger = get_run_logger()
+    for earlier, queued in (await jobs.running(family)).items():
+        if queued:
+            logger.info("Deleting %s, a download job that has not started", earlier)
+            await jobs.delete(earlier)
+        else:
+            logger.info("Waiting for %s, a download job that has not ended", earlier)
+        await jobs.wait(earlier)
+
+
 def s2_batch_download_flows(
     service: DownloadDatasetService,
     jobs: ShardJobs,
@@ -95,14 +107,7 @@ def s2_batch_download_flows(
     )
     async def clear_earlier_jobs() -> None:
         """Not part of run-job, whose retry could find its own queued job and delete it."""
-        logger = get_run_logger()
-        for earlier, queued in (await jobs.running(family)).items():
-            if queued:
-                logger.info("Deleting %s, a download job that has not started", earlier)
-                await jobs.delete(earlier)
-            else:
-                logger.info("Waiting for %s, a download job that has not ended", earlier)
-            await jobs.wait(earlier)
+        await recover_jobs(jobs, family)
 
     @task(
         name="run-job",

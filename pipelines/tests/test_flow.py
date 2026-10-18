@@ -4,13 +4,14 @@ from pathlib import Path
 
 import pytest
 from prefect.client.orchestration import get_client
+from prefect.client.schemas.filters import LogFilter, LogFilterFlowRunId
 from prefect.client.schemas.sorting import FlowRunSort
+from prefect.logging.handlers import APILogHandler
 from prefect.settings import PREFECT_RESULTS_LOCAL_STORAGE_PATH, temporary_settings
 
 from openknowledge_contracts.manifests import DatasetManifest
 from openknowledge_core.ingestion import (
     DownloadDatasetService,
-    DownloadShard,
     JobOutcome,
     LoadDataset,
     LoadDatasetService,
@@ -37,6 +38,7 @@ from tests.fakes.ports import (
     PRODUCER,
     RELEASE,
     FakeApplied,
+    FakeJobs,
     FakeSource,
     FakeStore,
     FakeTables,
@@ -136,58 +138,6 @@ async def test_only_transient_load_errors_are_retried(
     assert tables.loads == ["part-0.gz", "part-0.gz"]
 
 
-class FakeJobs:
-    """Archives a job's shards in this process, failing each shard in ``failing`` once."""
-
-    def __init__(self, service: DownloadDatasetService, failing: set[int]) -> None:
-        self.service = service
-        self.failing = failing
-        self.submitted: list[tuple[int, ...]] = []
-        self.jobs: list[ShardJob] = []
-        self.parts: list[str | None] = []
-        self.outcomes: dict[str, JobOutcome] = {}
-        self.left: dict[str, bool] = {}
-        self.deleted: list[str] = []
-        self.waited: list[str] = []
-
-    async def running(self, family: ArchiveFamily = ArchiveFamily.CORE) -> dict[str, bool]:
-        self.family = family
-        left, self.left = self.left, {}
-        return left
-
-    async def delete(self, name: str) -> None:
-        self.deleted.append(name)
-
-    async def submit(self, job: ShardJob) -> str:
-        self.jobs.append(job)
-        self.submitted.append(job.shards)
-        self.parts.append(job.part)
-        outcome = JobOutcome.SUCCEEDED
-        for index in job.shards:
-            if index in self.failing:
-                self.failing.discard(index)
-                outcome = JobOutcome.FAILED
-                continue
-            await self.service.archive_shard_at(
-                DownloadShard(
-                    release=job.release_id,
-                    dataset=job.dataset,
-                    shard=index,
-                    bucket=job.bucket,
-                    prefix=job.prefix,
-                    from_release=job.from_release,
-                    part=job.part,
-                )
-            )
-        name = f"job-{len(self.submitted)}"
-        self.outcomes[name] = outcome
-        return name
-
-    async def wait(self, name: str) -> JobOutcome:
-        self.waited.append(name)
-        return self.outcomes[name]
-
-
 async def test_batch_rounds_run_only_unfinished_shards(
     service: DownloadDatasetService, store: FakeStore
 ) -> None:
@@ -227,6 +177,19 @@ async def test_a_round_first_deletes_queued_download_jobs_and_waits_for_running_
     await flows.dataset(COMMAND)
     assert jobs.deleted == ["queued"]
     assert jobs.waited == ["queued", "running", "job-1"]
+    await APILogHandler.aflush()
+    async with get_client() as client:
+        [flow_run] = await client.read_flow_runs(sort=FlowRunSort.START_TIME_DESC, limit=1)
+        flow_run_id = flow_run.id
+        logs = await client.read_logs(
+            log_filter=LogFilter(flow_run_id=LogFilterFlowRunId(any_=[flow_run_id]))
+        )
+    recovery = [log for log in logs if log.message.startswith(("Deleting ", "Waiting for "))]
+    assert {log.message for log in recovery} == {
+        "Deleting queued, a download job that has not started",
+        "Waiting for running, a download job that has not ended",
+    }
+    assert all(log.flow_run_id == flow_run_id and log.task_run_id is not None for log in recovery)
 
 
 async def test_a_lost_submission_reply_retries_the_same_operation(
