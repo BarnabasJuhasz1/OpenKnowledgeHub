@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import socket
 import subprocess
 import sys
 from collections.abc import AsyncGenerator, Awaitable
@@ -459,3 +460,26 @@ def test_archive_unrelated_body_errors_propagate(monkeypatch: pytest.MonkeyPatch
     )
     assert isinstance(result.exception, RuntimeError)
     assert str(result.exception) == "download failed"
+
+
+def test_unreachable_managed_api_fails_before_flow_or_cloud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("unreachable preflight must not start a flow or cloud client")
+
+    monkeypatch.setattr(deployments, "s2_batch_download_fulltext", forbidden)
+    monkeypatch.setattr(bootstrap, "open_batch_download", forbidden)
+    # A bound, non-listening socket reserves the port and reliably refuses connections.
+    with socket.socket() as endpoint:
+        endpoint.bind(("127.0.0.1", 0))
+        url = f"http://127.0.0.1:{endpoint.getsockname()[1]}/api"
+        with temporary_settings({PREFECT_API_URL: url}):
+            result = CliRunner().invoke(
+                cli.main, ["s2", "archive-fulltext", "--release", "2026-10-13", *TARGET]
+            )
+    assert result.exit_code == 1
+    assert "Cannot reach the configured shared control API" in result.output
+    assert "PREFECT_API_URL" in result.output
+    assert "Traceback" not in result.output
+    assert "127.0.0.1" not in result.output

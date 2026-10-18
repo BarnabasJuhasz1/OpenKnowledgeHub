@@ -1802,6 +1802,7 @@ version = "0.1.0"
 source = { editable = "pipelines" }
 dependencies = [
     { name = "click" },
+    { name = "httpx" },
     { name = "openknowledge-adapters", extra = ["batch", "clickhouse", "gcs", "semantic-scholar"] },
     { name = "openknowledge-contracts" },
     { name = "openknowledge-core" },
@@ -1819,6 +1820,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "click", specifier = ">=8,<9" },
+    { name = "httpx", specifier = ">=0.28,<1" },
     { name = "openknowledge-adapters", extras = ["batch", "clickhouse", "gcs", "semantic-scholar"], editable = "packages/adapters" },
     { name = "openknowledge-contracts", editable = "packages/contracts" },
     { name = "openknowledge-core", editable = "packages/core" },

@@ -155,6 +155,7 @@ def _archive(command: DownloadDataset | DownloadDiff) -> None:
 
 
 def _require_managed_server(required_limits: tuple[str, ...]) -> None:
+    from httpx import ConnectError, TimeoutException
     from prefect.client.orchestration import get_client
     from prefect.exceptions import ObjectNotFound
     from prefect.settings import PREFECT_API_URL
@@ -171,6 +172,11 @@ def _require_managed_server(required_limits: tuple[str, ...]) -> None:
         for name in required_limits:
             try:
                 client.read_global_concurrency_limit_by_name(name)
+            except (ConnectError, TimeoutException):
+                raise click.ClickException(
+                    "Cannot reach the configured shared control API. Check network access, "
+                    "the server and the effective PREFECT_API_URL setting, then retry."
+                ) from None
             except ObjectNotFound:
                 raise click.ClickException(
                     f"Required shared Prefect limit {name!r} is missing. Check that "
