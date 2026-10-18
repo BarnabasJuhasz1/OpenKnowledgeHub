@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from types import CoroutineType
 from typing import Any
@@ -46,7 +45,7 @@ def _flow_name(family: ArchiveFamily, *, diff: bool = False) -> str:
 
 async def recover_jobs(jobs: ShardJobs, family: ArchiveFamily) -> None:
     """Drain this family's orphaned work; running() refuses foreign or unlabelled jobs."""
-    logger = logging.getLogger(__name__)
+    logger = get_run_logger()
     for earlier, queued in (await jobs.running(family)).items():
         if queued:
             logger.info("Deleting %s, a download job that has not started", earlier)

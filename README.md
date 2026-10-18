@@ -83,13 +83,26 @@ for an explicit diff.
 
 ## Coordinated sync
 
-The Prefect deployment `s2-sync/control-vm` (or `okp s2 sync` on the same shared server) updates
-the seven core datasets in ClickHouse, then archives full text and SPECTER2 in GCS.
-It selects a release per dataset, catches up through
-contiguous diffs, and resumes from verified progress. Core failures block both large archives.
-Existing bases are required; core diffs above 30% of their verified baseline size are not loaded.
-The daily 01:30 Europe/Zurich schedule and both large-archive stages default disabled.
-Only one cycle runs at a time, so a long archive can delay the next cycle.
+The Prefect deployment `s2-sync/control-vm` (or `okp s2 sync` on the shared server) updates
+seven core datasets in ClickHouse, then archives full text and SPECTER2 in GCS.
+It selects per-dataset releases and resumes contiguous diffs from verified progress.
+Core failures, including a missing base, block both archives; initial bases require manual setup.
+Core diffs above 30% of the configured full-base size are not loaded. This reference stays fixed
+as diffs advance; refresh `core_baselines` after installing a replacement base.
+
+`OKP_SYNC` is JSON with `bucket`, optional `prefix` (default `semantic-scholar`), and three
+initially empty fields: `core_baselines`, `archives`, and `enabled_archives`.
+`core_baselines` maps datasets to manifest references returned by `okp s2 verify-base-manifest`.
+`archives` maps `s2orc_v2` or `embeddings-specter_v2` to `{base, completion}`: `base` contains
+`dataset`, `release`, `bucket`, and optional `prefix`; `completion` is the verified reference
+returned by `okp s2 adopt-archive-base`. Both helpers validate existing downloaded bases.
+`enabled_archives` lists which archive stages run; a baseline alone does not enable a stage.
+Manual archive commands with `--from-release` also require the matching `archives` entry.
+
+The daily 01:30 Europe/Zurich schedule defaults disabled; enable it with
+`OKP_SYNC_SCHEDULE_ENABLED=true` in the serving process environment.
+`CANCEL_NEW` cancels overlapping deployed runs before execution, without a backlog;
+these cancellations do not trigger the `run_failed` log alert.
 
 ## Loading into ClickHouse
 

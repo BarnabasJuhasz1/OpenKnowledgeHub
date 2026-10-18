@@ -42,7 +42,7 @@ from openknowledge_core.ingestion.errors import (
 )
 from openknowledge_core.ingestion.models import TableState
 from openknowledge_pipelines import deployments
-from openknowledge_pipelines.flows import s2_sync
+from openknowledge_pipelines.flows import s2_batch_download, s2_sync
 from openknowledge_pipelines.flows.s2_batch_download import S2BatchDownloadFlows
 from openknowledge_pipelines.flows.s2_load import S2LoadFlows
 from openknowledge_pipelines.settings import ScheduleSettings
@@ -230,7 +230,10 @@ class Cycle:
 
 
 @pytest.fixture
-async def cycle() -> Cycle:
+async def cycle(monkeypatch: pytest.MonkeyPatch) -> Cycle:
+    # These policy tests call run_sync directly, outside a Prefect run. The real
+    # recovery logger and its persisted run association are exercised in test_flow.
+    monkeypatch.setattr(s2_batch_download, "get_run_logger", lambda: logging.getLogger(__name__))
     cycle = Cycle()
     await cycle.initialize()
     return cycle

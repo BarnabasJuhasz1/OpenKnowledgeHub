@@ -4,7 +4,9 @@ from pathlib import Path
 
 import pytest
 from prefect.client.orchestration import get_client
+from prefect.client.schemas.filters import LogFilter, LogFilterFlowRunId
 from prefect.client.schemas.sorting import FlowRunSort
+from prefect.logging.handlers import APILogHandler
 from prefect.settings import PREFECT_RESULTS_LOCAL_STORAGE_PATH, temporary_settings
 
 from openknowledge_contracts.manifests import DatasetManifest
@@ -175,6 +177,19 @@ async def test_a_round_first_deletes_queued_download_jobs_and_waits_for_running_
     await flows.dataset(COMMAND)
     assert jobs.deleted == ["queued"]
     assert jobs.waited == ["queued", "running", "job-1"]
+    await APILogHandler.aflush()
+    async with get_client() as client:
+        [flow_run] = await client.read_flow_runs(sort=FlowRunSort.START_TIME_DESC, limit=1)
+        flow_run_id = flow_run.id
+        logs = await client.read_logs(
+            log_filter=LogFilter(flow_run_id=LogFilterFlowRunId(any_=[flow_run_id]))
+        )
+    recovery = [log for log in logs if log.message.startswith(("Deleting ", "Waiting for "))]
+    assert {log.message for log in recovery} == {
+        "Deleting queued, a download job that has not started",
+        "Waiting for running, a download job that has not ended",
+    }
+    assert all(log.flow_run_id == flow_run_id and log.task_run_id is not None for log in recovery)
 
 
 async def test_a_lost_submission_reply_retries_the_same_operation(
