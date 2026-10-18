@@ -5,6 +5,7 @@
 Needs `uv` and `gcloud auth application-default login` with an account that can create and read objects in the bucket.
 Keep the API key in `~/.config/openknowledge/.env` as `S2_API_KEY=...` and let uv load it.
 Run only `publication-venues` locally. Every other dataset downloads through Batch.
+Direct local downloads do not participate in the shared managed-download budget.
 
 ```sh
 uv sync
@@ -39,7 +40,7 @@ It refreshes a signed link that has expired.
 Settings come from the environment.
 The key is `S2_API_KEY`, and every other setting is `OKP_` plus a field name from `pipelines/src/openknowledge_pipelines/settings.py`.
 
-With Prefect's default profile and no `PREFECT_API_URL`, Prefect starts a temporary local server for the run.
+Unmanaged local flows can use Prefect's temporary local server when no API URL is configured.
 `okp` turns that server's telemetry off.
 
 ## Downloading through Batch
@@ -59,8 +60,26 @@ Each submission keeps the same operation ID and job name across task retries, so
 `OKP_BATCH_WAIT_TIMEOUT_SECONDS` bounds each job's whole wait, including queued time and API outages, to 24 hours by default, separately from each task's `OKP_BATCH_MAX_RUN_SECONDS`.
 If that wait expires, the run fails and names the job.
 
-Both download deployments take the Prefect global concurrency limit `semantic-scholar`, which `okp serve` creates with a limit of 1, so their runs never overlap.
-Before submitting a job, a run deletes any download job still queued in Batch, such as one left by a run that failed or was cancelled, and waits for any still running.
+All six managed download deployments share the `semantic-scholar` concurrency limit of 1.
+One dataset job runs at a time, with up to `OKP_BATCH_PARALLELISM` parallel shards (8 when configured).
+Busy requests fail promptly. Recovery handles queued/running jobs of the same dataset family;
+active jobs from another family or legacy jobs without a known core dataset label block new work.
+Legacy jobs labelled with one of the seven core datasets remain recoverable by core controllers.
+
+## Full-text and SPECTER2 archives
+
+Dedicated managed base/diff flows archive `s2orc_v2` and `embeddings-specter_v2` in the existing
+raw GCS bucket. They reuse pinned inventories, receipts, manifests and resumable shard downloads.
+Each dataset uses its own explicit release; these archives do not load into ClickHouse.
+Managed archive commands require the shared Prefect server on the control VM, configured via
+`PREFECT_API_URL` or the active Prefect profile, with the `semantic-scholar` limit created by
+`okp serve`; they never fall back to a temporary local server. Both accept `--from-release`
+for an explicit diff.
+
+| Command | Deployments (base; diff) |
+| --- | --- |
+| `okp s2 archive-fulltext` | `s2-batch-download-fulltext/control-vm`; `s2-batch-download-fulltext-diff/control-vm` |
+| `okp s2 archive-specter2` | `s2-batch-download-embeddings/control-vm`; `s2-batch-download-embeddings-diff/control-vm` |
 
 ## Loading into ClickHouse
 

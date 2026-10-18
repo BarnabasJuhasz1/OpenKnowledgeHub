@@ -11,6 +11,7 @@ from pydantic import BaseModel, ValidationError
 
 from openknowledge_core.ingestion import (
     DownloadDataset,
+    DownloadDiff,
     DownloadShard,
     IngestionError,
     LoadDataset,
@@ -19,6 +20,7 @@ from openknowledge_core.ingestion import (
     LoadDiffResult,
     PinRelease,
 )
+from openknowledge_core.ingestion.families import ArchiveFamily, archive_family
 from openknowledge_pipelines import bootstrap
 from openknowledge_pipelines.settings import (
     BatchSettings,
@@ -122,6 +124,109 @@ def download(release: str, dataset: str, bucket: str, prefix: str) -> None:
             return await bootstrap.download_flow(service, settings)(command)
 
     _run(run)
+
+
+def _archive(command: DownloadDataset | DownloadDiff) -> None:
+    try:
+        family = archive_family(command.dataset)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from None
+    from openknowledge_pipelines import deployments
+
+    _require_managed_server((deployments.S2_LIMIT,))
+    _settings(BatchSettings)
+
+    async def run() -> BaseModel:
+        if isinstance(command, DownloadDiff):
+            diff_routes = {
+                ArchiveFamily.CORE: deployments.s2_batch_download_diff,
+                ArchiveFamily.FULLTEXT: deployments.s2_batch_download_fulltext_diff,
+                ArchiveFamily.EMBEDDINGS: deployments.s2_batch_download_embeddings_diff,
+            }
+            return await diff_routes[family](command)
+        routes = {
+            ArchiveFamily.CORE: deployments.s2_batch_download,
+            ArchiveFamily.FULLTEXT: deployments.s2_batch_download_fulltext,
+            ArchiveFamily.EMBEDDINGS: deployments.s2_batch_download_embeddings,
+        }
+        return await routes[family](command)
+
+    _run_managed(run)
+
+
+def _require_managed_server(required_limits: tuple[str, ...]) -> None:
+    from prefect.client.orchestration import get_client
+    from prefect.exceptions import ObjectNotFound
+    from prefect.settings import PREFECT_API_URL
+
+    if not PREFECT_API_URL.value():
+        raise click.ClickException(
+            "Managed commands require the shared control VM Prefect server; configure "
+            "PREFECT_API_URL in the environment or Prefect profile before retrying."
+        )
+
+    # Validate configuration before a decorated flow can log a missing-limit traceback.
+    # This does not reserve capacity; strict acquisition in the flow remains authoritative.
+    with get_client(sync_client=True) as client:
+        for name in required_limits:
+            try:
+                client.read_global_concurrency_limit_by_name(name)
+            except ObjectNotFound:
+                raise click.ClickException(
+                    f"Required shared Prefect limit {name!r} is missing. Check that "
+                    "PREFECT_API_URL selects the shared control VM server and run okp serve "
+                    "there to create its limits before retrying."
+                ) from None
+
+
+def _run_managed(run: Callable[[], Coroutine[Any, Any, BaseModel]]) -> None:
+    from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
+
+    try:
+        _run(run)
+    except ConcurrencySlotAcquisitionError as exc:
+        raise click.ClickException(
+            "Cannot acquire the required shared Prefect limits. Check the shared control VM "
+            "Prefect server and that its limits exist; if occupied, retry when free. "
+            f"{exc}"
+        ) from None
+
+
+def _archive_options(function: Callable[..., None]) -> Callable[..., None]:
+    for option in (
+        click.option("--release", required=True, help=RELEASE_HELP),
+        click.option("--from-release", help="Archive this explicit diff instead of a base."),
+        click.option("--bucket", required=True),
+        click.option("--prefix", default="semantic-scholar", show_default=True),
+    ):
+        function = option(function)
+    return function
+
+
+def _archive_dataset(
+    dataset: str, release: str, from_release: str | None, bucket: str, prefix: str
+) -> None:
+    values = dict(release=release, dataset=dataset, bucket=bucket, prefix=prefix)
+    command = (
+        _command(DownloadDiff, OPTION_RULES, from_release=from_release, **values)
+        if from_release is not None
+        else _command(DownloadDataset, OPTION_RULES, **values)
+    )
+    _archive(command)
+
+
+@s2.command("archive-fulltext", help="Archive s2orc_v2 base or explicit diff through Batch.")
+@_archive_options
+def archive_fulltext(release: str, from_release: str | None, bucket: str, prefix: str) -> None:
+    _archive_dataset("s2orc_v2", release, from_release, bucket, prefix)
+
+
+@s2.command(
+    "archive-specter2", help="Archive embeddings-specter_v2 base or explicit diff through Batch."
+)
+@_archive_options
+def archive_specter2(release: str, from_release: str | None, bucket: str, prefix: str) -> None:
+    _archive_dataset("embeddings-specter_v2", release, from_release, bucket, prefix)
 
 
 @s2.command("download-shard", help=DOWNLOAD_SHARD_HELP, short_help=DOWNLOAD_SHARD_HELP)
