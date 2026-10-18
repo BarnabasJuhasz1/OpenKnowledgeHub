@@ -483,3 +483,61 @@ def test_unreachable_managed_api_fails_before_flow_or_cloud(
     assert "PREFECT_API_URL" in result.output
     assert "Traceback" not in result.output
     assert "127.0.0.1" not in result.output
+
+
+def test_read_base_cli_without_source_key_or_control_api(
+    monkeypatch: pytest.MonkeyPatch,
+    service: DownloadDatasetService,
+    source: FakeSource,
+    store: FakeStore,
+) -> None:
+    import asyncio
+    import gzip
+
+    from openknowledge_core.ingestion.archive_progress import ArchiveProgress
+    from openknowledge_core.ingestion.consumers import ConsumeBase
+
+    command = ConsumeBase(dataset="s2orc_v2", release="2026-10-13", bucket="raw", prefix="s2")
+    source.add(
+        "s2orc_v2",
+        "part.gz",
+        gzip.compress(b'{"corpusid":7,"body":{"text":"Synthetic body","annotations":null}}\n'),
+    )
+
+    async def archive() -> None:
+        pinned = await service.pin_dataset(command)
+        await service.archive_shard(pinned, pinned.shards[0])
+        await ArchiveProgress(store, service, PRODUCER, clock).finalize(command)
+
+    asyncio.run(archive())
+    before = dict(store.objects)
+
+    @asynccontextmanager
+    async def open_store(config: object) -> AsyncGenerator[FakeStore]:
+        yield store
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("read-base must not create source/download clients or write manifests")
+
+    monkeypatch.setattr("openknowledge_adapters.gcs.connect", open_store)
+    monkeypatch.setattr("openknowledge_adapters.semantic_scholar.connect", forbidden)
+    monkeypatch.setattr(service, "write_manifest", forbidden)
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    with temporary_settings({PREFECT_API_URL: None}):
+        code, output = okp(
+            "read-base",
+            "--dataset",
+            "s2orc_v2",
+            "--release",
+            command.release,
+            "--max-records",
+            "1",
+            *TARGET,
+        )
+    assert code == 0, output
+    row = json.loads(output)
+    assert row["paper"]["corpusid"] == 7
+    assert row["source"]["dataset"] == "s2orc_v2"
+    assert row["source"]["release"] == command.release
+    assert row["source"]["object_ref"]["generation"] > 0
+    assert store.objects == before

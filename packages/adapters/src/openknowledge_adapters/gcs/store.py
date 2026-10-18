@@ -163,13 +163,22 @@ class GcsArtifactStore:
                 f"{ref.path} no longer has generation {ref.generation}; rerun to check it as it is"
             )
         try:
-            response = await self._storage.download_stream(
+            # The pinned client's public streaming method omits query parameters.
+            # Its helper retains authentication, timeouts and response ownership while
+            # enforcing identity before even a prefix can be emitted.
+            response = await self._storage._download_stream(  # pyright: ignore[reportPrivateUsage]
                 ref.path.bucket,
                 ref.path.name,
+                params={"alt": "media", "ifGenerationMatch": str(ref.generation)},
                 headers=dict(IDENTITY),
                 timeout=self._timeout(before.size),
             )
         except aiohttp.ClientResponseError as exc:
+            if exc.status in (404, 412) and _from_storage(exc):
+                raise ObjectChanged(
+                    f"{ref.path} no longer has generation {ref.generation}; "
+                    "select a valid completed archive before retrying"
+                ) from None
             error = _failure("read", ref.path, exc)
         except Exception as exc:
             error = _unreachable("read", ref.path, exc)

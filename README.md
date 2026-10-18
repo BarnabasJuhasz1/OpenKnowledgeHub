@@ -81,6 +81,12 @@ for an explicit diff.
 | `okp s2 archive-fulltext` | `s2-batch-download-fulltext/control-vm`; `s2-batch-download-fulltext-diff/control-vm` |
 | `okp s2 archive-specter2` | `s2-batch-download-embeddings/control-vm`; `s2-batch-download-embeddings-diff/control-vm` |
 
+`okp s2 read-base` emits a bounded JSONL prefix of a completed base for either archive
+family, with generation-pinned source lineage. It needs storage read access only.
+`ArchiveConsumer.stream` supports full traversal with `ConsumeBase(max_records=None)`;
+close the async generator when stopping early. Prefix records are explicitly partial:
+whole-shard checksums are verified on exhaustion. Archived diffs are not materialized.
+
 ## Coordinated sync
 
 The Prefect deployment `s2-sync/control-vm` (or `okp s2 sync` on the shared server) updates

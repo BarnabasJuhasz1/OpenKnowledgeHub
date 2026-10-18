@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine, Mapping
+from contextlib import aclosing
 from typing import Any
 
 import click
@@ -457,3 +458,44 @@ def _run(run: Callable[[], Coroutine[Any, Any, BaseModel]]) -> None:
         click.echo(result.model_dump_json())
         return
     raise click.ClickException(message)
+
+
+@s2.command("read-base", help="Stream a bounded JSONL prefix of a completed raw base with lineage.")
+@click.option("--dataset", type=click.Choice(["s2orc_v2", "embeddings-specter_v2"]), required=True)
+@click.option("--release", required=True)
+@click.option("--bucket", required=True)
+@click.option("--prefix", default="semantic-scholar", show_default=True)
+@click.option("--max-records", type=click.IntRange(1, 10000), default=10, show_default=True)
+@click.option("--max-record-bytes", type=click.IntRange(1, 67108864), default=8388608)
+def read_base(
+    dataset: str,
+    release: str,
+    bucket: str,
+    prefix: str,
+    max_records: int,
+    max_record_bytes: int,
+) -> None:
+    from openknowledge_core.ingestion.consumers import ConsumeBase
+
+    command = _command(
+        ConsumeBase,
+        OPTION_RULES,
+        dataset=dataset,
+        release=release,
+        bucket=bucket,
+        prefix=prefix,
+        max_records=max_records,
+        max_record_bytes=max_record_bytes,
+    )
+    settings = _settings(CommonSettings)
+
+    async def run() -> None:
+        async with bootstrap.open_archive_consumer(settings) as consumer:
+            async with aclosing(consumer.stream(command)) as records:
+                async for record in records:
+                    click.echo(record.model_dump_json())
+
+    try:
+        asyncio.run(run())
+    except IngestionError as exc:
+        raise click.ClickException(str(exc)) from None

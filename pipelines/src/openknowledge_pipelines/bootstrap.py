@@ -17,6 +17,7 @@ from openknowledge_core.ingestion import (
     WatchdogService,
 )
 from openknowledge_core.ingestion.archive_progress import ArchiveProgress
+from openknowledge_core.ingestion.consumers import ArchiveConsumer
 from openknowledge_core.ingestion.coordinator import CORE_ORDER, LARGE_ORDER
 from openknowledge_core.ingestion.families import ArchiveFamily
 from openknowledge_pipelines.settings import (
@@ -225,3 +226,9 @@ async def open_sync(
             s2_lease=s2_lease,
             load_lease=load_lease,
         )
+
+
+@asynccontextmanager
+async def open_archive_consumer(settings: CommonSettings) -> AsyncGenerator[ArchiveConsumer]:
+    async with gcs.connect(_gcs(settings)) as store:
+        yield ArchiveConsumer(store)

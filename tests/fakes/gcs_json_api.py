@@ -51,9 +51,11 @@ class FakeGcs:
         self.put_statuses: list[int] = []
         self.before_put: Callable[[], None] | None = None
         self.after_media: Callable[[], None] | None = None
+        self.before_media: Callable[[tuple[str, str]], None] | None = None
         self.media_stall_seconds = 0.0
         self.metadata_reply: bytes | None = None
         self.media_headers: list[dict[str, str]] = []
+        self.media_preconditions: list[tuple[str, str | None]] = []
         self.base_url = ""
         self._generation = 1_000
         self.app = web.Application()
@@ -127,6 +129,15 @@ class FakeGcs:
         if blob is None:
             return _error(404)
         if request.query.get("alt") == "media":
+            if self.before_media is not None:
+                self.before_media(key)
+            blob = self.objects.get(key)
+            if blob is None:
+                return _error(404)
+            generation = request.query.get("ifGenerationMatch")
+            self.media_preconditions.append((key[1], generation))
+            if generation is not None and generation != str(blob.generation):
+                return _error(412)
             self.media_headers.append(dict(request.headers))
             if self.media_stall_seconds:
                 return await self._stall(request, blob.data)
