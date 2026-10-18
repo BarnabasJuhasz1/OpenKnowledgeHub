@@ -1,9 +1,14 @@
 """Managed entry points and the real Prefect shared-budget behavior (loopback test server)."""
 
+import asyncio
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Literal
 
+import httpx
 import pytest
+from prefect.client.orchestration import PrefectClient
+from prefect.client.schemas.objects import ConcurrencyLeaseHolder
 from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
 
 from openknowledge_core.ingestion import DownloadDatasetService, ShardJobs
@@ -73,3 +78,26 @@ async def test_missing_shared_limit_refuses_to_run(monkeypatch: pytest.MonkeyPat
     with pytest.raises(ConcurrencySlotAcquisitionError, match="must be created"):
         async with deployments.one_s2_user():
             pytest.fail("a missing budget must not permit work")
+
+
+@pytest.mark.usefixtures("prefect_server")
+async def test_slow_successful_acquisition_has_no_one_second_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    acquire = PrefectClient.increment_concurrency_slots_with_lease
+
+    async def delayed(
+        self: PrefectClient,
+        names: list[str],
+        slots: int,
+        mode: Literal["concurrency", "rate_limit"],
+        lease_duration: float,
+        holder: ConcurrencyLeaseHolder | None = None,
+    ) -> httpx.Response:
+        await asyncio.sleep(1.1)
+        return await acquire(self, names, slots, mode, lease_duration, holder)
+
+    deployments.ensure_limits()
+    monkeypatch.setattr(PrefectClient, "increment_concurrency_slots_with_lease", delayed)
+    async with deployments.one_s2_user():
+        pass

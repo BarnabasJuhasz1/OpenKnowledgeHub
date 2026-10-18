@@ -40,7 +40,7 @@ It refreshes a signed link that has expired.
 Settings come from the environment.
 The key is `S2_API_KEY`, and every other setting is `OKP_` plus a field name from `pipelines/src/openknowledge_pipelines/settings.py`.
 
-With Prefect's default profile and no `PREFECT_API_URL`, Prefect starts a temporary local server for the run.
+Unmanaged local flows can use Prefect's temporary local server when no API URL is configured.
 `okp` turns that server's telemetry off.
 
 ## Downloading through Batch
@@ -63,13 +63,23 @@ If that wait expires, the run fails and names the job.
 All six managed download deployments share the `semantic-scholar` concurrency limit of 1.
 One dataset job runs at a time, with up to `OKP_BATCH_PARALLELISM` parallel shards (8 when configured).
 Busy requests fail promptly. Recovery handles queued/running jobs of the same dataset family;
-active jobs from another family or an older unlabelled controller block new work.
+active jobs from another family or legacy jobs without a known core dataset label block new work.
+Legacy jobs labelled with one of the seven core datasets remain recoverable by core controllers.
 
 ## Full-text and SPECTER2 archives
 
 Dedicated managed base/diff flows archive `s2orc_v2` and `embeddings-specter_v2` in the existing
 raw GCS bucket. They reuse pinned inventories, receipts, manifests and resumable shard downloads.
 Each dataset uses its own explicit release; these archives do not load into ClickHouse.
+Managed archive commands require the shared Prefect server on the control VM, configured via
+`PREFECT_API_URL` or the active Prefect profile, with the `semantic-scholar` limit created by
+`okp serve`; they never fall back to a temporary local server. Both accept `--from-release`
+for an explicit diff.
+
+| Command | Deployments (base; diff) |
+| --- | --- |
+| `okp s2 archive-fulltext` | `s2-batch-download-fulltext/control-vm`; `s2-batch-download-fulltext-diff/control-vm` |
+| `okp s2 archive-specter2` | `s2-batch-download-embeddings/control-vm`; `s2-batch-download-embeddings-diff/control-vm` |
 
 ## Loading into ClickHouse
 

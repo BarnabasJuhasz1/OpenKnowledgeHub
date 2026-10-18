@@ -15,8 +15,10 @@ from prefect.client.orchestration import get_client
 from prefect.client.schemas.actions import DeploymentScheduleCreate
 from prefect.client.schemas.objects import State
 from prefect.client.schemas.schedules import CronSchedule
+from prefect.context import use_profile
 from prefect.deployments.runner import RunnerDeployment
 from prefect.flows import load_flow_from_entrypoint
+from prefect.settings import PREFECT_API_URL, Profile, temporary_settings
 
 from openknowledge_core.ingestion import (
     DownloadDataset,
@@ -343,6 +345,7 @@ def test_download_shard_never_loads_prefect() -> None:
     assert result.stdout.split() == ["0", "False"]
 
 
+@pytest.mark.usefixtures("prefect_server")
 @pytest.mark.parametrize(
     "name,dataset,family",
     [
@@ -358,6 +361,7 @@ def test_archive_cli_routes_explicit_commands(
     family: str,
     diff: bool,
 ) -> None:
+    deployments.ensure_limits()
     seen: list[DownloadDataset | DownloadDiff] = []
 
     async def archive(command: DownloadDataset | DownloadDiff) -> DownloadDataset | DownloadDiff:
@@ -371,7 +375,12 @@ def test_archive_cli_routes_explicit_commands(
     args = [name, "--release", "2026-10-13", *TARGET]
     if diff:
         args += ["--from-release", "2026-10-06"]
-    code, output = okp(*args)
+    monkeypatch.delenv("PREFECT_API_URL", raising=False)
+    profile = Profile(
+        name="shared-archive-test", settings={PREFECT_API_URL: PREFECT_API_URL.value()}
+    )
+    with use_profile(profile):
+        code, output = okp(*args)
     assert code == 0, output
     [command] = seen
     assert command.dataset == dataset
@@ -380,3 +389,66 @@ def test_archive_cli_routes_explicit_commands(
     assert isinstance(command, DownloadDiff) == diff
     if isinstance(command, DownloadDiff):
         assert command.from_release == "2026-10-06"
+
+
+def test_archive_requires_effective_server_before_flow(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def forbidden(command: DownloadDataset) -> DownloadDataset:
+        pytest.fail("must validate server before starting the flow")
+
+    monkeypatch.setattr(deployments, "s2_batch_download_fulltext", forbidden)
+    with temporary_settings({PREFECT_API_URL: None}):
+        code, output = okp("archive-fulltext", "--release", "2026-10-13", *TARGET)
+    assert code == 1
+    assert "shared control VM Prefect server" in output
+    assert "PREFECT_API_URL" in output
+
+
+@pytest.mark.usefixtures("prefect_server")
+def test_archive_missing_limit_fails_before_flow_without_console_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    capfd: pytest.CaptureFixture[str],
+) -> None:
+    for key, value in BATCH_ENV.items():
+        monkeypatch.setenv(key, value)
+
+    def forbidden(settings: object) -> None:
+        pytest.fail("missing limit must not open cloud clients")
+
+    monkeypatch.setattr(bootstrap, "open_batch_download", forbidden)
+    deployments.ensure_limits()
+    with get_client(sync_client=True) as client:
+        client.delete_global_concurrency_limit_by_name(deployments.S2_LIMIT)
+        before = {run.id for run in client.read_flow_runs()}
+        try:
+            caplog.clear()
+            result = CliRunner().invoke(
+                cli.main, ["s2", "archive-fulltext", "--release", "2026-10-13", *TARGET]
+            )
+            console = capfd.readouterr()
+            assert result.exit_code == 1
+            assert "Required shared Prefect limit 'semantic-scholar' is missing" in result.output
+            assert "shared control VM server" in result.output
+            assert "okp serve" in result.output
+            assert "Traceback" not in result.output + console.out + console.err + caplog.text
+            assert not any(record.exc_info for record in caplog.records)
+            assert {run.id for run in client.read_flow_runs()} == before
+        finally:
+            deployments.ensure_limits()
+
+
+@pytest.mark.usefixtures("prefect_server")
+def test_archive_unrelated_body_errors_propagate(monkeypatch: pytest.MonkeyPatch) -> None:
+    deployments.ensure_limits()
+    for key, value in BATCH_ENV.items():
+        monkeypatch.setenv(key, value)
+
+    async def broken(command: DownloadDataset) -> DownloadDataset:
+        raise RuntimeError("download failed")
+
+    monkeypatch.setattr(deployments, "s2_batch_download_fulltext", broken)
+    result = CliRunner().invoke(
+        cli.main, ["s2", "archive-fulltext", "--release", "2026-10-13", *TARGET]
+    )
+    assert isinstance(result.exception, RuntimeError)
+    assert str(result.exception) == "download failed"

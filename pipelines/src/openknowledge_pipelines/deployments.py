@@ -38,14 +38,13 @@ WATCHDOG_CRON = "0 */6 * * *"
 
 
 def one_s2_user() -> AbstractAsyncContextManager[None]:
-    # No per-family limits: the key and Batch task ceiling are shared. On lease loss, stop
-    # submitting work. A later controller must inspect orphaned jobs before submitting.
+    # Keep supervising existing Batch work if global lease renewal fails; deployment
+    # leases can still cancel runs. Busy refusals fail and trigger run_failed alerts.
     return concurrency(
         S2_LIMIT,
         strict=True,
-        timeout_seconds=1,
         max_retries=0,
-        raise_on_lease_renewal_failure=True,
+        raise_on_lease_renewal_failure=False,
     )
 
 

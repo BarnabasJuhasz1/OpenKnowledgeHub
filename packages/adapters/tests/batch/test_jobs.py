@@ -133,13 +133,23 @@ async def test_running_names_download_jobs_that_have_not_ended_on_every_page() -
             job("legacy", "SUCCEEDED", {"operation-id": "old"}),
             job("foreign", "FAILED", {"operation-id": "f", "archive-family": "embeddings"}),
         ],
-        [job("c", "RUNNING", {}), job("d", "QUEUED", download)],
+        [
+            job("c", "RUNNING", {}),
+            job("d", "QUEUED", download),
+            job("legacy-running", "RUNNING", {"operation-id": "old", "dataset": "papers"}),
+            job("legacy-queued", "QUEUED", {"operation-id": "old2", "dataset": "authors"}),
+        ],
     ]
     async with (
         batch_api(web.json_response({}), [], pages) as (root, _),
         batch.connect(CONFIG, api_root=root, token=cast(Token, FakeToken())) as jobs,
     ):
-        assert await jobs.running() == {"a": False, "d": True}
+        assert await jobs.running() == {
+            "a": False,
+            "d": True,
+            "legacy-running": False,
+            "legacy-queued": True,
+        }
 
 
 async def test_a_deleted_job_ends_its_wait() -> None:
@@ -211,19 +221,24 @@ async def test_a_lost_create_reply_resumes_exactly_one_remote_job(replay: bool) 
 
 
 @pytest.mark.parametrize(
-    "family,foreign,state",
+    "family,foreign,state,dataset",
     [
-        ("core", "fulltext", "QUEUED"),
-        ("fulltext", "embeddings", "RUNNING"),
-        ("embeddings", None, "QUEUED"),
-        ("fulltext", None, "RUNNING"),
+        ("core", "fulltext", "QUEUED", "papers"),
+        ("fulltext", "embeddings", "RUNNING", "papers"),
+        ("embeddings", None, "QUEUED", None),
+        ("fulltext", None, "RUNNING", "papers"),
+        ("core", None, "QUEUED", "unknown"),
+        ("core", None, "RUNNING", "s2orc-v2"),
+        ("core", None, "QUEUED", None),
     ],
 )
 async def test_foreign_or_legacy_jobs_refuse_cleanup_across_pages(
-    family: str, foreign: str | None, state: str
+    family: str, foreign: str | None, state: str, dataset: str | None
 ) -> None:
     own = {"operation-id": "own", "archive-family": family}
     labels = {"operation-id": "other"}
+    if dataset is not None:
+        labels["dataset"] = dataset
     if foreign is not None:
         labels["archive-family"] = foreign
     pages = [

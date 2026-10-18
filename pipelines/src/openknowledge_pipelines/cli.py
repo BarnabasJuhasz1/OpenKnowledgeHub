@@ -131,8 +131,10 @@ def _archive(command: DownloadDataset | DownloadDiff) -> None:
         family = archive_family(command.dataset)
     except ValueError as exc:
         raise click.UsageError(str(exc)) from None
-    _settings(BatchSettings)
     from openknowledge_pipelines import deployments
+
+    _require_managed_server((deployments.S2_LIMIT,))
+    _settings(BatchSettings)
 
     async def run() -> BaseModel:
         if isinstance(command, DownloadDiff):
@@ -149,7 +151,45 @@ def _archive(command: DownloadDataset | DownloadDiff) -> None:
         }
         return await routes[family](command)
 
-    _run(run)
+    _run_managed(run)
+
+
+def _require_managed_server(required_limits: tuple[str, ...]) -> None:
+    from prefect.client.orchestration import get_client
+    from prefect.exceptions import ObjectNotFound
+    from prefect.settings import PREFECT_API_URL
+
+    if not PREFECT_API_URL.value():
+        raise click.ClickException(
+            "Managed commands require the shared control VM Prefect server; configure "
+            "PREFECT_API_URL in the environment or Prefect profile before retrying."
+        )
+
+    # Validate configuration before a decorated flow can log a missing-limit traceback.
+    # This does not reserve capacity; strict acquisition in the flow remains authoritative.
+    with get_client(sync_client=True) as client:
+        for name in required_limits:
+            try:
+                client.read_global_concurrency_limit_by_name(name)
+            except ObjectNotFound:
+                raise click.ClickException(
+                    f"Required shared Prefect limit {name!r} is missing. Check that "
+                    "PREFECT_API_URL selects the shared control VM server and run okp serve "
+                    "there to create its limits before retrying."
+                ) from None
+
+
+def _run_managed(run: Callable[[], Coroutine[Any, Any, BaseModel]]) -> None:
+    from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
+
+    try:
+        _run(run)
+    except ConcurrencySlotAcquisitionError as exc:
+        raise click.ClickException(
+            "Cannot acquire the required shared Prefect limits. Check the shared control VM "
+            "Prefect server and that its limits exist; if occupied, retry when free. "
+            f"{exc}"
+        ) from None
 
 
 def _archive_options(function: Callable[..., None]) -> Callable[..., None]:

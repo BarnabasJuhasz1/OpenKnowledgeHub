@@ -16,7 +16,7 @@ from openknowledge_core.ingestion.errors import (
     BatchTimedOut,
     BatchUnavailable,
 )
-from openknowledge_core.ingestion.families import ArchiveFamily, archive_family
+from openknowledge_core.ingestion.families import ARCHIVE_DATASETS, ArchiveFamily, archive_family
 from openknowledge_core.ingestion.models import JobOutcome, ShardJob
 
 ENDED = {
@@ -80,7 +80,13 @@ class CloudBatchJobs:
                 state = job.get("status", {}).get("state")
                 if "operation-id" in job.get("labels", {}) and state not in ENDED:
                     labels = job["labels"]
-                    if labels.get("archive-family") != family.value:
+                    job_family = labels.get("archive-family")
+                    if (
+                        job_family is None
+                        and ARCHIVE_DATASETS.get(labels.get("dataset", "")) == ArchiveFamily.CORE
+                    ):
+                        job_family = ArchiveFamily.CORE.value
+                    if job_family != family.value:
                         raise BatchRejected(
                             f"Active foreign or legacy download job {job['name']}; "
                             "drain it to a terminal state before retrying. "
