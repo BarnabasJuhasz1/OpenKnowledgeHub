@@ -50,7 +50,7 @@ PAPERS = DatasetContract(
             optional(
                 "journal",
                 struct_of(
-                    required("name", pa.string()),
+                    optional("name", pa.string()),
                     optional("pages", pa.string()),
                     optional("volume", pa.string()),
                 ),

@@ -21,6 +21,7 @@ from tests.clickhouse_local import (
     down,
     migrations,
     needs_clickhouse,
+    run,
     section,
     up,
 )
@@ -103,6 +104,114 @@ def test_up_and_down_rerun_and_down_drops_every_table_up_created(tmp_path: Path)
         SELECT name FROM system.tables WHERE database = currentDatabase() FORMAT JSONEachRow;
     """
     assert clickhouse_local(sql, tmp_path) == []
+
+
+@needs_clickhouse
+def test_authors_papercount_upgrade_preserves_counts_and_refuses_lossy_rollback(
+    tmp_path: Path,
+) -> None:
+    migration = MIGRATIONS / "00011_make_authors_papercount_nullable.sql"
+    upgrade, downgrade = section(migration, "Up"), section(migration, "Down")
+    existing = [
+        {"authorid": "1", "papercount": 0, "citationcount": 7, "hindex": 2},
+        {"authorid": "2", "papercount": 4294967295, "citationcount": 9, "hindex": 3},
+    ]
+    select = (
+        "SELECT authorid, papercount, citationcount, hindex FROM authors "
+        "ORDER BY authorid FORMAT JSONEachRow;"
+    )
+    assert (
+        clickhouse_local(
+            f"""
+        {section(MIGRATIONS / "00005_create_authors.sql", "Up")}
+        INSERT INTO authors (authorid, papercount, citationcount, hindex)
+        VALUES ('1', 0, 7, 2), ('2', 4294967295, 9, 3);
+        {upgrade}
+        {upgrade}
+        {downgrade}
+        ALTER TABLE authors MODIFY COLUMN papercount
+        DEFAULT toUInt32(throwIf(1, 'interrupted rollback'));
+        {upgrade}
+        {select}
+        """,
+            tmp_path,
+        )
+        == existing
+    )
+    clickhouse_local("INSERT INTO authors (authorid, papercount) VALUES ('3', NULL);", tmp_path)
+    refused = run(downgrade, tmp_path)
+    assert refused.returncode != 0
+    assert "authors.papercount contains NULL; rollback refused" in refused.stderr
+    assert clickhouse_local(select, tmp_path) == [
+        *existing,
+        {"authorid": "3", "papercount": None, "citationcount": 0, "hindex": 0},
+    ]
+    assert clickhouse_local(
+        "SELECT type, default_kind FROM system.columns WHERE database = currentDatabase() "
+        "AND table = 'authors' AND name = 'papercount' FORMAT JSONEachRow;",
+        tmp_path,
+    ) == [{"type": "Nullable(UInt32)", "default_kind": ""}]
+
+
+@needs_clickhouse
+@pytest.mark.parametrize("whole_journal_null", [False, True])
+def test_papers_journal_upgrade_and_safe_rollback(tmp_path: Path, whole_journal_null: bool) -> None:
+    migration = MIGRATIONS / "00012_make_papers_journal_name_nullable.sql"
+    upgrade, downgrade = section(migration, "Up"), section(migration, "Down")
+    select = (
+        "SELECT corpusid, journal, journal_is_null FROM papers "
+        "ORDER BY corpusid FORMAT JSONEachRow;"
+    )
+    existing = clickhouse_local(
+        f"""
+        {section(MIGRATIONS / "00001_create_papers.sql", "Up")}
+        INSERT INTO papers (corpusid, journal, journal_is_null)
+        VALUES (1, ('J', '1-10', '7'), false), (2, ('', NULL, ''), false),
+               (3, ('Null', '', NULL), false), (4, ('', NULL, NULL), true);
+        {select}
+        """,
+        tmp_path,
+    )
+    assert clickhouse_local(f"{upgrade}{upgrade}{select}", tmp_path) == existing
+    assert clickhouse_local(f"{downgrade}{downgrade}{select}", tmp_path) == existing
+    rejected = run(
+        "INSERT INTO papers (corpusid, journal) SELECT 5, "
+        "CAST(tuple(NULL, 'p', 'v'), "
+        "'Tuple(name Nullable(String), pages Nullable(String), volume Nullable(String))');",
+        tmp_path,
+    )
+    assert rejected.returncode != 0
+    assert clickhouse_local(select, tmp_path) == existing
+    # A completed ALTER without a recorded migration version can be replayed.
+    clickhouse_local(upgrade, tmp_path)
+    clickhouse_local(
+        "INSERT INTO papers (corpusid, journal, journal_is_null) "
+        f"VALUES (5, (NULL, '11-20', '8'), {int(whole_journal_null)}), (6, DEFAULT, true);",
+        tmp_path,
+    )
+    before = clickhouse_local(select, tmp_path)
+    assert before[-2:] == [
+        {
+            "corpusid": 5,
+            "journal": {"name": None, "pages": "11-20", "volume": "8"},
+            "journal_is_null": whole_journal_null,
+        },
+        {
+            "corpusid": 6,
+            "journal": {"name": None, "pages": None, "volume": None},
+            "journal_is_null": True,
+        },
+    ]
+    refused = run(downgrade, tmp_path)
+    assert refused.returncode != 0
+    assert "papers.journal.name contains NULL; rollback refused" in refused.stderr
+    assert clickhouse_local(f"{upgrade}{select}", tmp_path) == before
+    assert clickhouse_local(
+        "SELECT count() AS pending FROM system.mutations "
+        "WHERE database = currentDatabase() AND table = 'papers' AND NOT is_done "
+        "FORMAT JSONEachRow;",
+        tmp_path,
+    ) == [{"pending": 0}]
 
 
 @needs_clickhouse

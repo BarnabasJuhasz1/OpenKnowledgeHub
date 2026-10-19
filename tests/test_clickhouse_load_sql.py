@@ -26,7 +26,7 @@ from openknowledge_adapters.clickhouse.load_sql import (
 from openknowledge_contracts.tables import PROVENANCE, DatasetContract
 from openknowledge_contracts.tables.clickhouse import NULL_FLAG_SUFFIX, table_columns
 from openknowledge_contracts.tables.fields import ArrowField, fields_of
-from openknowledge_contracts.tables.s2 import CONTRACTS, PUBLICATION_VENUES
+from openknowledge_contracts.tables.s2 import AUTHORS, CONTRACTS, PUBLICATION_VENUES
 from tests.clickhouse_local import (
     MIGRATIONS,
     clickhouse_local,
@@ -289,11 +289,6 @@ def gz(path: Path, lines: list[str]) -> Path:
     return path
 
 
-def migration(contract: DatasetContract) -> str:
-    (path,) = MIGRATIONS.glob(f"*_create_{contract.table}.sql")
-    return section(path, "Up")
-
-
 def params(source: Path) -> dict[str, str]:
     return query_parameters(source_file=str(source), release=RELEASE, source_object=OBJECT)
 
@@ -301,10 +296,14 @@ def params(source: Path) -> dict[str, str]:
 def load(contract: DatasetContract, workdir: Path, lines: list[str]) -> list[dict[str, Any]]:
     workdir.mkdir()
     source = gz(workdir / "part-0.gz", lines)
+    columns = ", ".join(
+        c.name for c in table_columns(contract) if not (c.materialized or c.default)
+    )
     sql = f"""
-        {migration(contract)}
+        {up()}
         {upsert_query(contract, "file")};
-        SELECT * FROM {contract.table} ORDER BY {", ".join(contract.key)} FORMAT JSONEachRow;
+        SELECT {columns} FROM {contract.table}
+        ORDER BY {", ".join(contract.key)} FORMAT JSONEachRow;
     """
     loaded = clickhouse_local(sql, workdir / "db", **params(source))
     for field in fields_of(contract.source):
@@ -350,9 +349,29 @@ def test_every_generated_break_is_found_with_its_field(
 def test_an_upsert_stops_at_a_refused_record(contract: DatasetContract, tmp_path: Path) -> None:
     case = next(c for c in refused(contract) if c.name.endswith(" null"))
     source = gz(tmp_path / "part-0.gz", [json.dumps(accepted(contract)[0]), case.line])
-    sql = f"{migration(contract)}\n{upsert_query(contract, 'file')};"
+    sql = f"{up()}\n{upsert_query(contract, 'file')};"
     result = run(sql, tmp_path, **params(source))
     assert f"Code: 395. DB::Exception: {case.problem}: " in result.stderr
+
+
+@needs_clickhouse
+@pytest.mark.parametrize("missing", [False, True], ids=["null", "missing"])
+def test_unknown_count_requires_the_nullable_migration(missing: bool, tmp_path: Path) -> None:
+    record = accepted(AUTHORS)[1]
+    if missing:
+        del record["papercount"]
+    source = gz(tmp_path / "part-0.gz", [json.dumps(record)])
+    migration = MIGRATIONS / "00011_make_authors_papercount_nullable.sql"
+    clickhouse_local(f"{up()}\n{section(migration, 'Down')}", tmp_path)
+    insert = upsert_query(AUTHORS, "file")
+    rejected = run(insert, tmp_path, **params(source))
+    assert "Code: 349." in rejected.stderr
+    assert clickhouse_local(
+        f"{section(migration, 'Up')}\n{insert};\n"
+        "SELECT papercount FROM authors FINAL FORMAT JSONEachRow;",
+        tmp_path,
+        **params(source),
+    ) == [{"papercount": None}]
 
 
 @needs_clickhouse
@@ -368,7 +387,7 @@ def test_a_delete_hides_its_upsert_and_leaves_every_other_column_at_its_default(
     columns = ", ".join([*contract.key, *PROVENANCE.names])
     table = contract.table
     db = tmp_path / "db"
-    upsert = f"{migration(contract)}\n{upsert_query(contract, 'file')};"
+    upsert = f"{up()}\n{upsert_query(contract, 'file')};"
     clickhouse_local(upsert, db, **params(upserts))
     tombstone, bare, live = clickhouse_local(
         f"""
@@ -417,7 +436,7 @@ def test_a_delete_record_holds_the_key_and_nothing_else(
                 f"{table}: {name} breaks the contract",
             ),
         ]
-    sql = f"{migration(contract)}\n{delete_query(contract, 'file')};"
+    sql = f"{up()}\n{delete_query(contract, 'file')};"
     for case in cases:
         source = gz(tmp_path / "deletes.gz", [case.line])
         result = run(sql, tmp_path, **params(source))

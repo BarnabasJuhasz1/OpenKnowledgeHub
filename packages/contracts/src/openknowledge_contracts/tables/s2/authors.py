@@ -23,7 +23,7 @@ AUTHORS = DatasetContract(
             optional("aliases", list_of(pa.string())),
             optional("affiliations", list_of(pa.string())),
             optional("homepage", pa.string()),
-            required("papercount", pa.uint32()),
+            optional("papercount", pa.uint32()),
             required("citationcount", pa.uint32()),
             required("hindex", pa.uint32()),
         ]
