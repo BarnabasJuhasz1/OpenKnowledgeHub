@@ -28,11 +28,9 @@ from openknowledge_contracts.tables.clickhouse import NULL_FLAG_SUFFIX, table_co
 from openknowledge_contracts.tables.fields import ArrowField, fields_of
 from openknowledge_contracts.tables.s2 import CONTRACTS, PUBLICATION_VENUES
 from tests.clickhouse_local import (
-    MIGRATIONS,
     clickhouse_local,
     needs_clickhouse,
     run,
-    section,
     up,
 )
 
@@ -289,11 +287,6 @@ def gz(path: Path, lines: list[str]) -> Path:
     return path
 
 
-def migration(contract: DatasetContract) -> str:
-    (path,) = MIGRATIONS.glob(f"*_create_{contract.table}.sql")
-    return section(path, "Up")
-
-
 def params(source: Path) -> dict[str, str]:
     return query_parameters(source_file=str(source), release=RELEASE, source_object=OBJECT)
 
@@ -354,7 +347,7 @@ def test_every_generated_break_is_found_with_its_field(
 def test_an_upsert_stops_at_a_refused_record(contract: DatasetContract, tmp_path: Path) -> None:
     case = next(c for c in refused(contract) if c.name.endswith(" null"))
     source = gz(tmp_path / "part-0.gz", [json.dumps(accepted(contract)[0]), case.line])
-    sql = f"{migration(contract)}\n{upsert_query(contract, 'file')};"
+    sql = f"{up()}\n{upsert_query(contract, 'file')};"
     result = run(sql, tmp_path, **params(source))
     assert f"Code: 395. DB::Exception: {case.problem}: " in result.stderr
 
@@ -372,7 +365,7 @@ def test_a_delete_hides_its_upsert_and_leaves_every_other_column_at_its_default(
     columns = ", ".join([*contract.key, *PROVENANCE.names])
     table = contract.table
     db = tmp_path / "db"
-    upsert = f"{migration(contract)}\n{upsert_query(contract, 'file')};"
+    upsert = f"{up()}\n{upsert_query(contract, 'file')};"
     clickhouse_local(upsert, db, **params(upserts))
     tombstone, bare, live = clickhouse_local(
         f"""
@@ -421,7 +414,7 @@ def test_a_delete_record_holds_the_key_and_nothing_else(
                 f"{table}: {name} breaks the contract",
             ),
         ]
-    sql = f"{migration(contract)}\n{delete_query(contract, 'file')};"
+    sql = f"{up()}\n{delete_query(contract, 'file')};"
     for case in cases:
         source = gz(tmp_path / "deletes.gz", [case.line])
         result = run(sql, tmp_path, **params(source))

@@ -202,22 +202,34 @@ def test_a_load_is_repeatable_and_rebuilt_from_raw(ports: dict[str, str]) -> Non
     assert (again["loaded"], again["live_rows"]) == (2, 2)
 
 
-def test_authors_with_unknown_papercount_load_and_replay(ports: dict[str, str]) -> None:
-    archive(
-        ports, "2026-10-13", FIXTURE.with_name("authors.jsonl").read_text().splitlines(), "authors"
-    )
-    args = ("load", "--release", "2026-10-13", "--dataset", "authors")
+@pytest.mark.parametrize("dataset, count", [("authors", 2), ("papers", 5)])
+def test_nullable_metadata_loads_and_replays(
+    ports: dict[str, str], dataset: str, count: int
+) -> None:
+    lines = FIXTURE.with_name(f"{dataset}.jsonl").read_text().splitlines()
+    archive(ports, "2026-10-13", lines, dataset)
+    args = ("load", "--release", "2026-10-13", "--dataset", dataset)
     first = ran(ports, *args)
-    assert (first["loaded"], first["live_rows"]) == (2, 2)
+    assert (first["loaded"], first["live_rows"]) == (count, count)
     again = ran(ports, *args)
-    assert (again["loaded"], again["already_loaded"], again["live_rows"]) == (0, 2, 2)
+    assert (again["loaded"], again["already_loaded"], again["live_rows"]) == (0, count, count)
+    if dataset == "authors":
+        columns, key = "authorid, papercount", "authorid"
+        expected = [{"authorid": "1001", "papercount": 3}, {"authorid": "1002", "papercount": None}]
+    else:
+        columns, key = "corpusid, journal, journal_is_null", "corpusid"
+        expected = [
+            {
+                "corpusid": row["corpusid"],
+                "journal": row["journal"] or {"name": None, "pages": None, "volume": None},
+                "journal_is_null": row["journal"] is None,
+            }
+            for row in sorted((json.loads(line) for line in lines), key=lambda row: row["corpusid"])
+        ]
     records = query(
-        ports, "SELECT authorid, papercount FROM authors FINAL ORDER BY authorid FORMAT JSONEachRow"
+        ports, f"SELECT {columns} FROM {dataset} FINAL ORDER BY {key} FORMAT JSONEachRow"
     )
-    assert [json.loads(line) for line in records.splitlines()] == [
-        {"authorid": "1001", "papercount": 3},
-        {"authorid": "1002", "papercount": None},
-    ]
+    assert [json.loads(line) for line in records.splitlines()] == expected
 
 
 def test_a_record_that_breaks_the_contract_fails_the_load(ports: dict[str, str]) -> None:
