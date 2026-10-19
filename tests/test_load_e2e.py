@@ -231,14 +231,23 @@ def test_nullable_metadata_loads_and_replays(
     assert (first["loaded"], first["live_rows"]) == (count, count)
     again = ran(ports, *args)
     assert (again["loaded"], again["already_loaded"], again["live_rows"]) == (0, count, count)
+    expected: list[dict[str, Any]]
     if dataset == "authors":
         columns, key = "authorid, papercount", "authorid"
         expected = [{"authorid": "1001", "papercount": 3}, {"authorid": "1002", "papercount": None}]
     else:
-        columns, key = "corpusid, journal, journal_is_null", "corpusid"
+        columns, key = (
+            "corpusid, url, title, venue, authors, authors_is_null, journal, journal_is_null",
+            "corpusid",
+        )
         expected = [
             {
                 "corpusid": row["corpusid"],
+                "url": row.get("url"),
+                "title": row.get("title"),
+                "venue": row.get("venue"),
+                "authors": row["authors"] or [],
+                "authors_is_null": row["authors"] is None,
                 "journal": row["journal"] or {"name": None, "pages": None, "volume": None},
                 "journal_is_null": row["journal"] is None,
             }
