@@ -12,6 +12,7 @@ import httpx
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.config import ClickHouseConfig
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
+from openknowledge_adapters.clickhouse.telemetry import ClickHouseLoadTelemetry
 
 
 def keepalive_options() -> list[tuple[int, int, int]]:
@@ -31,6 +32,7 @@ def keepalive_options() -> list[tuple[int, int, int]]:
 class ClickHouse(NamedTuple):
     tables: ClickHouseTables
     applied: ClickHouseAppliedReleases
+    telemetry: ClickHouseLoadTelemetry
 
 
 @asynccontextmanager
@@ -52,6 +54,7 @@ async def connect(
         yield ClickHouse(
             tables=ClickHouseTables(client, raw_bucket=config.raw_bucket),
             applied=ClickHouseAppliedReleases(client),
+            telemetry=ClickHouseLoadTelemetry(client),
         )
 
 

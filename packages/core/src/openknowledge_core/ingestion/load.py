@@ -47,7 +47,12 @@ from openknowledge_core.ingestion.models import (
     diff_file_path,
     held_release,
 )
-from openknowledge_core.ingestion.ports import AppliedReleases, ArtifactStore, TableLoader
+from openknowledge_core.ingestion.ports import (
+    AppliedReleases,
+    ArtifactStore,
+    LoadObserver,
+    TableLoader,
+)
 from openknowledge_core.ingestion.service import DOCUMENT_LIMIT, read_small
 
 BASE_HINT = "run okp s2 download first"
@@ -63,12 +68,14 @@ class LoadDatasetService:
         applied: AppliedReleases,
         producer: Producer,
         clock: Callable[[], datetime],
+        observer: LoadObserver | None = None,
     ) -> None:
         self._store = store
         self._tables = tables
         self._applied = applied
         self._producer = producer
         self._clock = clock
+        self._observer = observer
 
     async def prepare(self, command: LoadDataset) -> PreparedLoad:
         """A table that holds a release takes only that base again, or a newer snapshot."""
@@ -85,7 +92,10 @@ class LoadDatasetService:
             command.bucket, command.prefix, command.release, command.dataset, MANIFEST_NAME
         )
         manifest = await self._manifest(path, command.release, command.dataset, BASE_HINT)
-        return PreparedLoad(manifest_path=path, manifest=manifest, table=table)
+        prepared = PreparedLoad(manifest_path=path, manifest=manifest, table=table)
+        if self._observer is not None:
+            await self._observer.planned(prepared)
+        return prepared
 
     async def prepare_diff(self, command: LoadDiff) -> PreparedDiff:
         """A table takes a diff from the release it holds, or again once it holds the diff's."""
@@ -142,6 +152,8 @@ class LoadDatasetService:
                 f"rerun the download that wrote {prepared.manifest_path}, which checks it "
                 "against its receipt"
             )
+        if self._observer is not None:
+            await self._observer.started(entry)
         written = await self._tables.load(
             LoadObject(
                 dataset=manifest.dataset,
@@ -150,6 +162,8 @@ class LoadDatasetService:
                 operation=operation,
             )
         )
+        if self._observer is not None:
+            await self._observer.written(written)
         if written != entry.records:
             raise RowCountMismatch(
                 f"loading {path} wrote {written} rows, but its receipt counts {entry.records} "

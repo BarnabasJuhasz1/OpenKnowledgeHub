@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import zlib
+from collections.abc import Iterator
 
 from pydantic import BaseModel, ConfigDict, NonNegativeInt, PositiveInt
 
@@ -46,6 +47,11 @@ class GzipCheck:
 
     def update(self, data: bytes) -> None:
         """Feed the next bytes, which may span any number of members."""
+        for _ in self.decode(data):
+            pass
+
+    def decode(self, data: bytes) -> Iterator[bytes]:
+        """Yield bounded decompressed blocks while applying the same framing checks."""
         while data:
             if not self._open and self.members:
                 data = data.lstrip(b"\x00")  # gzip tools accept zero padding after a member
@@ -60,6 +66,7 @@ class GzipCheck:
                 self.uncompressed_size += len(out)
                 self._newlines += out.count(b"\n")
                 self._ends_with_newline = out.endswith(b"\n")
+                yield out
             if self._z.eof:
                 self.members += 1
                 data = self._z.unused_data
@@ -81,10 +88,14 @@ class StreamCheck:
         self.report: IntegrityReport | None = None
 
     def update(self, data: bytes) -> None:
-        self._gzip.update(data)
+        for _ in self.decode(data):
+            pass
+
+    def decode(self, data: bytes) -> Iterator[bytes]:
         self._sha256.update(data)
         self._md5.update(data)
         self._size += len(data)
+        yield from self._gzip.decode(data)
 
     def finish(self, expected_size: int) -> IntegrityReport:
         self._gzip.close()

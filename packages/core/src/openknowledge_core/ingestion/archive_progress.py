@@ -100,18 +100,9 @@ def _completion_identity(
         raise ArchiveConflict("archive completion kind mismatch")
 
 
-class ArchiveProgress:
-    def __init__(
-        self,
-        store: ArtifactStore,
-        downloads: DownloadDatasetService,
-        producer: Producer,
-        clock: Callable[[], datetime],
-    ) -> None:
+class ArchiveReader:
+    def __init__(self, store: ArtifactStore) -> None:
         self._store = store
-        self._downloads = downloads
-        self._producer = producer
-        self._clock = clock
 
     async def reference(self, path: ObjectPath) -> HashedRef:
         stored = await self._store.stat(path)
@@ -171,6 +162,50 @@ class ArchiveProgress:
         if (base.dataset.name, base.release_id) != (command.dataset, command.release):
             raise ArchiveConflict("base inventory identity mismatch")
         return (seed.model_copy(update={"shards": base.shards}),)
+
+    async def _validate(
+        self,
+        command: DownloadDataset | DownloadDiff,
+        reference: HashedRef,
+        record: ArchiveCompletion,
+    ) -> None:
+        _completion_identity(command, reference, record)
+        parts = await self._inventory_parts(command, record.inventory)
+        if tuple(item.ref.path for item in record.manifests) != tuple(
+            part.manifest_path for part in parts
+        ):
+            raise ArchiveConflict("archive completion manifest parts/paths mismatch")
+        for part, reference in zip(parts, record.manifests, strict=True):
+            manifest = await self.read(reference, DatasetManifest)
+            if (manifest.dataset, manifest.release_id) != (command.dataset, command.release):
+                raise ArchiveConflict("archive manifest identity mismatch")
+            if tuple(entry.object_ref.path for entry in manifest.entries) != tuple(
+                part.object_path(shard) for shard in part.shards
+            ):
+                raise ArchiveConflict("archive manifest entries disagree with pinned inventory")
+
+    async def completed_base(
+        self, command: DownloadDataset
+    ) -> tuple[HashedRef, HashedRef, DatasetManifest]:
+        reference = await self.reference(completion_path(command))
+        record = await self.read(reference, ArchiveCompletion)
+        await self._validate(command, reference, record)
+        manifest_ref = record.manifests[0]
+        return reference, manifest_ref, await self.read(manifest_ref, DatasetManifest)
+
+
+class ArchiveProgress(ArchiveReader):
+    def __init__(
+        self,
+        store: ArtifactStore,
+        downloads: DownloadDatasetService,
+        producer: Producer,
+        clock: Callable[[], datetime],
+    ) -> None:
+        super().__init__(store)
+        self._downloads = downloads
+        self._producer = producer
+        self._clock = clock
 
     async def _artifacts(
         self,
@@ -330,24 +365,3 @@ class ArchiveProgress:
         raise ArchiveConflict(
             "manual archive diff must extend the anchored head or retry a completed transition"
         )
-
-    async def _validate(
-        self,
-        command: DownloadDataset | DownloadDiff,
-        reference: HashedRef,
-        record: ArchiveCompletion,
-    ) -> None:
-        _completion_identity(command, reference, record)
-        parts = await self._inventory_parts(command, record.inventory)
-        if tuple(item.ref.path for item in record.manifests) != tuple(
-            part.manifest_path for part in parts
-        ):
-            raise ArchiveConflict("archive completion manifest parts/paths mismatch")
-        for part, reference in zip(parts, record.manifests, strict=True):
-            manifest = await self.read(reference, DatasetManifest)
-            if (manifest.dataset, manifest.release_id) != (command.dataset, command.release):
-                raise ArchiveConflict("archive manifest identity mismatch")
-            if tuple(entry.object_ref.path for entry in manifest.entries) != tuple(
-                part.object_path(shard) for shard in part.shards
-            ):
-                raise ArchiveConflict("archive manifest entries disagree with pinned inventory")

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable, Coroutine, Mapping
-from typing import Any
+from contextlib import aclosing
+from pathlib import Path
+from typing import Any, Literal, TextIO
 
 import click
 from pydantic import BaseModel, ValidationError
@@ -155,6 +157,7 @@ def _archive(command: DownloadDataset | DownloadDiff) -> None:
 
 
 def _require_managed_server(required_limits: tuple[str, ...]) -> None:
+    from httpx import ConnectError, TimeoutException
     from prefect.client.orchestration import get_client
     from prefect.exceptions import ObjectNotFound
     from prefect.settings import PREFECT_API_URL
@@ -171,6 +174,11 @@ def _require_managed_server(required_limits: tuple[str, ...]) -> None:
         for name in required_limits:
             try:
                 client.read_global_concurrency_limit_by_name(name)
+            except (ConnectError, TimeoutException):
+                raise click.ClickException(
+                    "Cannot reach the configured shared control API. Check network access, "
+                    "the server and the effective PREFECT_API_URL setting, then retry."
+                ) from None
             except ObjectNotFound:
                 raise click.ClickException(
                     f"Required shared Prefect limit {name!r} is missing. Check that "
@@ -356,7 +364,25 @@ def download_shard(
 @click.option(
     "--prefix", default=_default(LoadDataset, "prefix"), show_default=True, help=PREFIX_HELP
 )
-def load(release: str, dataset: str, bucket: str, prefix: str) -> None:
+@click.option(
+    "--measurement-report",
+    type=click.Path(dir_okay=False, path_type=Path),
+    help="Write measurements for this one load to a new JSON file.",
+)
+@click.option(
+    "--measurement-kind",
+    type=click.Choice(["explicit-load", "synthetic-validation"]),
+    default="explicit-load",
+    show_default=True,
+)
+def load(
+    release: str,
+    dataset: str,
+    bucket: str,
+    prefix: str,
+    measurement_report: Path | None = None,
+    measurement_kind: Literal["explicit-load", "synthetic-validation"] = "explicit-load",
+) -> None:
     command = _command(
         LoadDataset,
         OPTION_RULES,
@@ -371,7 +397,38 @@ def load(release: str, dataset: str, bucket: str, prefix: str) -> None:
         async with bootstrap.open_load_service(settings) as service:
             return await bootstrap.load_flows(service, settings).dataset(command)
 
-    _run(run)
+    if measurement_report is None:
+        _run(run)
+    else:
+        from openknowledge_pipelines.flows.measure_load import measured_load
+
+        async def measured(report_file: TextIO) -> LoadDatasetResult:
+            async with bootstrap.open_measured_load(settings) as (service, observation, telemetry):
+                return await measured_load(
+                    lambda: bootstrap.load_flows(service, settings).dataset(command),
+                    command=command,
+                    observation=observation,
+                    telemetry=telemetry,
+                    report_file=report_file,
+                    validation_kind=measurement_kind,
+                    warn=lambda message: click.echo(message, err=True),
+                )
+
+        path = measurement_report.resolve()
+        try:
+            report_file = path.open("x", encoding="utf-8")
+        except OSError as exc:
+            raise click.ClickException(
+                f"Cannot create measurement report ({type(exc).__name__}); "
+                "choose a new writable file"
+            ) from None
+        try:
+            _run(lambda: measured(report_file))
+        finally:
+            try:
+                report_file.close()
+            except OSError as exc:
+                click.echo(f"Measurement report close failed ({type(exc).__name__}).", err=True)
 
 
 @s2.command("load-diff", help=LOAD_DIFF_HELP, short_help=LOAD_DIFF_HELP)
@@ -451,3 +508,44 @@ def _run(run: Callable[[], Coroutine[Any, Any, BaseModel]]) -> None:
         click.echo(result.model_dump_json())
         return
     raise click.ClickException(message)
+
+
+@s2.command("read-base", help="Stream a bounded JSONL prefix of a completed raw base with lineage.")
+@click.option("--dataset", type=click.Choice(["s2orc_v2", "embeddings-specter_v2"]), required=True)
+@click.option("--release", required=True)
+@click.option("--bucket", required=True)
+@click.option("--prefix", default="semantic-scholar", show_default=True)
+@click.option("--max-records", type=click.IntRange(1, 10000), default=10, show_default=True)
+@click.option("--max-record-bytes", type=click.IntRange(1, 67108864), default=8388608)
+def read_base(
+    dataset: str,
+    release: str,
+    bucket: str,
+    prefix: str,
+    max_records: int,
+    max_record_bytes: int,
+) -> None:
+    from openknowledge_core.ingestion.consumers import ConsumeBase
+
+    command = _command(
+        ConsumeBase,
+        OPTION_RULES,
+        dataset=dataset,
+        release=release,
+        bucket=bucket,
+        prefix=prefix,
+        max_records=max_records,
+        max_record_bytes=max_record_bytes,
+    )
+    settings = _settings(CommonSettings)
+
+    async def run() -> None:
+        async with bootstrap.open_archive_consumer(settings) as consumer:
+            async with aclosing(consumer.stream(command)) as records:
+                async for record in records:
+                    click.echo(record.model_dump_json())
+
+    try:
+        asyncio.run(run())
+    except IngestionError as exc:
+        raise click.ClickException(str(exc)) from None

@@ -81,6 +81,12 @@ for an explicit diff.
 | `okp s2 archive-fulltext` | `s2-batch-download-fulltext/control-vm`; `s2-batch-download-fulltext-diff/control-vm` |
 | `okp s2 archive-specter2` | `s2-batch-download-embeddings/control-vm`; `s2-batch-download-embeddings-diff/control-vm` |
 
+`okp s2 read-base` emits a bounded JSONL prefix of a completed base for either archive
+family, with generation-pinned source lineage. It needs storage read access only.
+`ArchiveConsumer.stream` supports full traversal with `ConsumeBase(max_records=None)`;
+close the async generator when stopping early. Prefix records are explicitly partial:
+whole-shard checksums are verified on exhaustion. Archived diffs are not materialized.
+
 ## Coordinated sync
 
 The Prefect deployment `s2-sync/control-vm` (or `okp s2 sync` on the shared server) updates
@@ -113,6 +119,12 @@ uv run okp s2 load --release <release_id> --dataset publication-venues --bucket 
 It loads every object in the dataset's `manifest.json` into the dataset's table.
 ClickHouse reads each object itself through its `raw` named collection and checks every record against the dataset's contract.
 It needs `OKP_CLICKHOUSE_URL`, `CLICKHOUSE_PASSWORD` and `OKP_CLICKHOUSE_RAW_BUCKET`, the bucket that collection reads, but no S2 key.
+
+`okp s2 load --measurement-report` optionally writes a new JSON report for that single
+load. It distinguishes acknowledged inserts from skipped checkpoints and unknown partial
+writes; memory values are snapshot gauges, not peaks. Use
+`--measurement-kind synthetic-validation` for disposable development loads. Measurement errors are reported
+separately and preserve the load outcome.
 
 Each loaded object leaves a row in `loads`.
 A rerun skips an object whose row matches its generation, its checksum, the table and the load SQL, so a table created again or emptied loads everything again.

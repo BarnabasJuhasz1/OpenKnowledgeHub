@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import socket
 import subprocess
 import sys
 from collections.abc import AsyncGenerator, Awaitable
@@ -459,3 +460,84 @@ def test_archive_unrelated_body_errors_propagate(monkeypatch: pytest.MonkeyPatch
     )
     assert isinstance(result.exception, RuntimeError)
     assert str(result.exception) == "download failed"
+
+
+def test_unreachable_managed_api_fails_before_flow_or_cloud(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("unreachable preflight must not start a flow or cloud client")
+
+    monkeypatch.setattr(deployments, "s2_batch_download_fulltext", forbidden)
+    monkeypatch.setattr(bootstrap, "open_batch_download", forbidden)
+    # A bound, non-listening socket reserves the port and reliably refuses connections.
+    with socket.socket() as endpoint:
+        endpoint.bind(("127.0.0.1", 0))
+        url = f"http://127.0.0.1:{endpoint.getsockname()[1]}/api"
+        with temporary_settings({PREFECT_API_URL: url}):
+            result = CliRunner().invoke(
+                cli.main, ["s2", "archive-fulltext", "--release", "2026-10-13", *TARGET]
+            )
+    assert result.exit_code == 1
+    assert "Cannot reach the configured shared control API" in result.output
+    assert "PREFECT_API_URL" in result.output
+    assert "Traceback" not in result.output
+    assert "127.0.0.1" not in result.output
+
+
+def test_read_base_cli_without_source_key_or_control_api(
+    monkeypatch: pytest.MonkeyPatch,
+    service: DownloadDatasetService,
+    source: FakeSource,
+    store: FakeStore,
+) -> None:
+    import asyncio
+    import gzip
+
+    from openknowledge_core.ingestion.archive_progress import ArchiveProgress
+    from openknowledge_core.ingestion.consumers import ConsumeBase
+
+    command = ConsumeBase(dataset="s2orc_v2", release="2026-10-13", bucket="raw", prefix="s2")
+    source.add(
+        "s2orc_v2",
+        "part.gz",
+        gzip.compress(b'{"corpusid":7,"body":{"text":"Synthetic body","annotations":null}}\n'),
+    )
+
+    async def archive() -> None:
+        pinned = await service.pin_dataset(command)
+        await service.archive_shard(pinned, pinned.shards[0])
+        await ArchiveProgress(store, service, PRODUCER, clock).finalize(command)
+
+    asyncio.run(archive())
+    before = dict(store.objects)
+
+    @asynccontextmanager
+    async def open_store(config: object) -> AsyncGenerator[FakeStore]:
+        yield store
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("read-base must not create source/download clients or write manifests")
+
+    monkeypatch.setattr("openknowledge_adapters.gcs.connect", open_store)
+    monkeypatch.setattr("openknowledge_adapters.semantic_scholar.connect", forbidden)
+    monkeypatch.setattr(service, "write_manifest", forbidden)
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    with temporary_settings({PREFECT_API_URL: None}):
+        code, output = okp(
+            "read-base",
+            "--dataset",
+            "s2orc_v2",
+            "--release",
+            command.release,
+            "--max-records",
+            "1",
+            *TARGET,
+        )
+    assert code == 0, output
+    row = json.loads(output)
+    assert row["paper"]["corpusid"] == 7
+    assert row["source"]["dataset"] == "s2orc_v2"
+    assert row["source"]["release"] == command.release
+    assert row["source"]["object_ref"]["generation"] > 0
+    assert store.objects == before

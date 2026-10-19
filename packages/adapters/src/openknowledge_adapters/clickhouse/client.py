@@ -13,6 +13,7 @@ from openknowledge_core.ingestion.errors import (
     ContractViolation,
     CredentialRejected,
     IngestionError,
+    TableAccessDenied,
     TableRejected,
     TableUnavailable,
 )
@@ -69,6 +70,8 @@ def _error(response: httpx.Response, query_id: str) -> IngestionError:
     message = _message(response.text)
     if code == "395":
         return ContractViolation(f"{message}; the object stays unloaded")
+    if code == "497":
+        return TableAccessDenied("Database query denied with code 497; check account permissions")
     if code == "516":
         return CredentialRejected("ClickHouse refused the user or password")
     failure = f"ClickHouse query {query_id} failed with code {code or response.status_code}"
