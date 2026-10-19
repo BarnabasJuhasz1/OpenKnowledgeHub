@@ -21,6 +21,7 @@ from tests.clickhouse_local import (
     down,
     migrations,
     needs_clickhouse,
+    run,
     section,
     up,
 )
@@ -103,6 +104,42 @@ def test_up_and_down_rerun_and_down_drops_every_table_up_created(tmp_path: Path)
         SELECT name FROM system.tables WHERE database = currentDatabase() FORMAT JSONEachRow;
     """
     assert clickhouse_local(sql, tmp_path) == []
+
+
+@needs_clickhouse
+def test_authors_papercount_upgrade_preserves_counts_and_refuses_lossy_rollback(
+    tmp_path: Path,
+) -> None:
+    migration = MIGRATIONS / "00011_make_authors_papercount_nullable.sql"
+    upgrade, downgrade = section(migration, "Up"), section(migration, "Down")
+    existing = [
+        {"authorid": "1", "papercount": 0},
+        {"authorid": "2", "papercount": 4294967295},
+    ]
+    select = "SELECT authorid, papercount FROM authors ORDER BY authorid FORMAT JSONEachRow;"
+    assert (
+        clickhouse_local(
+            f"""
+        {section(MIGRATIONS / "00005_create_authors.sql", "Up")}
+        INSERT INTO authors (authorid, papercount) VALUES ('1', 0), ('2', 4294967295);
+        {upgrade}
+        {upgrade}
+        {downgrade}
+        {upgrade}
+        {select}
+        """,
+            tmp_path,
+        )
+        == existing
+    )
+    clickhouse_local("INSERT INTO authors (authorid, papercount) VALUES ('3', NULL);", tmp_path)
+    assert run(downgrade, tmp_path).returncode != 0
+    assert clickhouse_local(select, tmp_path) == [*existing, {"authorid": "3", "papercount": None}]
+    assert clickhouse_local(
+        "SELECT type FROM system.columns WHERE database = currentDatabase() "
+        "AND table = 'authors' AND name = 'papercount' FORMAT JSONEachRow;",
+        tmp_path,
+    ) == [{"type": "Nullable(UInt32)"}]
 
 
 @needs_clickhouse
