@@ -154,6 +154,54 @@ def test_authors_papercount_upgrade_preserves_counts_and_refuses_lossy_rollback(
 
 
 @needs_clickhouse
+@pytest.mark.parametrize("unknown", ["url", "title", "venue", "authors"])
+def test_papers_metadata_upgrade_and_safe_rollback(tmp_path: Path, unknown: str) -> None:
+    migration = MIGRATIONS / "00013_make_papers_metadata_nullable.sql"
+    upgrade, downgrade = section(migration, "Up"), section(migration, "Down")
+    select = (
+        "SELECT corpusid, url, title, venue, authors FROM papers "
+        "ORDER BY corpusid FORMAT JSONEachRow;"
+    )
+    existing = clickhouse_local(
+        f"""
+        {section(MIGRATIONS / "00001_create_papers.sql", "Up")}
+        INSERT INTO papers (corpusid, url, title, venue, authors)
+        VALUES (1, 'https://example.org/1', 'Title', 'Venue', [('1', 'Author')]),
+               (2, '', '', '', []), (3, 'Null', 'Null', 'Null', []);
+        {select}
+        """,
+        tmp_path,
+    )
+    assert clickhouse_local(f"{upgrade}{upgrade}{select}", tmp_path) == existing
+    assert (
+        clickhouse_local(
+            "SELECT authors_is_null FROM papers ORDER BY corpusid FORMAT JSONEachRow;", tmp_path
+        )
+        == [{"authors_is_null": False}] * 3
+    )
+    assert clickhouse_local(f"{downgrade}{downgrade}{select}", tmp_path) == existing
+    # Recover an ALTER that completed before its migration version was recorded.
+    clickhouse_local(
+        "ALTER TABLE papers MODIFY COLUMN url DEFAULT toString(throwIf(1, 'interrupted rollback'));"
+        + upgrade,
+        tmp_path,
+    )
+    column, value = ("authors_is_null", "true") if unknown == "authors" else (unknown, "NULL")
+    clickhouse_local(
+        f"INSERT INTO papers (corpusid, url, title, venue, authors_is_null) "
+        f"VALUES (4, '', '', '', false); ALTER TABLE papers UPDATE {column} = {value} "
+        "WHERE corpusid = 4 SETTINGS mutations_sync = 2;",
+        tmp_path,
+    )
+    stored = "SELECT * FROM papers ORDER BY corpusid FORMAT JSONEachRow;"
+    before = clickhouse_local(stored, tmp_path)
+    refused = run(downgrade, tmp_path)
+    assert refused.returncode != 0
+    assert "papers metadata contains NULL; rollback refused" in refused.stderr
+    assert clickhouse_local(f"{upgrade}{stored}", tmp_path) == before
+
+
+@needs_clickhouse
 @pytest.mark.parametrize("whole_journal_null", [False, True])
 def test_papers_journal_upgrade_and_safe_rollback(tmp_path: Path, whole_journal_null: bool) -> None:
     migration = MIGRATIONS / "00012_make_papers_journal_name_nullable.sql"

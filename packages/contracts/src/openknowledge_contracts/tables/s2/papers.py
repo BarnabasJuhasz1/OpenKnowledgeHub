@@ -24,15 +24,15 @@ PAPERS = DatasetContract(
         [
             required("corpusid", pa.uint64()),
             required("externalids", string_map(nullable_values=True)),
-            required("url", pa.string()),
-            required("title", pa.string()),
-            required(
+            optional("url", pa.string()),
+            optional("title", pa.string()),
+            optional(
                 "authors",
                 list_of(
                     struct_of(optional("authorId", pa.string()), required("name", pa.string()))
                 ),
             ),
-            required("venue", pa.string()),
+            optional("venue", pa.string()),
             optional("publicationvenueid", pa.string()),
             optional("year", pa.int16()),
             required("referencecount", pa.uint32()),

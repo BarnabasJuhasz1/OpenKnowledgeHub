@@ -26,7 +26,7 @@ from openknowledge_adapters.clickhouse.load_sql import (
 from openknowledge_contracts.tables import PROVENANCE, DatasetContract
 from openknowledge_contracts.tables.clickhouse import NULL_FLAG_SUFFIX, table_columns
 from openknowledge_contracts.tables.fields import ArrowField, fields_of
-from openknowledge_contracts.tables.s2 import AUTHORS, CONTRACTS, PUBLICATION_VENUES
+from openknowledge_contracts.tables.s2 import AUTHORS, CONTRACTS, PAPERS, PUBLICATION_VENUES
 from tests.clickhouse_local import (
     MIGRATIONS,
     clickhouse_local,
@@ -356,22 +356,44 @@ def test_an_upsert_stops_at_a_refused_record(contract: DatasetContract, tmp_path
 
 @needs_clickhouse
 @pytest.mark.parametrize("missing", [False, True], ids=["null", "missing"])
-def test_unknown_count_requires_the_nullable_migration(missing: bool, tmp_path: Path) -> None:
-    record = accepted(AUTHORS)[1]
+@pytest.mark.parametrize(
+    "contract, field, migration_name, error",
+    [
+        (AUTHORS, "papercount", "00011_make_authors_papercount_nullable.sql", "Code: 349."),
+        (
+            PAPERS,
+            "url",
+            "00013_make_papers_metadata_nullable.sql",
+            "No such column authors_is_null",
+        ),
+    ],
+    ids=["authors", "papers"],
+)
+def test_unknown_value_requires_the_nullable_migration(
+    contract: DatasetContract,
+    field: str,
+    migration_name: str,
+    error: str,
+    missing: bool,
+    tmp_path: Path,
+) -> None:
+    record = accepted(contract)[0]
+    record[field] = None
     if missing:
-        del record["papercount"]
+        del record[field]
     source = gz(tmp_path / "part-0.gz", [json.dumps(record)])
-    migration = MIGRATIONS / "00011_make_authors_papercount_nullable.sql"
+    migration = MIGRATIONS / migration_name
     clickhouse_local(f"{up()}\n{section(migration, 'Down')}", tmp_path)
-    insert = upsert_query(AUTHORS, "file")
+    insert = upsert_query(contract, "file")
     rejected = run(insert, tmp_path, **params(source))
-    assert "Code: 349." in rejected.stderr
+    assert rejected.returncode != 0
+    assert error in rejected.stderr
     assert clickhouse_local(
         f"{section(migration, 'Up')}\n{insert};\n"
-        "SELECT papercount FROM authors FINAL FORMAT JSONEachRow;",
+        f"SELECT {field} FROM {contract.table} FINAL FORMAT JSONEachRow;",
         tmp_path,
         **params(source),
-    ) == [{"papercount": None}]
+    ) == [{field: None}]
 
 
 @needs_clickhouse
