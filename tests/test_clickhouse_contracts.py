@@ -113,18 +113,24 @@ def test_authors_papercount_upgrade_preserves_counts_and_refuses_lossy_rollback(
     migration = MIGRATIONS / "00011_make_authors_papercount_nullable.sql"
     upgrade, downgrade = section(migration, "Up"), section(migration, "Down")
     existing = [
-        {"authorid": "1", "papercount": 0},
-        {"authorid": "2", "papercount": 4294967295},
+        {"authorid": "1", "papercount": 0, "citationcount": 7, "hindex": 2},
+        {"authorid": "2", "papercount": 4294967295, "citationcount": 9, "hindex": 3},
     ]
-    select = "SELECT authorid, papercount FROM authors ORDER BY authorid FORMAT JSONEachRow;"
+    select = (
+        "SELECT authorid, papercount, citationcount, hindex FROM authors "
+        "ORDER BY authorid FORMAT JSONEachRow;"
+    )
     assert (
         clickhouse_local(
             f"""
         {section(MIGRATIONS / "00005_create_authors.sql", "Up")}
-        INSERT INTO authors (authorid, papercount) VALUES ('1', 0), ('2', 4294967295);
+        INSERT INTO authors (authorid, papercount, citationcount, hindex)
+        VALUES ('1', 0, 7, 2), ('2', 4294967295, 9, 3);
         {upgrade}
         {upgrade}
         {downgrade}
+        ALTER TABLE authors MODIFY COLUMN papercount
+        DEFAULT toUInt32(throwIf(1, 'interrupted rollback'));
         {upgrade}
         {select}
         """,
@@ -133,13 +139,18 @@ def test_authors_papercount_upgrade_preserves_counts_and_refuses_lossy_rollback(
         == existing
     )
     clickhouse_local("INSERT INTO authors (authorid, papercount) VALUES ('3', NULL);", tmp_path)
-    assert run(downgrade, tmp_path).returncode != 0
-    assert clickhouse_local(select, tmp_path) == [*existing, {"authorid": "3", "papercount": None}]
+    refused = run(downgrade, tmp_path)
+    assert refused.returncode != 0
+    assert "authors.papercount contains NULL; rollback refused" in refused.stderr
+    assert clickhouse_local(select, tmp_path) == [
+        *existing,
+        {"authorid": "3", "papercount": None, "citationcount": 0, "hindex": 0},
+    ]
     assert clickhouse_local(
-        "SELECT type FROM system.columns WHERE database = currentDatabase() "
+        "SELECT type, default_kind FROM system.columns WHERE database = currentDatabase() "
         "AND table = 'authors' AND name = 'papercount' FORMAT JSONEachRow;",
         tmp_path,
-    ) == [{"type": "Nullable(UInt32)"}]
+    ) == [{"type": "Nullable(UInt32)", "default_kind": ""}]
 
 
 @needs_clickhouse

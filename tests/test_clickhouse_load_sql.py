@@ -301,10 +301,14 @@ def params(source: Path) -> dict[str, str]:
 def load(contract: DatasetContract, workdir: Path, lines: list[str]) -> list[dict[str, Any]]:
     workdir.mkdir()
     source = gz(workdir / "part-0.gz", lines)
+    columns = ", ".join(
+        c.name for c in table_columns(contract) if not (c.materialized or c.default)
+    )
     sql = f"""
-        {migration(contract)}
+        {up()}
         {upsert_query(contract, "file")};
-        SELECT * FROM {contract.table} ORDER BY {", ".join(contract.key)} FORMAT JSONEachRow;
+        SELECT {columns} FROM {contract.table}
+        ORDER BY {", ".join(contract.key)} FORMAT JSONEachRow;
     """
     loaded = clickhouse_local(sql, workdir / "db", **params(source))
     for field in fields_of(contract.source):
