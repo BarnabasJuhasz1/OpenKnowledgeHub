@@ -301,6 +301,8 @@ def _insert(
     )
     return (
         f"INSERT INTO {_identifier(contract.table)} ({columns})\n"
+        # Refuse an unmigrated destination rather than checkpointing coerced NULLs.
+        "SETTINGS insert_null_as_default = 0\n"
         f"{_with(fields)}"
         f"SELECT\n    {selected}\n"
         f"FROM {_source(source)}\n"

@@ -26,7 +26,7 @@ from openknowledge_core.ingestion import (
     PinnedDataset,
 )
 from openknowledge_pipelines import cli
-from tests.clickhouse_local import up
+from tests.clickhouse_local import MIGRATIONS, section, up
 from tests.fakes.ports import PRODUCER, FakeSource, clock
 
 E2E = Path(__file__).parent / "e2e"
@@ -207,8 +207,26 @@ def test_nullable_metadata_loads_and_replays(
     ports: dict[str, str], dataset: str, count: int
 ) -> None:
     lines = FIXTURE.with_name(f"{dataset}.jsonl").read_text().splitlines()
+    if dataset == "authors":
+        # Fail on the unknown count before any other object can be checkpointed.
+        lines.reverse()
     archive(ports, "2026-10-13", lines, dataset)
     args = ("load", "--release", "2026-10-13", "--dataset", dataset)
+    if dataset == "authors":
+        migration = MIGRATIONS / "00011_make_authors_papercount_nullable.sql"
+        query(ports, "ALTER TABLE authors MODIFY COLUMN papercount UInt32 DEFAULT 0")
+        query(ports, "ALTER TABLE authors MODIFY COLUMN papercount REMOVE DEFAULT")
+        try:
+            code, output = okp(ports, *args)
+            assert code == 1
+            assert "code 349" in output
+            assert query(ports, "SELECT count() FROM loads WHERE target = 'authors'") == "0\n"
+            assert query(ports, "SELECT count() FROM applied WHERE target = 'authors'") == "0\n"
+        finally:
+            # The migration has two statements; the HTTP endpoint accepts one at a time.
+            for statement in section(migration, "Up").split(";"):
+                if statement.strip():
+                    query(ports, statement)
     first = ran(ports, *args)
     assert (first["loaded"], first["live_rows"]) == (count, count)
     again = ran(ports, *args)

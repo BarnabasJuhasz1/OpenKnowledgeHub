@@ -26,11 +26,13 @@ from openknowledge_adapters.clickhouse.load_sql import (
 from openknowledge_contracts.tables import PROVENANCE, DatasetContract
 from openknowledge_contracts.tables.clickhouse import NULL_FLAG_SUFFIX, table_columns
 from openknowledge_contracts.tables.fields import ArrowField, fields_of
-from openknowledge_contracts.tables.s2 import CONTRACTS, PUBLICATION_VENUES
+from openknowledge_contracts.tables.s2 import AUTHORS, CONTRACTS, PUBLICATION_VENUES
 from tests.clickhouse_local import (
+    MIGRATIONS,
     clickhouse_local,
     needs_clickhouse,
     run,
+    section,
     up,
 )
 
@@ -350,6 +352,26 @@ def test_an_upsert_stops_at_a_refused_record(contract: DatasetContract, tmp_path
     sql = f"{up()}\n{upsert_query(contract, 'file')};"
     result = run(sql, tmp_path, **params(source))
     assert f"Code: 395. DB::Exception: {case.problem}: " in result.stderr
+
+
+@needs_clickhouse
+@pytest.mark.parametrize("missing", [False, True], ids=["null", "missing"])
+def test_unknown_count_requires_the_nullable_migration(missing: bool, tmp_path: Path) -> None:
+    record = accepted(AUTHORS)[1]
+    if missing:
+        del record["papercount"]
+    source = gz(tmp_path / "part-0.gz", [json.dumps(record)])
+    migration = MIGRATIONS / "00011_make_authors_papercount_nullable.sql"
+    clickhouse_local(f"{up()}\n{section(migration, 'Down')}", tmp_path)
+    insert = upsert_query(AUTHORS, "file")
+    rejected = run(insert, tmp_path, **params(source))
+    assert "Code: 349." in rejected.stderr
+    assert clickhouse_local(
+        f"{section(migration, 'Up')}\n{insert};\n"
+        "SELECT papercount FROM authors FINAL FORMAT JSONEachRow;",
+        tmp_path,
+        **params(source),
+    ) == [{"papercount": None}]
 
 
 @needs_clickhouse
