@@ -249,12 +249,14 @@ class Duplicates(BaseModel):
     """Keys that repeat across a release's objects.
 
     ``identical_rows`` counts the records beyond the first of keys whose records hold the same
-    values; every other repeated key conflicts.
+    values. ``enriched_rows`` counts compatible null-context variants of citations
+    replaced by a non-null context variant; all other differences conflict.
     """
 
     model_config = ConfigDict(frozen=True)
 
     identical_rows: NonNegativeInt
+    enriched_rows: NonNegativeInt = 0
     conflicting_keys: NonNegativeInt
     examples: tuple[str, ...]
 
@@ -281,6 +283,7 @@ class PreparedDiff(BaseModel):
     updates: PreparedLoad | None
     deletes: PreparedLoad | None
     identical_duplicates: NonNegativeInt
+    enriched_duplicates: NonNegativeInt = 0
 
     @property
     def parts(self) -> tuple[PreparedLoad, ...]:

@@ -107,7 +107,8 @@ def duplicates_query(contract: DatasetContract, objects: int, source: Source = "
 
     Records repeat identically when every stored value is the same, whatever the key order or
     spacing of their lines. The values are hashed as one tuple, because a null argument would
-    make the hash null and ``min`` and ``max`` skip it.
+    make the hash null and ``min`` and ``max`` skip it. Citations use 128-bit tuple fingerprints
+    with a separate, narrowly defined context-enrichment rule.
     """
     query = _Query(contract)
     fields = fields_of(contract.source)
@@ -116,6 +117,8 @@ def duplicates_query(contract: DatasetContract, objects: int, source: Source = "
     lines = "\n    UNION ALL\n    ".join(
         f"SELECT line FROM {_source(source, f'source_file_{index}')}" for index in range(objects)
     )
+    if contract.name == "citations":
+        return _citation_duplicates(fields, values, key, lines)
     records = (
         f"{_with(fields)}SELECT tuple({key}) AS record_key, "
         f"cityHash64(tuple({', '.join(values.values())})) AS record_hash\n"
@@ -128,6 +131,44 @@ def duplicates_query(contract: DatasetContract, objects: int, source: Source = "
     return (
         "SELECT\n"
         "    sumIf(n - 1, NOT conflicting) AS identical_rows,\n"
+        "    countIf(conflicting) AS conflicting_keys,\n"
+        f"    groupArrayIf({EXAMPLES})(toString(record_key), conflicting) AS examples\n"
+        f"FROM (\n{keys}\n)"
+    )
+
+
+def _citation_duplicates(
+    fields: Sequence[ArrowField], values: dict[str, str], key: str, lines: str
+) -> str:
+    """Only missing contexts may yield to one agreed non-null value of the same citation.
+
+    Independent 128-bit fingerprints keep aggregate state fixed-size even for singleton keys.
+    Nullable values stay inside tuples so aggregates cannot silently skip them. As with the
+    existing hashed comparison, collisions could theoretically hide a conflict.
+    """
+    other = ", ".join(
+        value for name, value in values.items() if name not in ("contexts", "contexts_is_null")
+    )
+    records = (
+        f"{_with(fields)}SELECT tuple({key}) AS record_key,\n"
+        f"    sipHash128(tuple({other})) AS other_hash,\n"
+        f"    sipHash128(tuple({values['contexts']})) AS contexts_hash,\n"
+        f"    {values['contexts_is_null']} AS contexts_null\n"
+        f"FROM (\n    {lines}\n)"
+    )
+    keys = (
+        "SELECT record_key, count() AS n, countIf(contexts_null) AS nulls,\n"
+        "    min(other_hash) != max(other_hash)\n"
+        "        OR minIf(contexts_hash, NOT contexts_null)\n"
+        "            != maxIf(contexts_hash, NOT contexts_null)\n"
+        "        AS conflicting,\n"
+        "    (nulls > 0 AND nulls < n) AS enriched\n"
+        f"FROM (\n{records}\n) GROUP BY record_key HAVING n > 1"
+    )
+    return (
+        "SELECT\n"
+        "    sumIf(n - 1 - enriched, NOT conflicting) AS identical_rows,\n"
+        "    countIf(enriched AND NOT conflicting) AS enriched_rows,\n"
         "    countIf(conflicting) AS conflicting_keys,\n"
         f"    groupArrayIf({EXAMPLES})(toString(record_key), conflicting) AS examples\n"
         f"FROM (\n{keys}\n)"

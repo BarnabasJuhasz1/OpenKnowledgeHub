@@ -9,7 +9,7 @@ import os
 import shutil
 import socket
 import subprocess
-from collections.abc import Awaitable, Callable, Iterator
+from collections.abc import Awaitable, Callable, Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -23,7 +23,11 @@ from openknowledge_core.ingestion import (
     DownloadDataset,
     DownloadDatasetService,
     DownloadDiff,
+    LoadDatasetResult,
+    LoadDatasetService,
+    LoadOutcome,
     PinnedDataset,
+    PreparedLoad,
 )
 from openknowledge_pipelines import cli
 from tests.clickhouse_local import MIGRATIONS, section, up
@@ -272,6 +276,46 @@ def test_a_key_repeated_identically_is_counted(ports: dict[str, str]) -> None:
     archive(ports, "2026-10-20", [json.dumps(record), json.dumps(dict(reversed(record.items())))])
     result = loaded(ports, "2026-10-20")
     assert (result["live_rows"], result["identical_duplicates"]) == (1, 1)
+
+
+def test_citation_context_overlap_resumes_finalization_from_checkpoints(
+    ports: dict[str, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    release = "2026-10-13"
+    row = {
+        "citationid": 1577791790,
+        "citingcorpusid": 139809936,
+        "citedcorpusid": None,
+        "isinfluential": False,
+        "contexts": ["A representative citation context."],
+        "intents": [["background"]],
+    }
+    # Load the rich row first, so a load-order winner would incorrectly retain null.
+    archive(ports, release, [json.dumps(row), json.dumps({**row, "contexts": None})], "citations")
+    args = ("load", "--release", release, "--dataset", "citations")
+
+    async def interrupted(
+        self: LoadDatasetService, prepared: PreparedLoad, outcomes: Iterable[LoadOutcome]
+    ) -> LoadDatasetResult:
+        raise RuntimeError("simulated interruption before finalization")
+
+    # Only inject the interruption: archive access, inserts, and checkpoints are all real.
+    with monkeypatch.context() as patch:
+        patch.setattr(LoadDatasetService, "finish", interrupted)
+        code, _ = okp(ports, *args)
+        assert code == 1
+    assert query(ports, "SELECT count() FROM loads FINAL WHERE target = 'citations'") == "2\n"
+    assert query(ports, "SELECT count() FROM applied WHERE target = 'citations'") == "0\n"
+    result = ran(ports, *args)
+    assert (result["loaded"], result["already_loaded"], result["live_rows"]) == (0, 2, 1)
+    assert (result["identical_duplicates"], result["enriched_duplicates"]) == (0, 1)
+    query(ports, "OPTIMIZE TABLE citations FINAL")
+    records = query(
+        ports, "SELECT contexts, contexts_is_null FROM citations FINAL FORMAT JSONEachRow"
+    )
+    assert [json.loads(line) for line in records.splitlines()] == [
+        {"contexts": row["contexts"], "contexts_is_null": False}
+    ]
 
 
 def test_a_diff_upserts_and_deletes_and_is_repeatable(ports: dict[str, str]) -> None:

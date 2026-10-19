@@ -26,7 +26,13 @@ from openknowledge_adapters.clickhouse.load_sql import (
 from openknowledge_contracts.tables import PROVENANCE, DatasetContract
 from openknowledge_contracts.tables.clickhouse import NULL_FLAG_SUFFIX, table_columns
 from openknowledge_contracts.tables.fields import ArrowField, fields_of
-from openknowledge_contracts.tables.s2 import AUTHORS, CONTRACTS, PAPERS, PUBLICATION_VENUES
+from openknowledge_contracts.tables.s2 import (
+    AUTHORS,
+    CITATIONS,
+    CONTRACTS,
+    PAPERS,
+    PUBLICATION_VENUES,
+)
 from tests.clickhouse_local import (
     MIGRATIONS,
     clickhouse_local,
@@ -504,7 +510,160 @@ def test_a_repeated_key_is_identical_or_conflicting(
         **duplicates_parameters([str(file) for file in files]),
     )
     key = first[contract.key[0]]
-    assert found == [{"identical_rows": 2, "conflicting_keys": 1, "examples": [f"({key!r})"]}]
+    expected = {"identical_rows": 2, "conflicting_keys": 1, "examples": [f"({key!r})"]}
+    if contract.name == "citations":
+        expected["enriched_rows"] = 0
+    assert found == [expected]
+
+
+@needs_clickhouse
+def test_citation_duplicate_comparison_preserves_nulls_arrays_and_identity(tmp_path: Path) -> None:
+    """Only contexts may enrich a citation; other stored values and nulls remain exact."""
+    baseline: dict[str, Json] = {
+        "citationid": 1577791790,
+        "citingcorpusid": 139809936,
+        "citedcorpusid": None,
+        "isinfluential": False,
+        "contexts": None,
+        "intents": [["background"]],
+    }
+    # The first two enrich contexts. Every other change must still fail.
+    changes: list[dict[str, Json]] = [
+        {"contexts": ["A representative citation context."]},
+        {"contexts": []},
+        {"citedcorpusid": 0},
+        {"citingcorpusid": 139809937},
+        {"isinfluential": True},
+        {"intents": None},
+        {"intents": []},
+        {"intents": [None]},
+        {"intents": [["methodology"]]},
+    ]
+    first = [dict(baseline, citationid=1577791790 + i) for i in range(len(changes))]
+    second = [{**record, **change} for record, change in zip(first, changes, strict=True)]
+    # Replays of either variant are identical repeats; enrichment counts one lost variant.
+    first.extend([first[0], first[0]])
+    second.extend([second[0], second[0]])
+    # Missing nullable fields and explicit null store identically; JSON order is immaterial.
+    identical = dict(baseline, citationid=6011687425, intents=[None])
+    omitted = {name: value for name, value in identical.items() if value is not None}
+    first.append(identical)
+    second.append(dict(reversed(omitted.items())))
+    # Distinct citation IDs may share endpoints and must remain distinct.
+    second.append(dict(baseline, citationid=6011687426))
+    files = [
+        gz(tmp_path / f"part-{i}.gz", [json.dumps(record) for record in records])
+        for i, records in enumerate((first, second))
+    ]
+    found = clickhouse_local(
+        duplicates_query(CITATIONS, len(files), "file") + "\nFORMAT JSONEachRow",
+        tmp_path,
+        **duplicates_parameters([str(file) for file in files]),
+    )[0]
+    assert found["identical_rows"] == 5
+    assert found["enriched_rows"] == 2
+    assert found["conflicting_keys"] == len(changes) - 2
+    assert set(found["examples"]) == {
+        f"({record['citationid']})" for record in first[2 : len(changes)]
+    }
+
+
+@needs_clickhouse
+@pytest.mark.parametrize("other", [[], ["b", "a"], ["a"]])
+def test_citation_enrichment_refuses_different_nonnull_contexts(
+    tmp_path: Path, other: list[str]
+) -> None:
+    row = {**accepted(CITATIONS)[0], "contexts": ["a", "b"]}
+    source = gz(
+        tmp_path / "conflicts.gz",
+        [json.dumps({**row, "contexts": contexts}) for contexts in (None, ["a", "b"], other)],
+    )
+    found = clickhouse_local(
+        duplicates_query(CITATIONS, 1, "file") + " FORMAT JSONEachRow",
+        tmp_path,
+        **duplicates_parameters([str(source)]),
+    )[0]
+    assert (found["conflicting_keys"], found["enriched_rows"], found["identical_rows"]) == (1, 0, 0)
+
+
+@needs_clickhouse
+@pytest.mark.parametrize("reverse", [False, True])
+def test_citation_context_versions_survive_merges_replays_releases_and_deletes(
+    tmp_path: Path, reverse: bool
+) -> None:
+    row: dict[str, Json] = {**accepted(CITATIONS)[0], "contexts": ["a context"], "intents": [None]}
+    db = tmp_path / "db"
+    clickhouse_local(up(), db)
+
+    def insert(record: dict[str, Json], release: str, *, delete: bool = False) -> None:
+        source = gz(tmp_path / "rows.gz", [json.dumps(record)])
+        sql = delete_query(CITATIONS, "file") if delete else upsert_query(CITATIONS, "file")
+        clickhouse_local(
+            sql,
+            db,
+            **query_parameters(source_file=str(source), release=release, source_object=OBJECT),
+        )
+
+    null = {**row, "contexts": None}
+    records = [row, null] if reverse else [null, row]
+    for record in records * 2:
+        insert(record, RELEASE)
+    clickhouse_local("OPTIMIZE TABLE citations FINAL", db)
+    select = "SELECT contexts, contexts_is_null FROM citations FINAL FORMAT JSONEachRow"
+    assert clickhouse_local(select, db) == [{"contexts": ["a context"], "contexts_is_null": False}]
+    # A later release can deliberately clear the field. Older enrichment cannot resurrect it.
+    insert(null, "2026-10-13")
+    insert(row, RELEASE)
+    assert clickhouse_local(select, db) == [{"contexts": [], "contexts_is_null": True}]
+    key = {"citationid": row["citationid"]}
+    insert(key, "2026-10-13", delete=True)
+    insert(row, "2026-10-13")
+    assert clickhouse_local(select, db) == []
+    insert(row, "2026-10-20")
+    assert clickhouse_local(select, db) == [{"contexts": ["a context"], "contexts_is_null": False}]
+
+
+@needs_clickhouse
+def test_citation_version_migration_requires_rebuild_and_refuses_populated_rollback(
+    tmp_path: Path,
+) -> None:
+    migration = MIGRATIONS / "00014_order_citation_context_enrichment.sql"
+    upgrade, downgrade = section(migration, "Up"), section(migration, "Down")
+    legacy = section(MIGRATIONS / "00007_create_citations.sql", "Up")
+    db = tmp_path / "db"
+    clickhouse_local("CREATE DATABASE rebuild ENGINE = Atomic", db)
+
+    def query(sql: str) -> list[dict[str, Any]]:
+        return clickhouse_local("USE rebuild;" + sql, db)
+
+    query(
+        legacy
+        + section(MIGRATIONS / "00008_create_loads.sql", "Up")
+        + "INSERT INTO citations (citationid, source_release) VALUES (1, '2026-10-13');",
+    )
+    assert "rebuild an empty replacement" in run("USE rebuild;" + upgrade, db).stderr
+    # A rebuild preserves the old table; the new UUID invalidates its shard checkpoints.
+    old_uuid = query(
+        "SELECT uuid FROM system.tables WHERE database = currentDatabase() "
+        "AND name = 'citations' FORMAT JSONEachRow"
+    )[0]["uuid"]
+    query(
+        "INSERT INTO loads (target, target_uuid) "
+        f"VALUES ('citations', '{old_uuid}'); TRUNCATE TABLE citations;"
+    )
+    assert "rebuild an empty replacement" in run("USE rebuild;" + upgrade, db).stderr
+    query("INSERT INTO citations (citationid, source_release) VALUES (1, '2026-10-13');")
+    query("RENAME TABLE citations TO citations_preserved;" + legacy + upgrade)
+    new_uuid = query(
+        "SELECT uuid FROM system.tables WHERE database = currentDatabase() "
+        "AND name = 'citations' FORMAT JSONEachRow"
+    )[0]["uuid"]
+    assert new_uuid != old_uuid
+    query(
+        "INSERT INTO citations (citationid, source_release) VALUES (1, '2026-10-13');" + upgrade,
+    )
+    assert "rollback requires an empty replacement" in run("USE rebuild;" + downgrade, db).stderr
+    assert query("SELECT count() AS n FROM citations_preserved FORMAT JSONEachRow") == [{"n": 1}]
 
 
 @contracts
