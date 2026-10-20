@@ -55,7 +55,8 @@ class ClickHouseTables:
             if not version or version[0]["default_expression"] != CITATION_VERSION:
                 raise TableRejected(
                     "citations needs the context-enrichment version migration; a populated "
-                    "legacy table must be preserved and rebuilt with a new UUID from raw objects"
+                    "legacy table must be preserved and swapped by hand, as migration 00014 "
+                    "describes"
                 )
         return TableState(
             name=contract.table,

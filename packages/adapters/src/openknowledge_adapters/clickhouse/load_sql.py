@@ -107,8 +107,8 @@ def duplicates_query(contract: DatasetContract, objects: int, source: Source = "
 
     Records repeat identically when every stored value is the same, whatever the key order or
     spacing of their lines. The values are hashed as one tuple, because a null argument would
-    make the hash null and ``min`` and ``max`` skip it. Citations use 128-bit tuple fingerprints
-    with a separate, narrowly defined context-enrichment rule.
+    make the hash null and ``min`` and ``max`` skip it. Citations hash their contexts apart from
+    the other values, for a narrowly defined context-enrichment rule.
     """
     query = _Query(contract)
     fields = fields_of(contract.source)
@@ -142,17 +142,17 @@ def _citation_duplicates(
 ) -> str:
     """Only missing contexts may yield to one agreed non-null value of the same citation.
 
-    Independent 128-bit fingerprints keep aggregate state fixed-size even for singleton keys.
-    Nullable values stay inside tuples so aggregates cannot silently skip them. As with the
-    existing hashed comparison, collisions could theoretically hide a conflict.
+    Hashes only ever compare records of one key, so 64 bits suffice and keep the per-key state
+    of a full release small. Nullable values stay inside tuples so aggregates cannot silently
+    skip them. As with the other datasets, a collision could theoretically hide a conflict.
     """
     other = ", ".join(
         value for name, value in values.items() if name not in ("contexts", "contexts_is_null")
     )
     records = (
         f"{_with(fields)}SELECT tuple({key}) AS record_key,\n"
-        f"    sipHash128(tuple({other})) AS other_hash,\n"
-        f"    sipHash128(tuple({values['contexts']})) AS contexts_hash,\n"
+        f"    cityHash64(tuple({other})) AS other_hash,\n"
+        f"    cityHash64(tuple({values['contexts']})) AS contexts_hash,\n"
         f"    {values['contexts_is_null']} AS contexts_null\n"
         f"FROM (\n    {lines}\n)"
     )

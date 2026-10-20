@@ -249,8 +249,8 @@ class Duplicates(BaseModel):
     """Keys that repeat across a release's objects.
 
     ``identical_rows`` counts the records beyond the first of keys whose records hold the same
-    values. ``enriched_rows`` counts compatible null-context variants of citations
-    replaced by a non-null context variant; all other differences conflict.
+    values. ``enriched_rows`` counts citation keys whose null contexts yield to one agreed
+    non-null list; their other surplus records count as identical. All other differences conflict.
     """
 
     model_config = ConfigDict(frozen=True)

@@ -641,7 +641,7 @@ def test_citation_version_migration_requires_rebuild_and_refuses_populated_rollb
         + section(MIGRATIONS / "00008_create_loads.sql", "Up")
         + "INSERT INTO citations (citationid, source_release) VALUES (1, '2026-10-13');",
     )
-    assert "rebuild an empty replacement" in run("USE rebuild;" + upgrade, db).stderr
+    assert "swap the populated legacy table" in run("USE rebuild;" + upgrade, db).stderr
     # A rebuild preserves the old table; the new UUID invalidates its shard checkpoints.
     old_uuid = query(
         "SELECT uuid FROM system.tables WHERE database = currentDatabase() "
@@ -651,7 +651,7 @@ def test_citation_version_migration_requires_rebuild_and_refuses_populated_rollb
         "INSERT INTO loads (target, target_uuid) "
         f"VALUES ('citations', '{old_uuid}'); TRUNCATE TABLE citations;"
     )
-    assert "rebuild an empty replacement" in run("USE rebuild;" + upgrade, db).stderr
+    assert "swap the populated legacy table" in run("USE rebuild;" + upgrade, db).stderr
     query("INSERT INTO citations (citationid, source_release) VALUES (1, '2026-10-13');")
     query("RENAME TABLE citations TO citations_preserved;" + legacy + upgrade)
     new_uuid = query(
