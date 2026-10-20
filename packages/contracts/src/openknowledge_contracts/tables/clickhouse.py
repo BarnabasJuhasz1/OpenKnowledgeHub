@@ -53,6 +53,9 @@ class Column:
 
 
 _VERSION = Column(VERSION, "UInt64", materialized="(toUInt64(source_release) * 2) + is_deleted")
+CITATION_VERSION = (
+    "((toUInt64(source_release) * 4) + (toUInt64(is_deleted) * 2)) + toUInt64(NOT contexts_is_null)"
+)
 _REMOVED = Column(REMOVED, "Bool", default="false")
 
 
@@ -67,7 +70,11 @@ def table_columns(contract: DatasetContract) -> tuple[Column, ...]:
         columns.append(Column(field.name, renderer.render(field.type, field.nullable, field.name)))
         if field.nullable and _is_composite(field.type):
             columns.append(Column(field.name + NULL_FLAG_SUFFIX, "Bool"))
-    columns.append(_VERSION)
+    columns.append(
+        Column(VERSION, "UInt64", materialized=CITATION_VERSION)
+        if contract.name == "citations"
+        else _VERSION
+    )
     if contract.updates == "snapshot":
         columns.append(_REMOVED)
     names = [column.name for column in columns]

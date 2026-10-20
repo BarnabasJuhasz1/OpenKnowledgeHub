@@ -128,7 +128,11 @@ separately and preserve the load outcome.
 
 Each loaded object leaves a row in `loads`.
 A rerun skips an object whose row matches its generation, its checksum, the table and the load SQL, so a table created again or emptied loads everything again.
-Apply migrations 00011 and 00012 before starting loads with the new image. Inserts reject NULL into non-nullable columns. The shared insert safety setting changes upsert and delete SQL hashes for all seven supported datasets. Eligible base files for all seven and diff update/delete files for the six datasets with diffs replay when next loaded, including files already loaded with the previous image. Allow an idle window for the 00012 journal rewrite and these replays.
+Apply migrations 00011 to 00014 before starting loads with the new image. Inserts reject NULL into non-nullable columns. The shared insert safety setting changes upsert and delete SQL hashes for all seven supported datasets. Eligible base files for all seven and diff update/delete files for the six datasets with diffs replay when next loaded, including files already loaded with the previous image. Allow an idle window for the 00012 journal rewrite and these replays.
+Migration 00014 orders citation versions by release, then deletion, then whether `contexts` is present, so a record with contexts beats the same record without.
+A citations load refuses until 00014 is applied, and 00014 refuses while `citations` holds rows or checkpoints from the old order, whose merges may have dropped contexts.
+To get past it, stop citation loads, run `RENAME TABLE citations TO citations_legacy`, run the Up statement of 00007 to create an empty table with a new UUID, apply the migrations and load the base release again from all its raw objects.
+The old checkpoints no longer count and stay in place. Drop `citations_legacy` once that load passes its checks.
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.
 

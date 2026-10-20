@@ -37,6 +37,7 @@ from openknowledge_core.ingestion.errors import (
 )
 from openknowledge_core.ingestion.models import (
     AppliedRelease,
+    Duplicates,
     LoadObject,
     LoadOutcome,
     LoadRecord,
@@ -128,6 +129,7 @@ class LoadDatasetService:
             raise ManifestInvalid(f"{path} is the inventory of another diff or dataset")
         updates = await self._part(command, table, "updates", len(inventory.updates))
         deletes = await self._part(command, table, "deletes", len(inventory.deletes))
+        duplicates = None if updates is None else await self._repeated(updates)
         return PreparedDiff(
             from_release=command.from_release,
             release_id=command.release,
@@ -136,7 +138,8 @@ class LoadDatasetService:
             inventory_path=path,
             updates=updates,
             deletes=deletes,
-            identical_duplicates=0 if updates is None else await self._repeated(updates),
+            identical_duplicates=0 if duplicates is None else duplicates.identical_rows,
+            enriched_duplicates=0 if duplicates is None else duplicates.enriched_rows,
         )
 
     async def load_object(self, prepared: PreparedLoad, entry: ManifestEntry) -> LoadOutcome:
@@ -193,14 +196,18 @@ class LoadDatasetService:
     ) -> LoadDatasetResult:
         """A base release holds each key once, so its live rows must equal its records.
 
-        Only when they differ are the objects read again, to tell identical repeats, which are
-        counted, from conflicting ones. Only a release that passes flags the keys it no longer
-        lists in a snapshot table and is recorded as the release the table holds.
+        Only when they differ are the objects read again, to distinguish identical repeats and
+        compatible citation context enrichments from conflicts. Only a release that passes flags
+        the keys it no longer lists in a snapshot table and is recorded as the release it holds.
         """
         manifest, table = prepared.manifest, prepared.table
         records = _record_count(prepared)
         live = await self._tables.live_rows(manifest.dataset, manifest.release_id)
-        identical = 0 if live == records else await self._identical(prepared, records, live)
+        duplicates = (
+            Duplicates(identical_rows=0, conflicting_keys=0, examples=())
+            if live == records
+            else await self._reconcile(prepared, records, live)
+        )
         removed = 0
         if table.updates == "snapshot":
             removed = await self._tables.mark_removed(manifest.dataset, manifest.release_id)
@@ -214,7 +221,8 @@ class LoadDatasetService:
             loaded=counts[LoadOutcome.LOADED],
             already_loaded=counts[LoadOutcome.ALREADY_LOADED],
             live_rows=live,
-            identical_duplicates=identical,
+            identical_duplicates=duplicates.identical_rows,
+            enriched_duplicates=duplicates.enriched_rows,
             removed=removed,
             manifest=prepared.manifest_path,
         )
@@ -242,6 +250,7 @@ class LoadDatasetService:
             upserted=_record_count(prepared.updates),
             deleted=_record_count(prepared.deletes),
             identical_duplicates=prepared.identical_duplicates,
+            enriched_duplicates=prepared.enriched_duplicates,
             manifests=tuple(part.manifest_path for part in prepared.parts),
         )
 
@@ -290,19 +299,20 @@ class LoadDatasetService:
         except ValueError:
             raise ManifestInvalid(f"{path} is not a valid {kind.__name__}") from None
 
-    async def _identical(self, prepared: PreparedLoad, records: int, live: int) -> int:
-        """The records that repeat a key with its values, which must be every row not live."""
-        identical = await self._repeated(prepared)
-        if identical != records - live:
+    async def _reconcile(self, prepared: PreparedLoad, records: int, live: int) -> Duplicates:
+        """Every non-live record must be an identical repeat or a context enrichment."""
+        found = await self._repeated(prepared)
+        if found.identical_rows + found.enriched_rows != records - live:
             raise RowCountMismatch(
                 f"{prepared.table.name} holds {live} live rows of {prepared.manifest.release_id}, "
-                f"but {prepared.manifest_path} counts {records} records, and {identical} of them "
-                "repeat a key identically"
+                f"but {prepared.manifest_path} counts {records} records, and "
+                f"{found.identical_rows} of them repeat a key identically "
+                f"with {found.enriched_rows} context enrichments"
             )
-        return identical
+        return found
 
-    async def _repeated(self, prepared: PreparedLoad) -> int:
-        """The records that repeat a key with its values; a key repeated with others fails."""
+    async def _repeated(self, prepared: PreparedLoad) -> Duplicates:
+        """Count compatible repeated keys; incompatible values always fail."""
         manifest, path = prepared.manifest, prepared.manifest_path
         found = await self._tables.duplicates(
             manifest.dataset, [entry.object_ref.path for entry in manifest.entries]
@@ -310,9 +320,12 @@ class LoadDatasetService:
         if found.conflicting_keys:
             raise ConflictingKeys(
                 f"keys repeat in {path} with other values ({found.conflicting_keys}, such as "
-                f"{', '.join(found.examples)}); the row each keeps depends on load order"
+                f"{', '.join(found.examples)}); these values cannot be reconciled safely. "
+                "Release finalization is refused; existing object checkpoints are retained. "
+                "Inspect the archived records for these keys before retrying: replaying the "
+                "same objects cannot resolve conflicting values"
             )
-        return found.identical_rows
+        return found
 
     async def _record(
         self, table: TableState, release: ReleaseId, from_release: ReleaseId | None

@@ -123,6 +123,7 @@ class LoadDatasetResult(BaseModel):
     already_loaded: NonNegativeInt
     live_rows: NonNegativeInt
     identical_duplicates: NonNegativeInt
+    enriched_duplicates: NonNegativeInt = 0
     removed: NonNegativeInt
     manifest: ObjectPath
 
@@ -160,6 +161,7 @@ class LoadDiffResult(BaseModel):
     upserted: NonNegativeInt
     deleted: NonNegativeInt
     identical_duplicates: NonNegativeInt
+    enriched_duplicates: NonNegativeInt = 0
     manifests: tuple[ObjectPath, ...]
 
 

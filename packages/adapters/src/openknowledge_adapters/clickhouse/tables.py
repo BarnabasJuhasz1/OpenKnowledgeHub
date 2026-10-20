@@ -17,6 +17,7 @@ from openknowledge_adapters.clickhouse.load_sql import (
 from openknowledge_contracts.datasets import DatasetName, ReleaseId
 from openknowledge_contracts.manifests import ObjectPath
 from openknowledge_contracts.tables import DatasetContract
+from openknowledge_contracts.tables.clickhouse import CITATION_VERSION
 from openknowledge_contracts.tables.contract import REMOVED
 from openknowledge_contracts.tables.s2 import CONTRACTS
 from openknowledge_core.ingestion.errors import TableRejected
@@ -46,6 +47,17 @@ class ClickHouseTables:
         )
         if not rows:
             raise TableRejected(f"table {contract.table} does not exist; run the migrations")
+        if dataset == "citations":
+            version = await self._client.rows(
+                "SELECT default_expression FROM system.columns "
+                "WHERE database = currentDatabase() AND table = 'citations' AND name = 'version'"
+            )
+            if not version or version[0]["default_expression"] != CITATION_VERSION:
+                raise TableRejected(
+                    "citations needs the context-enrichment version migration; a populated "
+                    "legacy table must be preserved and swapped by hand, as migration 00014 "
+                    "describes"
+                )
         return TableState(
             name=contract.table,
             uuid=rows[0]["uuid"],

@@ -1,7 +1,11 @@
+import json
+
 import httpx
 import pytest
 
 from openknowledge_adapters import clickhouse
+from openknowledge_contracts.tables.clickhouse import CITATION_VERSION
+from openknowledge_core.ingestion import LoadDataset, LoadDatasetService
 from openknowledge_core.ingestion.errors import (
     ContractViolation,
     CredentialRejected,
@@ -9,6 +13,7 @@ from openknowledge_core.ingestion.errors import (
     TableRejected,
     TableUnavailable,
 )
+from tests.fakes.ports import PRODUCER, FakeApplied, FakeStore, clock
 
 CONFIG = clickhouse.ClickHouseConfig.model_validate(
     {
@@ -50,3 +55,38 @@ async def test_errors_map_by_exception_code(
             await ch.tables.live_rows("papers", "2026-10-06")
     assert str(raised.value).startswith(message)
     assert "hunter2" not in str(raised.value)
+
+
+@pytest.mark.parametrize("current", [False, True])
+async def test_citations_require_enrichment_versions_before_checkpoint_reuse(current: bool) -> None:
+    queries: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        query = request.content.decode()
+        queries.append(query)
+        if "system.tables" in query:
+            row = {"uuid": "00000000-0000-0000-0000-000000000001", "total_rows": 100}
+        else:
+            assert "system.columns" in query
+            row = {
+                "default_expression": CITATION_VERSION
+                if current
+                else "(toUInt64(source_release) * 2) + is_deleted"
+            }
+        return httpx.Response(200, text=json.dumps(row))
+
+    async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
+        if current:
+            assert (await ch.tables.table("citations")).has_rows
+        else:
+            service = LoadDatasetService(
+                store=FakeStore(),
+                tables=ch.tables,
+                applied=FakeApplied(),
+                producer=PRODUCER,
+                clock=clock,
+            )
+            command = LoadDataset(release="2026-10-13", dataset="citations", bucket="raw")
+            with pytest.raises(TableRejected, match="populated legacy table must be preserved"):
+                await service.prepare(command)
+    assert len(queries) == 2  # No checkpoint lookup, archive scan, or INSERT on legacy versions.

@@ -141,6 +141,29 @@ async def test_keys_repeated_identically_are_counted(store: FakeStore, tables: F
     assert tables.scanned == ["part-0.gz", "part-1.gz"]
 
 
+async def test_context_enrichments_are_counted_separately_and_explain_missing_rows(
+    store: FakeStore, tables: FakeTables
+) -> None:
+    tables.collapsed = 1
+    tables.found = Duplicates(identical_rows=0, enriched_rows=1, conflicting_keys=0, examples=())
+    result = await load(store, tables)
+    assert (result.live_rows, result.identical_duplicates, result.enriched_duplicates) == (50, 0, 1)
+    tables.collapsed = 2
+    with pytest.raises(RowCountMismatch, match="1 context enrichments"):
+        await load(store, tables)
+
+
+@pytest.mark.usefixtures("diff")
+async def test_diff_context_enrichments_are_reported_without_changing_delete_counts(
+    store: FakeStore, tables: FakeTables
+) -> None:
+    applied = FakeApplied()
+    await load(store, tables, applied)
+    tables.found = Duplicates(identical_rows=0, enriched_rows=1, conflicting_keys=0, examples=())
+    result = await load_diff(store, tables, applied)
+    assert (result.identical_duplicates, result.enriched_duplicates, result.deleted) == (0, 1, 1)
+
+
 @pytest.mark.parametrize(
     ("found", "error", "message"),
     [
@@ -168,6 +191,20 @@ async def test_other_repeated_keys_fail_the_load(
     tables.found = found
     with pytest.raises(error, match=message):
         await load(store, tables)
+
+
+async def test_conflicting_finalization_retry_preserves_checkpoints_without_applying(
+    store: FakeStore, tables: FakeTables
+) -> None:
+    applied = FakeApplied()
+    tables.collapsed = 1
+    tables.found = CONFLICT
+    for _ in range(2):
+        with pytest.raises(ConflictingKeys, match="replaying the same objects cannot resolve"):
+            await load(store, tables, applied)
+        assert tables.loads == ["part-0.gz", "part-1.gz"]
+        assert len(tables.records) == 2
+        assert (tables.marked, applied.records) == ([], [])
 
 
 @pytest.mark.parametrize(
