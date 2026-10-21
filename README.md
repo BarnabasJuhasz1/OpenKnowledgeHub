@@ -162,13 +162,13 @@ It reads the live rows of `papers` and `abstracts` from ClickHouse and writes on
 A base pass creates the index with the mapping of `packages/contracts/src/openknowledge_contracts/search/papers.py` when it does not exist, and writes into it when it does.
 A diff pass needs the index to exist and stops with exit 1 otherwise.
 Without `--from-release`, every live paper at the release is written.
-With it, only the papers with a row after that release are written, and a paper deleted since is deleted from the index.
+With it, only the papers with a newer row in `papers` or `abstracts` are written, and a paper deleted since is deleted from the index.
 `--range I/N` writes part I of the corpusid range split into N equal parts, 1/1 by default.
-The range is the smallest to the largest corpusid at the release, so the parts stay the same whatever is loaded between two runs.
+The range is the smallest to the largest corpusid at the release, read again by every part, so run all parts of one pass before the next load.
 The rows of a part are read into memory whole, so pick N so that a part fits, and keep 1/1 for small tables.
-The release must be the one the tables hold, the latest applied, because the tables keep one row per key.
+The release must be the latest applied. The tables keep no history, so a base pass at an older release does not rebuild that release, it drops every paper whose latest row is newer, can carry an older abstract, and still reports success.
 Each document carries the larger `version` of its two rows, and the writes use `external_gte`, which accepts an equal version again.
-A part can be run again at the same or a newer release; a pass at an older release stops with exit 1 at its first version conflict.
+A part can be run again at the same or a newer release. A write below the version the index holds is refused and the pass stops with exit 1.
 It needs `OKP_CLICKHOUSE_URL`, `CLICKHOUSE_PASSWORD`, `OKP_CLICKHOUSE_RAW_BUCKET`, `OKP_OPENSEARCH_URL` and `OPENSEARCH_PASSWORD`.
 Unless set, `OKP_OPENSEARCH_USER` is `hub-indexer`, `OKP_OPENSEARCH_TIMEOUT_SECONDS` is 60 and `OKP_INDEX_SHARDS` is 5.
 An OpenSearch or ClickHouse that cannot be reached ends the run with exit 1 before anything is written.
