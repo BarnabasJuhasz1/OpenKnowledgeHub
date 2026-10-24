@@ -47,7 +47,7 @@ jobs:
   # provenance and sbom stay off, so the pushed digest is the one amd64 manifest that Batch
   # and Docker report back.
   publish:
-    if: github.event_name == 'push' && github.repository == 'OpenKnowledgeOrg/OpenKnowledgeHub'
+    if: github.event_name == 'push' && github.repository == 'OpenKnowledgeOrg/OpenKnowledge'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:

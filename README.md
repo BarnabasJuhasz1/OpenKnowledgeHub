@@ -1,4 +1,4 @@
-# OpenKnowledgeHub
+# OpenKnowledge
 
 ## Semantic Scholar download, locally
 
