@@ -35,15 +35,20 @@ class ClickHouseClient:
         response = await self.post(f"{query} FORMAT JSONEachRow", **parameters)
         return [json.loads(line) for line in response.text.splitlines()]
 
-    async def written(self, query: str, **parameters: str) -> int:
+    async def written(self, query: str, *, query_id: str | None = None, **parameters: str) -> int:
         """Run an insert and return the rows it wrote."""
-        response = await self.post(query, **parameters)
+        response = await self.post(query, query_id=query_id, **parameters)
         return int(json.loads(response.headers["X-ClickHouse-Summary"])["written_rows"])
 
     async def post(
-        self, query: str, *, data: str | None = None, **parameters: str
+        self,
+        query: str,
+        *,
+        data: str | None = None,
+        query_id: str | None = None,
+        **parameters: str,
     ) -> httpx.Response:
-        query_id = str(uuid.uuid4())
+        query_id = query_id or str(uuid.uuid4())
         params = {
             "database": self._database,
             "query_id": query_id,

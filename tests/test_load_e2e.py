@@ -15,7 +15,7 @@ from typing import Any
 
 import httpx
 import pytest
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
 from prefect.testing.utilities import prefect_test_harness
 
 from openknowledge_adapters import gcs
@@ -407,6 +407,18 @@ def test_measured_failure_retains_partial_writes_and_failure(
 
 def test_build_citation_edges(ports: dict[str, str]) -> None:
     query(ports, "TRUNCATE TABLE citations")
+    deployments.ensure_limits()
+    env = {
+        "OKP_CLICKHOUSE_URL": f"http://127.0.0.1:{ports['CLICKHOUSE_PORT']}",
+        "CLICKHOUSE_PASSWORD": "openknowledge",
+        "OKP_CLICKHOUSE_RAW_BUCKET": BUCKET,
+    }
+
+    def build() -> Result:
+        return CliRunner().invoke(cli.main, ["s2", "build-citation-edges"], env=env)
+
+    refused = build()
+    assert refused.exit_code != 0 and "no completed release" in refused.output
     fixture = FIXTURE.with_name("citations.jsonl")
     rows = [json.loads(line) for line in fixture.read_text().splitlines()]
     rows.extend(
@@ -421,21 +433,15 @@ def test_build_citation_edges(ports: dict[str, str]) -> None:
     )
     archive(ports, "2026-10-20", [json.dumps(row) for row in rows], "citations")
     ran(ports, "load", "--release", "2026-10-20", "--dataset", "citations")
-    query(
-        ports,
-        "INSERT INTO citations (citationid, source_release, is_deleted) "
-        "VALUES (6270000003, '2026-10-21', 1)",
-    )
-    deployments.ensure_limits()
-    env = {
-        "OKP_CLICKHOUSE_URL": f"http://127.0.0.1:{ports['CLICKHOUSE_PORT']}",
-        "CLICKHOUSE_PASSWORD": "openknowledge",
-        "OKP_CLICKHOUSE_RAW_BUCKET": BUCKET,
-    }
+    # Keep the delete marker unmerged, so only FINAL can hide the deleted row.
+    query(ports, "SYSTEM STOP MERGES citations")
+    tombstone = "INSERT INTO citations (citationid, source_release, is_deleted) VALUES "
+    query(ports, tombstone + "(6270000003, '2026-10-21', 1)")
     for _ in range(2):
-        result = CliRunner().invoke(cli.main, ["s2", "build-citation-edges"], env=env)
+        result = build()
         assert result.exit_code == 0, result.output
         built = json.loads(result.output.splitlines()[-1])
+        assert built["source_release"] == "2026-10-20"
         for table in ("citation_edges_out", "citation_edges_in"):
             assert built[table]["rows"] == 3
             assert built[table]["seconds"] > 0
@@ -449,4 +455,11 @@ def test_build_citation_edges(ports: dict[str, str]) -> None:
                 {"citing": 101, "cited": 102, "isinfluential": True, "intents": mask}
                 for mask in (0, 2, 7)
             ]
+    edges = "SELECT count() FROM applied WHERE target LIKE 'citation_edges_%' AND release = "
+    assert query(ports, edges + "'2026-10-20'") == "4\n"
+    query(ports, tombstone + "(6270000004, '2026-10-21', 1), (6270000005, '2026-10-21', 1)")
+    shrunk = build()
+    assert shrunk.exit_code != 0 and "no edge tables were swapped" in shrunk.output
+    assert query(ports, "SELECT count() FROM citation_edges_in") == "3\n"
+    query(ports, "SYSTEM START MERGES citations")
     query(ports, "TRUNCATE TABLE citations")

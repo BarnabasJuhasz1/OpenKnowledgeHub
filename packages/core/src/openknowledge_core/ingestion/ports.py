@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
+from datetime import datetime
 from typing import Literal, Protocol
 
 from openknowledge_contracts.datasets import DatasetName, ReleaseId, ReleaseMetadata
-from openknowledge_contracts.manifests import ManifestEntry, ObjectPath, ObjectRef
+from openknowledge_contracts.manifests import ManifestEntry, ObjectPath, ObjectRef, Producer
 from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.families import ArchiveFamily
 from openknowledge_core.ingestion.measurement import LoadSnapshot
@@ -139,4 +140,6 @@ class LoadTelemetry(Protocol):
 
 
 class CitationEdges(Protocol):
-    async def build(self) -> BuildCitationEdgesResult: ...
+    async def build(
+        self, producer: Producer, clock: Callable[[], datetime]
+    ) -> BuildCitationEdgesResult: ...

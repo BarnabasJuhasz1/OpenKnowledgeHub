@@ -191,9 +191,9 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
     assert result.exit_code == 0, result.output
     assert [load_flow_from_entrypoint(str(found.entrypoint)) for found in served] == [
         deployments.s2_sync,
-        deployments.s2_build_citation_edges,
         deployments.s2_load,
         deployments.s2_load_diff,
+        deployments.s2_build_citation_edges,
         deployments.s2_batch_download,
         deployments.s2_batch_download_diff,
         deployments.s2_batch_download_fulltext,

@@ -137,7 +137,13 @@ Migration 00015 adds `citation_edges_out` and `citation_edges_in`, slim tables o
 outgoing and incoming neighbourhood lookups. Rebuild them manually with
 `okp s2 build-citation-edges` or the unscheduled Prefect deployment
 `s2-build-citation-edges/control-vm`; both take the shared `clickhouse` limit.
-They retain duplicate citing/cited pairs, so readers use `DISTINCT`.
+They retain duplicate citing/cited pairs, so readers use `DISTINCT`, and they are plain
+MergeTree, so a query with `FINAL` on them fails. `intents` is a mask of background (1),
+methodology (2) and result (4); a null and an empty list both give 0, and other values are dropped.
+A rebuild refuses unless `citations` holds a completed release, which it records in `applied`
+for each edge table. It needs about 12 bytes of free disk per `citations` row and refuses to swap
+in fewer than 90% of the live edges. A cancelled rebuild's insert keeps running in ClickHouse;
+the next rebuild kills it before staging again.
 
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.

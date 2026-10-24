@@ -54,10 +54,11 @@ async def connect(
     async with http:
         client = ClickHouseClient(http, database=config.database)
         tables = ClickHouseTables(client, raw_bucket=config.raw_bucket)
+        applied = ClickHouseAppliedReleases(client)
         yield ClickHouse(
-            edges=ClickHouseCitationEdges(client, tables),
+            edges=ClickHouseCitationEdges(client, tables, applied),
             tables=tables,
-            applied=ClickHouseAppliedReleases(client),
+            applied=applied,
             telemetry=ClickHouseLoadTelemetry(client),
         )
 
