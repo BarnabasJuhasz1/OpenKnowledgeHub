@@ -14,4 +14,4 @@ class ClickHouseConfig(BaseModel):
     database: str = "openknowledge"
     raw_bucket: BucketName
     """The bucket the server's ``raw`` named collection reads."""
-    timeout_seconds: PositiveFloat
+    timeout_seconds: PositiveFloat | None

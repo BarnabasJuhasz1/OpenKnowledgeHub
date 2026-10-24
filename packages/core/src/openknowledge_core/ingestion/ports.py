@@ -7,6 +7,7 @@ from typing import Literal, Protocol
 
 from openknowledge_contracts.datasets import DatasetName, ReleaseId, ReleaseMetadata
 from openknowledge_contracts.manifests import ManifestEntry, ObjectPath, ObjectRef
+from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.families import ArchiveFamily
 from openknowledge_core.ingestion.measurement import LoadSnapshot
 from openknowledge_core.ingestion.models import (
@@ -135,3 +136,7 @@ class LoadObserver(Protocol):
 
 class LoadTelemetry(Protocol):
     async def snapshot(self, dataset: DatasetName) -> LoadSnapshot: ...
+
+
+class CitationEdges(Protocol):
+    async def build(self) -> BuildCitationEdgesResult: ...

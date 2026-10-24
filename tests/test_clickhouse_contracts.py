@@ -31,6 +31,7 @@ type Catalog = dict[str, list[dict[str, Any]]]
 # Tables that hold no dataset: which objects were loaded into which table, and which release each
 # table holds.
 BOOKKEEPING = {"loads", "applied"}
+DERIVED = {"citation_edges_out", "citation_edges_in"}
 
 
 def test_every_migration_is_a_numbered_goose_file_with_up_and_down() -> None:
@@ -60,11 +61,13 @@ def catalog(tmp_path_factory: pytest.TempPathFactory) -> Catalog:
 
 
 @needs_clickhouse
-def test_the_migrations_create_one_table_per_contract_and_the_bookkeeping(
+def test_the_migrations_create_the_dataset_bookkeeping_and_derived_tables(
     catalog: Catalog,
 ) -> None:
     created = sorted(table["table"] for table in catalog["tables"])
-    assert created == sorted({contract.table for contract in CONTRACTS.values()} | BOOKKEEPING)
+    assert created == sorted(
+        {contract.table for contract in CONTRACTS.values()} | BOOKKEEPING | DERIVED
+    )
 
 
 def expression(column: Column) -> tuple[str, str]:
