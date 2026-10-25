@@ -14,7 +14,7 @@ directory. Each selection pins archive completion and conversion complete.json
 objects. The bridge verifies archive predecessor references, inventories, complete
 manifest membership, conversion membership, source receipts, row counts and source
 order. It consumes and exhausts `ParquetArtifacts.read(ConvertedShard)`, which owns
-raw Parquet schema, byte digest and generation verification. Bootstrap should inject
+raw Parquet schema, byte digest and generation verification. Pipeline bootstrap injects
 the packaged `StoredParquetArtifacts(store)` implementation. The resolver adapter
 imports only the core port, never that sibling adapter. Empty parts may be evidenced
 by inventory alone or explicit empty conversions; every nonempty part must appear
@@ -62,7 +62,18 @@ Fixed part rotation bounds each Parquet writer's footer metadata. Only the small
 manifest metadata grows with part count. Disk/throughput measurements on real inputs
 remain a deployment gate.
 
-Pending integration: PR66 packaged conversion contracts and implementation, PR67
-ClickHouse loader, the resolver Arrow extra and installed pipeline dependency, CLI
-wiring, installed-command checks, and archive → conversion → resolution → CH/OS
-end-to-end verification. Tiny fixtures alone are not a completed data product.
+The pipeline now includes the conversion and resolver dependencies and these installed
+commands:
+
+- `okp embeddings resolve --request request.json --destination artifact/` derives the
+  plan identity from the selected completed archive chain and verifies its Parquet inputs.
+- `okp embeddings load --artifact artifact/` publishes to ClickHouse through the existing
+  deployment-admission and load-limit guards.
+- `okp embeddings lookup --artifact artifact/ --id 123` selects the pinned publication
+  from manifest metadata without scanning the local Parquet parts.
+
+Dev checks cover receipt-backed archive → conversion → resolution → ClickHouse lookup,
+including updates, deletes, replay, corruption and nonregular-file rejection. Wheel-installed
+load and lookup also passed against local ClickHouse and Prefect with the normal guards;
+verification used synthetic fixtures and downloaded no cloud corpus data. Cloud deployment,
+real-input scratch/storage sizing, throughput and retrieval quality remain unverified.
