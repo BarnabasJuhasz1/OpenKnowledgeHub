@@ -6,14 +6,16 @@ both tables: the latest row per key by ``version``, tombstones included, because
 tombstone's version is part of its document's version, and the base and diff passes must give
 one table state one version. The diff query takes the keys that a release after ``from_release``
 touched in either table. Both read ``version``, ``source_release`` and ``is_deleted`` next to the
-fields a document needs, and pair the rows of the two tables by corpus ID in the query. The
-slice's range comes from the smallest and largest key at the release, split as ``CorpusSlice``
-says, so parts computed days apart tile the same keys whatever was loaded in between.
+fields a document needs, and pair the rows of the two tables by corpus ID in the query, whose
+rows stream in rather than load whole. A part's range is cut, as ``CorpusSlice`` says, from the
+smallest and largest key at the release, which ``bounds`` reads, so parts computed days apart
+tile the same keys whatever was loaded in between.
 """
 
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from contextlib import aclosing
 from typing import Any
 
 from pydantic import ValidationError
@@ -21,7 +23,7 @@ from pydantic import ValidationError
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_core.ingestion.errors import TableRejected
-from openknowledge_core.search.models import AbstractRow, CorpusSlice, PaperRow, SourceRows
+from openknowledge_core.search.models import AbstractRow, PaperRow, SourceRows
 
 PAPER_FIELDS = (
     "externalids",
@@ -107,22 +109,17 @@ class ClickHouseSearchSource:
     def __init__(self, client: ClickHouseClient) -> None:
         self._client = client
 
-    async def base(
-        self, release: ReleaseId, corpus_slice: CorpusSlice
-    ) -> AsyncGenerator[SourceRows]:
-        low, high = await self._bounds(corpus_slice, release)
+    async def bounds(self, release: ReleaseId) -> tuple[int, int]:
+        rows = await self._client.rows(BOUNDS_QUERY, release=release)
+        return int(rows[0]["low"]), int(rows[0]["high"])
+
+    async def base(self, release: ReleaseId, low: int, high: int) -> AsyncGenerator[SourceRows]:
         return self._rows(BASE_QUERY, low, high, release=release)
 
     async def diff(
-        self, from_release: ReleaseId, release: ReleaseId, corpus_slice: CorpusSlice
+        self, from_release: ReleaseId, release: ReleaseId, low: int, high: int
     ) -> AsyncGenerator[SourceRows]:
-        low, high = await self._bounds(corpus_slice, release)
         return self._rows(DIFF_QUERY, low, high, release=release, from_release=from_release)
-
-    async def _bounds(self, corpus_slice: CorpusSlice, release: ReleaseId) -> tuple[int, int]:
-        """The slice's corpus ID range, its part of the smallest to largest key at the release."""
-        rows = await self._client.rows(BOUNDS_QUERY, release=release)
-        return corpus_slice.bounds(int(rows[0]["low"]), int(rows[0]["high"]))
 
     async def _rows(
         self, query: str, low: int, high: int, **parameters: str
@@ -130,17 +127,19 @@ class ClickHouseSearchSource:
         """The query's rows over the range; none, and no query, for an empty part."""
         if low > high:
             return
-        for row in await self._client.rows(query, low=str(low), high=str(high), **parameters):
-            try:
-                yield source_rows(row)
-            except ValidationError as exc:
-                fields = ", ".join(
-                    ".".join(str(part) for part in error["loc"])
-                    for error in exc.errors(include_input=False, include_url=False)
-                )
-                raise TableRejected(
-                    f"corpusid {row.get('corpusid')}: {fields} do not fit a search row"
-                ) from None
+        rows = self._client.stream(query, low=str(low), high=str(high), **parameters)
+        async with aclosing(rows):
+            async for row in rows:
+                try:
+                    yield source_rows(row)
+                except ValidationError as exc:
+                    fields = ", ".join(
+                        ".".join(str(part) for part in error["loc"])
+                        for error in exc.errors(include_input=False, include_url=False)
+                    )
+                    raise TableRejected(
+                        f"corpusid {row.get('corpusid')}: {fields} do not fit a search row"
+                    ) from None
 
 
 def source_rows(row: dict[str, Any]) -> SourceRows:
