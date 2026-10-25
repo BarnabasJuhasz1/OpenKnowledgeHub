@@ -41,11 +41,19 @@ from openknowledge_core.ingestion.families import ArchiveFamily
 from openknowledge_core.ingestion.measurement import LoadObservation
 from openknowledge_core.ingestion.ports import CitationEdges, LoadTelemetry
 from openknowledge_core.search import SearchIndexService
+from openknowledge_core.search.errors import SearchRejected
+from openknowledge_core.search.vector_models import (
+    SearchVectorNeighbors,
+    VectorNeighbors,
+    VectorPublication,
+)
+from openknowledge_core.search.vectors import VectorPublicationService
 from openknowledge_pipelines.settings import (
     BatchSettings,
     CommonSettings,
     ConversionBatchSettings,
     LoadSettings,
+    OpenSearchSettings,
     PipelineSettings,
     SearchSettings,
     SyncSettings,
@@ -133,7 +141,7 @@ def _clickhouse(
     )
 
 
-def _opensearch(settings: SearchSettings) -> opensearch.OpenSearchConfig:
+def _opensearch(settings: OpenSearchSettings) -> opensearch.OpenSearchConfig:
     return opensearch.OpenSearchConfig(
         url=settings.opensearch_url,
         user=settings.opensearch_user,
@@ -384,3 +392,33 @@ async def lookup_embeddings(
 def embedding_resolution_request(path: Path) -> ResolveEmbeddings:
     """Read bounded regular JSON metadata before constructing any clients."""
     return ResolveEmbeddings.model_validate_json(read_regular_document(path))
+
+
+def vector_publication(path: Path) -> VectorPublication:
+    """Validate a bounded regular publication descriptor before opening clients."""
+    return VectorPublication.model_validate_json(read_regular_document(path))
+
+
+async def publish_embedding_vectors(
+    settings: OpenSearchSettings, directory: Path, publication: VectorPublication
+) -> VectorPublication:
+    artifact = embedding_artifact(directory)
+    if artifact.resolved != publication.resolved:
+        raise SearchRejected("publication differs from the selected artifact")
+    async with opensearch.connect_vectors(_opensearch(settings)) as store:
+        async with aclosing(stream_resolved_vectors(directory, artifact)) as rows:
+            return await VectorPublicationService(store).publish(publication, rows)
+
+
+async def embedding_neighbors(
+    settings: SearchSettings, publication: VectorPublication, corpusid: int, k: int
+) -> VectorNeighbors:
+    command = LookupEmbeddings(source=publication.resolved.source, corpusids=(corpusid,))
+    result = await lookup_embeddings(settings, command)
+    if not result.found:
+        raise SearchRejected(f"Paper {corpusid} has no live embedding in the selected snapshot")
+    query = SearchVectorNeighbors(
+        publication=publication, expected_source=command.source, seed=result.found[0], k=k
+    )
+    async with opensearch.connect_vectors(_opensearch(settings)) as store:
+        return await VectorPublicationService(store).neighbors(query)

@@ -9,7 +9,7 @@ from collections.abc import Callable, Coroutine, Mapping
 from contextlib import aclosing
 from pathlib import Path
 from typing import Any, Literal, TextIO
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import click
 from pydantic import BaseModel, ValidationError
@@ -33,6 +33,7 @@ from openknowledge_pipelines.settings import (
     BatchSettings,
     CommonSettings,
     LoadSettings,
+    OpenSearchSettings,
     PipelineSettings,
     SearchSettings,
     WatchdogSettings,
@@ -910,5 +911,60 @@ def lookup_embeddings(artifact: Path, corpusids: tuple[int, ...]) -> None:
 
     async def run() -> BaseModel:
         return await bootstrap.lookup_embeddings(settings, command)
+
+    _run(run, admission_required=False)
+
+
+@embeddings.command("publish")
+@click.option(
+    "--artifact", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path)
+)
+@click.option(
+    "--index", help="Fresh physical paper-vectors-<32 lowercase hex digits>; defaults to UUID."
+)
+def publish_embedding_vectors(artifact: Path, index: str | None) -> None:
+    """Publish verified resolved vectors; print the immutable publication as JSON."""
+    from openknowledge_core.search.vector_models import VectorPublication
+
+    manifest = _embedding_artifact(artifact)
+    publication = _command(
+        VectorPublication,
+        {"index": "--index must be paper-vectors- followed by 32 lowercase hex digits"},
+        index=index if index is not None else "paper-vectors-" + uuid4().hex,
+        resolved=manifest.resolved,
+    )
+    settings = _settings(OpenSearchSettings)
+
+    async def run() -> BaseModel:
+        try:
+            return await bootstrap.publish_embedding_vectors(settings, artifact, publication)
+        except (OSError, ValueError) as exc:
+            raise click.ClickException(f"Embedding artifact verification failed: {exc}") from None
+
+    _run(run)
+
+
+@embeddings.command("neighbors")
+@click.option(
+    "--publication",
+    "publication_file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--id", "corpusid", required=True, type=click.IntRange(0, 2**64 - 1))
+@click.option("--k", default=10, show_default=True, type=click.IntRange(1, 100))
+def embedding_neighbors(publication_file: Path, corpusid: int, k: int) -> None:
+    """Find neighbors from the exact published snapshot's ClickHouse seed."""
+    try:
+        publication = bootstrap.vector_publication(publication_file)
+    except (OSError, ValueError):
+        raise click.UsageError(
+            "--publication must be a regular nonsymlink VectorPublication JSON file "
+            "(at most 16 MiB)"
+        ) from None
+    settings = _settings(SearchSettings)
+
+    async def run() -> BaseModel:
+        return await bootstrap.embedding_neighbors(settings, publication, corpusid, k)
 
     _run(run, admission_required=False)

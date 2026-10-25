@@ -62,14 +62,12 @@ class WatchdogSettings(LoadSettings):
     """Per query, in place of the load timeout, which allows for an insert of hours."""
 
 
-class SearchSettings(LoadSettings):
+class OpenSearchSettings(CommonSettings):
     opensearch_url: HttpUrl
     opensearch_user: str = "hub-indexer"
     opensearch_password: SecretStr = Field(validation_alias="OPENSEARCH_PASSWORD")
     opensearch_timeout_seconds: PositiveFloat = 60.0
     """Per request, where a bulk request carries about 5 MB."""
-    index_shards: PositiveInt = 5
-    """Primary shards of an index that okp search index creates."""
 
     @field_validator("opensearch_url")
     @classmethod
@@ -77,6 +75,11 @@ class SearchSettings(LoadSettings):
         if url.username is not None or url.password is not None:
             raise ValueError("must not carry a user or password")
         return url
+
+
+class SearchSettings(LoadSettings, OpenSearchSettings):
+    index_shards: PositiveInt = 5
+    """Primary shards of an index that okp search index creates."""
 
 
 class ConversionBatchSettings(CommonSettings):

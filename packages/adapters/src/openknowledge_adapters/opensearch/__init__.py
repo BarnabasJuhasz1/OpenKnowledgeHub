@@ -10,20 +10,16 @@ from opensearchpy import AsyncConnection, AsyncHttpConnection, AsyncOpenSearch
 
 from openknowledge_adapters.opensearch.config import OpenSearchConfig
 from openknowledge_adapters.opensearch.sink import INITIAL_BACKOFF, OpenSearchSink
+from openknowledge_adapters.opensearch.vectors import OpenSearchVectors
 
 
 @asynccontextmanager
-async def connect(
-    config: OpenSearchConfig,
-    *,
-    connection_class: type[AsyncConnection] = AsyncHttpConnection,
-    initial_backoff: float = INITIAL_BACKOFF,
-) -> AsyncGenerator[OpenSearchSink, None]:
-    """One client per run, closed with its sessions when the run ends.
+async def _client(
+    config: OpenSearchConfig, connection_class: type[AsyncConnection]
+) -> AsyncGenerator[AsyncOpenSearch]:
+    """One per-run client; shared auth header avoids deprecated aiohttp auth.
 
-    The credentials go into an Authorization header set once on the client, because
-    opensearch-py 3.2 hands ``http_auth`` to aiohttp as the ``auth`` argument that aiohttp 3.14
-    deprecates. pydantic keeps the brackets of an IPv6 literal, which opensearch-py adds itself.
+    pydantic retains IPv6 brackets which opensearch-py adds itself.
     """
     url = config.url
     path = url.path or ""
@@ -44,9 +40,30 @@ async def connect(
         timeout=config.timeout_seconds,
     )
     try:
-        yield OpenSearchSink(client, initial_backoff=initial_backoff)
+        yield client
     finally:
         await client.close()
 
 
-__all__ = ["OpenSearchConfig", "OpenSearchSink", "connect"]
+@asynccontextmanager
+async def connect(
+    config: OpenSearchConfig,
+    *,
+    connection_class: type[AsyncConnection] = AsyncHttpConnection,
+    initial_backoff: float = INITIAL_BACKOFF,
+) -> AsyncGenerator[OpenSearchSink]:
+    async with _client(config, connection_class) as client:
+        yield OpenSearchSink(client, initial_backoff=initial_backoff)
+
+
+@asynccontextmanager
+async def connect_vectors(
+    config: OpenSearchConfig,
+    *,
+    connection_class: type[AsyncConnection] = AsyncHttpConnection,
+) -> AsyncGenerator[OpenSearchVectors]:
+    async with _client(config, connection_class) as client:
+        yield OpenSearchVectors(client)
+
+
+__all__ = ["OpenSearchConfig", "OpenSearchSink", "OpenSearchVectors", "connect", "connect_vectors"]

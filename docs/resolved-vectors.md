@@ -77,3 +77,36 @@ including updates, deletes, replay, corruption and nonregular-file rejection. Wh
 load and lookup also passed against local ClickHouse and Prefect with the normal guards;
 verification used synthetic fixtures and downloaded no cloud corpus data. Cloud deployment,
 real-input scratch/storage sizing, throughput and retrieval quality remain unverified.
+
+## OpenSearch publication and neighbors
+
+Publish a finalized receipt-backed artifact, retaining the returned immutable
+publication descriptor for later reads:
+
+```sh
+okp embeddings publish --artifact /worker/resolved > publication.json
+# Or choose a fresh physical name: --index paper-vectors-<32 lowercase hex digits>
+okp embeddings neighbors --publication publication.json --id 12345 --k 10
+```
+
+Publish needs `OKP_OPENSEARCH_URL`, `OPENSEARCH_PASSWORD` and optionally
+`OKP_OPENSEARCH_USER` (default `hub-indexer`). It uses mutation admission on the
+configured shared `PREFECT_API_URL`, with no ClickHouse/source/Batch credentials
+or ClickHouse loader slot. It creates a fresh physical index, verifies the artifact
+while streaming, and seals it; it does not select an alias or application default.
+A failed attempt can leave an incomplete index: inspect it and retry with a new
+physical name, preserving the artifact identity.
+
+Neighbors additionally needs the existing ClickHouse lookup configuration:
+`OKP_CLICKHOUSE_URL`, `OKP_CLICKHOUSE_USER`, `CLICKHOUSE_PASSWORD` and
+`OKP_CLICKHOUSE_RAW_BUCKET`. Load that same artifact with `okp embeddings load`
+first. The command fetches one seed for the descriptor's exact source, then checks
+it against OpenSearch; it neither scans artifact parts nor encodes a query.
+Missing/deleted seeds return a clear error. Reads do not acquire mutation admission.
+Descriptor JSON must be a regular nonsymlink file of at most 16 MiB. These commands
+provide no serving route, schedule or automatic publication selection, and synthetic
+fixture proof does not establish corpus capacity or upstream completeness.
+
+Fresh wheel-installed publish and neighbor commands passed against isolated dev
+OpenSearch, ClickHouse and Prefect: four records, three live, UInt64 boundary IDs,
+and missing/deleted seed errors. The fixture index was sealed and cleaned up.
