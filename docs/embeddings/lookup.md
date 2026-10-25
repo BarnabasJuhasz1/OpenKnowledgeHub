@@ -1,97 +1,86 @@
 # Embedding ingest and lookup boundary
 
-This slice is offline and not deployed. It defines the shared contract, bounded pure
-validation/resolution, async ports and a SQL proposal outside migrations. There is no
-production adapter, loader, publication service, CLI or cloud resource. All available
-paper embeddings are the target; the tiny fixtures are correctness checks only.
+The packaged ClickHouse adapter publishes complete resolved Float32 snapshots and looks
+up explicit IDs. It creates no ANN index, quantization, cloud resources or deployment.
+Raw Parquet conversion and raw-to-resolved reduction are separate upstream jobs.
 
-## Shared contract handoff
+## Contracts and entrypoints
 
-Import `EmbeddingSnapshot`, `EmbeddingMutation`, `LookupEmbeddings` and
-`EmbeddingLookupResult` from `openknowledge_contracts.embeddings`. Search consumes this
-contract; changes to its fields require coordination with the owning embedding lane.
+Import `EmbeddingSnapshot`, `EmbeddingMutation`, `LookupEmbeddings`,
+`EmbeddingLookupResult` and `ResolvedVectors` from `openknowledge_contracts.embeddings`.
+`ResolvedVectors` pins source metadata, total/live counts, the canonical SHA256, and
+resolution/completeness/space evidence. Its evidence references require caller review;
+a valid descriptor alone does not prove that upstream data is complete.
 
-`EmbeddingSnapshot` fields are `snapshot`, `dataset`, `release`, `model`, `dimension`,
-`dtype`, `model_revision`. `snapshot` is `sha256:<64 lowercase hex>` identifying an
-immutable completed manifest/content, never `latest` or a mutable object path. This
-syntax does not establish that a manifest exists or is complete. The producer defines
-and records the canonical bytes hashed. The other fields are fixed to
-`embeddings-specter_v2`, an explicit release, `specter_v2`, 768, `float32`, and an
-explicit revision string (`unknown` when unknown). No query adapter can be inferred
-from the upstream model label. A single identity must always have the same metadata.
+A source is an immutable `sha256:<64 lowercase hex>` identity with dataset, release,
+model, dimension, dtype and evidenced model revision. Never select `latest`. Publications
+reject unknown/unverified model revisions. IDs and sequence support the full UInt64 range.
+Live rows have 768 finite Float32 coordinates and nonzero norm; tombstones have no vector.
+Provenance must be a stable nonsensitive locator, never credentials or signed URLs.
+Construct public models through validation; unchecked Pydantic bypass APIs are outside
+this boundary.
 
-`EmbeddingMutation` fields are `source` (the snapshot), `corpusid`, `sequence`,
-`provenance`, `is_deleted`, `vector`. IDs and sequence are UInt64, including values
-above signed Int64. Sequence is stable source release/diff order, never arrival time.
-Live vectors contain 768 finite Float32 values with at least one nonzero coordinate;
-tombstones have an empty vector. Validation canonicalizes to Float32, rejects overflow
-and vectors that become entirely zero after rounding. Float64 JSON renderings of the
-canonical values do not change the declared wire dtype. ClickHouse emits short Float32
-JSON numbers; consumers must validate them through this contract before comparison.
-Provenance is a stable nonsensitive source locator/ordinal, never signed URLs or secrets.
+Use `publish_embeddings(publisher, descriptor, rows)` from
+`openknowledge_core.embeddings.service`. The publisher is
+`ClickHouseEmbeddings(client)` or `connection.embeddings` from the existing per-run
+`clickhouse.connect(config)` context. `rows` is an async stream of resolved
+`EmbeddingMutation` winners in strictly increasing corpusid order, including tombstones.
+The upstream resolver must reject conflicting equal-sequence replays and select the
+highest sequence before removing any deletion state. Duplicate IDs at this boundary are
+rejected even when equal. Do not publish an incomplete diff as a full snapshot.
 
-The same `(snapshot, corpusid, sequence)` must replay with equal canonical contents,
-including provenance and deletion state. `validate_batch(source, rows)` checks metadata,
-conflicts and the 3000-mutation budget within one batch, retaining source order and
-identical duplicates. It cannot check earlier batches or concurrent writers.
-`resolve_lookup(command, rows)` validates bounded candidates, selects the maximum sequence
-before filtering deletes, and returns found/missing in first-requested ID order. Inputs
-are limited to 3000 IDs and candidates to 3000 mutations. The adapter must perform global
-replay validation and latest-row reduction before returning such candidates, rather than
-feeding arbitrarily many historic duplicates to this helper. No full snapshot is loaded
-into Python. Public Pydantic models must be constructed via validation; bypass APIs such
-as `model_construct` and unchecked `model_copy(update=...)` are outside this boundary.
+Canonical digest bytes come from
+`openknowledge_core.embeddings.serialization.vector_record_bytes`, shared with search.
+Publication returns `EmbeddingPublication(descriptor, table)`. Lookup uses
+`await connection.embeddings.lookup(LookupEmbeddings(source=source, corpusids=ids))`.
+It verifies every pinned source field, accepts at most 3000 IDs, deduplicates requests,
+and returns live winners and absent/deleted IDs in first-requested order. Empty lookups
+still check publication identity. There is no implicit latest or fallback snapshot.
 
-## Publication and failure requirements
+## Publication and failure behavior
 
-Raw base-shard Parquet is a receipt-backed source-order stream with unresolved duplicates.
-It is not a serving-resolved snapshot. No metadata here links a raw probe to complete
-publication. A complete replacement must materialize the base and every contiguous diff,
-including deletes; do not serve an incomplete diff as a complete snapshot.
+Apply migration `00016_create_embedding_template.sql` before running a publisher. Each
+job clones a private `MergeTree` attempt table, inserts at most 1000 rows / 4 MiB per request (oversized records fail),
+and validates source/order/count/digest while consuming the input. It then streams the
+stored rows back in corpusid order and verifies the same canonical digest and counts.
+Reads use Float32 IEEE bits to retain signed zero and subnormals without decimal JSON
+rounding. All coordinates remain Float32; no norm conversion or quantization is applied.
 
-A future adapter must compare every source field to a durable snapshot registry on ingest
-and lookup, reject unknown/unpublished sources, validate conflicts across all batches,
-and seal the snapshot against writes before publication. Durable compare-and-set of a
-validated manifest pointer is required. Independent writers and concurrent publication
-need exclusion; this PR supplies neither locks nor a registry. Metadata validation alone
-cannot prove completeness or digest correctness. Failed staging stays invisible.
+After verification, the complete descriptor is written to the attempt's table comment.
+One atomic `RENAME TABLE` publishes it as `paper_embeddings_<snapshot hex>`. A failed or
+incomplete attempt has no published name. An existing destination is never replaced:
+an exact descriptor replay succeeds, and any differing descriptor fails. Concurrent
+attempts use distinct names; one publication wins and equal losers verify its descriptor.
+Different source metadata under the same snapshot cannot be published or looked up.
+Published tables must remain immutable; only this publisher should own their write/DDL
+permissions. There is no multi-store transaction or registry service.
 
-An ambiguous transport failure can leave partial inserts; retry the identical batch.
-Preserve tombstones so stale replays cannot resurrect deleted embeddings. Checkpoint only
-after acknowledged verification, with bounded concurrency/retries and useful errors;
-record digests, source checksums, sequence ranges and verified counts without logging
-vectors or credentials. No cancellation redesign is included. Paper deletion propagation
-or an authoritative serving-time check remains necessary: embedding release identity does
-not establish current paper deletion status. Retention and recovery policies remain open.
+There are no automatic insert retries. An ambiguous insert may already have written rows;
+retry the whole job with a fresh iterator and fresh attempt, using a finite caller-owned
+retry budget and the configured HTTP timeout. If a successful rename response is lost,
+a whole-job replay reloads and verifies the stream before accepting the equal published
+descriptor; it does not skip ingestion. The command/bridge caller owns the source
+iterator lifetime and must close it on early failure (for example using `aclosing`).
+Ordinary failures attempt
+one cleanup; process loss or failed cleanup may leave invisible attempt tables. Operators
+must remove abandoned `paper_embeddings_attempt_*` tables only after confirming their
+jobs are no longer running. Do not modify or remove published tables while readers use them.
+Rollback of the template migration deliberately leaves published/attempt tables intact.
 
-## SQL and precision
+## Deployment limits
 
-`clickhouse-proposal.sql` uses `MergeTree`, preserving replay evidence until validation.
-ReplacingMergeTree could discard conflicting equal-sequence rows during background merges.
-The two validation templates detect metadata reuse and replay conflicts. A future publisher
-must enforce them while staging is sealed and compare metadata to the pinned manifest.
-The lookup template uses `argMax` of the complete tuple before filtering tombstones.
-Identical duplicates resolve deterministically; conflicting ties are forbidden, not resolved
-by choosing an arbitrary winner. Query parameters never become SQL identifiers.
+Grant the job CREATE/INSERT/SELECT/ALTER/RENAME/DROP on its embedding tables and SELECT
+on `system.tables`; use an Atomic database. Serving accounts need SELECT on published
+tables and `system.tables`. Publication performs a full stored-row verification scan;
+Python buffering is bounded, but database work and temporary disk are corpus-dependent.
+The job needs space for an entire attempt beside retained snapshots and concurrent jobs.
+Disk preflight, retention, deletion freshness against current paper state, and deployment
+of the packaged job remain operational responsibilities. No corpus size, throughput,
+capacity or production recovery claim follows from tiny fixtures.
 
-Snapshot is in the sorting key to isolate releases. No partitioning or ANN index is added.
-The candidate granularity 256 is unmeasured. At 768 Float32 coordinates, vector-only bytes
-per 64/256/8192-row granule are 196608/786432/25165824 (arithmetic, not measured reads).
-Smaller granules increase mark overhead; compression, adaptive byte granularity, caches,
-duplicates and snapshot retention affect actual cost. No broad benchmark is included.
-
-Float32 is the baseline. BFloat16 remains experimental, with no quality/capacity claim;
-Float16 Parquet must never be relabeled BFloat16. Quantization requires a real quality gate.
-Tiny local tests use ClickHouse 26.8.22.13, verifying unsigned Parquet IDs, Float32 recovery,
-duplicate ordering, tombstones, snapshot isolation, conflict gates and vector constraints.
-No real corpus sample is available. Throughput, memory at scale, compression, latency,
-quality, capacity, complete publication and production recovery remain unverified.
-
-## Cost and rollout
-
-Fixed resources created now: 0. Not deployed. Future storage, compute and operational cost
-are unmeasured. Publication gating scans and duplicate retention are costs to measure with
-an authorized real corpus later; the bounded Python helper does not bound a database scan.
-Before production: implement and verify registry/sealing, durable replay checks, manifest
-completeness, bounded parameterized serving, failure recovery and deletion freshness; then
-measure the Float32 baseline on authorized data. No existing job or migration changes here.
+`packages/adapters/tests/clickhouse/test_embeddings_server.py` is the opt-in real HTTP
+server boundary. Set `CLICKHOUSE_EMBEDDINGS_TEST_URL=http://127.0.0.1:18124` and optional
+`CLICKHOUSE_EMBEDDINGS_TEST_USER` / `CLICKHOUSE_EMBEDDINGS_TEST_PASSWORD`. Tests create and
+drop unique `embedding_lookup_test_*` databases, exercise migration idempotency and the
+packaged connection, and never start a server. Local schema tests exercise the actual template migration, Float32 storage, UInt64 IDs
+and vector constraints.

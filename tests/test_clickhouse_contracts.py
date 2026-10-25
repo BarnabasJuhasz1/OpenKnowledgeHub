@@ -32,6 +32,7 @@ type Catalog = dict[str, list[dict[str, Any]]]
 # table holds.
 BOOKKEEPING = {"loads", "applied"}
 DERIVED = {"citation_edges_out", "citation_edges_in"}
+TEMPLATES = {"paper_embeddings_template"}
 
 
 def test_every_migration_is_a_numbered_goose_file_with_up_and_down() -> None:
@@ -66,7 +67,7 @@ def test_the_migrations_create_the_dataset_bookkeeping_and_derived_tables(
 ) -> None:
     created = sorted(table["table"] for table in catalog["tables"])
     assert created == sorted(
-        {contract.table for contract in CONTRACTS.values()} | BOOKKEEPING | DERIVED
+        {contract.table for contract in CONTRACTS.values()} | BOOKKEEPING | DERIVED | TEMPLATES
     )
 
 

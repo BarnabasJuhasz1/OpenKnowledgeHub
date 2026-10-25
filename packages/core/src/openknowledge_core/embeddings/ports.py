@@ -1,11 +1,13 @@
+from collections.abc import AsyncIterable
 from typing import Protocol
 
 from openknowledge_contracts.embeddings import (
     EmbeddingLookupResult,
     EmbeddingMutation,
-    EmbeddingSnapshot,
     LookupEmbeddings,
+    ResolvedVectors,
 )
+from openknowledge_core.embeddings.models import EmbeddingPublication
 
 
 class EmbeddingLookup(Protocol):
@@ -14,12 +16,14 @@ class EmbeddingLookup(Protocol):
         ...
 
 
-class EmbeddingIngest(Protocol):
-    async def ingest(self, source: EmbeddingSnapshot, rows: tuple[EmbeddingMutation, ...]) -> None:
-        """Stage at most 3000 mutations with matching source metadata; never publish.
+class EmbeddingPublisher(Protocol):
+    async def publish(
+        self, descriptor: ResolvedVectors, rows: AsyncIterable[EmbeddingMutation]
+    ) -> EmbeddingPublication:
+        """Validate and publish an immutable, ordered resolved stream, including tombstones.
 
-        A snapshot/corpusid/sequence replay must have identical contents; conflicting
-        replays fail. Transport failure may leave a partial batch: replay unchanged.
-        Cancellation propagates. The caller owns bounded retries and checkpointing.
+        Retry a failed call with a fresh stream; never retry individual inserts. An equal
+        descriptor and canonical stream replay succeeds; a changed publication fails.
+        The caller owns the source iterator's lifetime and closes it on early failure.
         """
         ...
