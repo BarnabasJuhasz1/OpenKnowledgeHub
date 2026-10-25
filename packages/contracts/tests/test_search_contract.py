@@ -2,6 +2,12 @@ from typing import Any
 
 from openknowledge_contracts.search import PAPERS, SearchField, index_body
 
+# The mapping of each type that is not mapped as its own name.
+MAPPED = {
+    "english": {"type": "text", "analyzer": "english"},
+    "date": {"type": "date", "format": "strict_date", "ignore_malformed": True},
+}
+
 
 def mapped(fields: tuple[SearchField, ...], properties: dict[str, Any]) -> None:
     assert set(properties) == {field.name for field in fields}
@@ -10,7 +16,7 @@ def mapped(fields: tuple[SearchField, ...], properties: dict[str, Any]) -> None:
             assert properties[field.name]["type"] == "object"
             mapped(field.fields, properties[field.name]["properties"])
         else:
-            assert properties[field.name] == {"type": field.type}
+            assert properties[field.name] == MAPPED.get(field.type, {"type": field.type})
 
 
 def test_every_field_is_mapped_and_the_contract_is_at_version_1() -> None:
@@ -23,5 +29,10 @@ def test_every_field_is_mapped_and_the_contract_is_at_version_1() -> None:
     assert properties[PAPERS.id_field] == {"type": "keyword"}
     assert properties["contract_version"] == {"type": "integer"}
     assert body.settings == {
-        "index": {"number_of_shards": 3, "number_of_replicas": 0, "codec": "zstd"}
+        "index": {
+            "number_of_shards": 3,
+            "number_of_replicas": 0,
+            "codec": "zstd",
+            "refresh_interval": "-1",
+        }
     }

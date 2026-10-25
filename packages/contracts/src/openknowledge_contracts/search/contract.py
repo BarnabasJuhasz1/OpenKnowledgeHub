@@ -1,8 +1,10 @@
 """A search contract: the fields of one document, and the index created to hold such documents.
 
 A search document is a projection of a dataset's current rows, not a source record, so it has its
-own fields. Each field names the type the index maps it as. The contract's version goes into
-every document as ``contract_version``, so an index can say which projection built it.
+own fields. Each field names the type the index maps it as: ``english`` is text under the english
+analyzer, which stems, and ``date`` a yyyy-MM-dd date whose malformed value leaves the field
+unindexed but keeps the document. The contract's version goes into every document as
+``contract_version``, so an index can say which projection built it.
 """
 
 from __future__ import annotations
@@ -10,10 +12,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Literal
 
-type FieldType = Literal["keyword", "text", "integer", "long", "boolean", "object"]
+type FieldType = Literal[
+    "keyword", "text", "english", "integer", "long", "date", "boolean", "object"
+]
 type Json = dict[str, Any]
 
 CONTRACT_VERSION = "contract_version"
+# The types whose mapping is more than their name.
+_MAPPINGS: dict[str, Json] = {
+    "english": {"type": "text", "analyzer": "english"},
+    "date": {"type": "date", "format": "strict_date", "ignore_malformed": True},
+}
 
 
 @dataclass(frozen=True)
@@ -88,7 +97,8 @@ def index_body(contract: SearchContract, *, shards: int) -> IndexBody:
 
     The mapping is closed: ``dynamic`` is false, so a key the contract does not name is kept in
     ``_source`` but never indexed. ``_source`` stays on, since documents are read back whole.
-    The index has no replicas and compresses with zstd, as the bulk of it is stored text.
+    The index has no replicas and compresses with zstd, as the bulk of it is stored text. It
+    does not refresh on its own until settled, so a base build writes no small segment a second.
     """
     if shards < 1:
         raise ValueError(f"{contract.name}: an index needs at least one shard")
@@ -99,7 +109,12 @@ def index_body(contract: SearchContract, *, shards: int) -> IndexBody:
             "properties": _properties(contract.fields),
         },
         settings={
-            "index": {"number_of_shards": shards, "number_of_replicas": 0, "codec": "zstd"},
+            "index": {
+                "number_of_shards": shards,
+                "number_of_replicas": 0,
+                "codec": "zstd",
+                "refresh_interval": "-1",
+            },
         },
     )
 
@@ -108,7 +123,7 @@ def _properties(fields: tuple[SearchField, ...]) -> Json:
     properties: Json = {}
     for field in fields:
         if field.type != "object":
-            properties[field.name] = {"type": field.type}
+            properties[field.name] = dict(_MAPPINGS.get(field.type, {"type": field.type}))
             continue
         mapped: Json = {"type": "object"}
         if field.dynamic is not None:
