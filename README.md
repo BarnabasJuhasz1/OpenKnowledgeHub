@@ -155,20 +155,29 @@ Until those are implemented, do not load a base over a populated table with miss
 ## Indexing papers into OpenSearch
 
 ```sh
-uv run okp search index --index papers-v1 --release <release_id> [--from-release <release_id>] [--range I/N]
+uv run okp search index --index papers-v1 --release <release_id> [--from-release <release_id>] --range I/N
+uv run okp search settle --index papers-v1
 ```
 
 It reads the live rows of `papers` and `abstracts` from ClickHouse and writes one search document per paper into the index, with the abstract when the paper has one.
 A base pass creates the index with the mapping of `packages/contracts/src/openknowledge_contracts/search/papers.py` when it does not exist, and writes into it when it does.
+`title` and `abstract` go through OpenSearch's `english` analyzer, which stems, so a match on `networks` finds `network`.
+`publicationdate` is a `date` in `yyyy-MM-dd` that takes range queries and sorts, and a value in another shape leaves the field unindexed but keeps the document.
+Changing either mapping means building a new index.
 A diff pass needs the index to exist and stops with exit 1 otherwise.
 Without `--from-release`, every live paper at the release is written.
 With it, only the papers with a newer row in `papers` or `abstracts` are written, and a paper deleted since is deleted from the index.
-`--range I/N` writes part I of the corpusid range split into N equal parts, 1/1 by default.
+`--range I/N` writes part I of the corpusid range split into N equal parts, and is required.
 The range is the smallest to the largest corpusid at the release, read again by every part, so run all parts of one pass before the next load.
-The rows of a part are read into memory whole, so pick N so that a part fits, and keep 1/1 for small tables.
+A part streams from ClickHouse into the bulk requests, so the pass never holds it whole, but ClickHouse joins and sorts the whole part before it sends the first row, so a part should hold about 1M papers, or 1M changed papers in a diff pass.
+ClickHouse ends the stream when it cannot write to it for `http_send_timeout`, 30 s unless the server's default profile raises it, so a bulk write that stalls that long stops the part with exit 1, and a rerun repeats it.
 The release must be the latest applied. The tables keep no history, so a base pass at an older release does not rebuild that release, it drops every paper whose latest row is newer, can carry an older abstract, and still reports success.
 Each document carries the larger `version` of its two rows, and the writes use `external_gte`, which accepts an equal version again.
 A part can be run again at the same or a newer release. A write below the version the index holds is refused and the pass stops with exit 1.
+A bulk item that OpenSearch refuses with 429 is sent again up to 3 times, after 2, 4 and 8 seconds; an item still refused after that stops the pass with exit 1, and a rerun sends it again.
+An index is created with `refresh_interval` at -1, so a base build does not write a small segment every second.
+Each pass refreshes the index at its end, so what it wrote is searchable.
+A base build ends with `okp search settle` once its last part is written, which resets `refresh_interval` to the default and refreshes the index.
 It needs `OKP_CLICKHOUSE_URL`, `CLICKHOUSE_PASSWORD`, `OKP_CLICKHOUSE_RAW_BUCKET`, `OKP_OPENSEARCH_URL` and `OPENSEARCH_PASSWORD`.
 Unless set, `OKP_OPENSEARCH_USER` is `hub-indexer`, `OKP_OPENSEARCH_TIMEOUT_SECONDS` is 60 and `OKP_INDEX_SHARDS` is 5.
 An OpenSearch or ClickHouse that cannot be reached ends the run with exit 1 before anything is written.

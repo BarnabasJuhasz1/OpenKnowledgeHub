@@ -573,7 +573,8 @@ def test_search_index_creates_the_index_and_prints_the_result(
     for name, value in {**LOAD_ENV, **SEARCH_ENV}.items():
         monkeypatch.setenv(name, value)
     result = CliRunner().invoke(
-        cli.main, ["search", "index", "--index", "papers-v1", "--release", "2026-10-06"]
+        cli.main,
+        ["search", "index", "--index", "papers-v1", "--release", "2026-10-06", "--range", "1/1"],
     )
     assert result.exit_code == 0, result.output
     printed = json.loads(result.output.splitlines()[-1])
@@ -586,3 +587,28 @@ def test_search_index_creates_the_index_and_prints_the_result(
     )
     assert result.exit_code == 2
     assert "the part must not exceed the number of parts" in result.output
+    result = CliRunner().invoke(
+        cli.main, ["search", "index", "--index", "papers-v1", "--release", "2026-10-06"]
+    )
+    assert result.exit_code == 2
+    assert "Missing option '--range'" in result.output
+
+
+def test_search_settle_lets_the_index_refresh_again_and_refreshes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink = FakeSearchSink()
+
+    @asynccontextmanager
+    async def open_search_service(settings: SearchSettings) -> AsyncGenerator[SearchIndexService]:
+        yield SearchIndexService(source=FakeSearchSource(), sink=sink, shards=settings.index_shards)
+
+    monkeypatch.setattr(bootstrap, "open_search_service", open_search_service)
+    monkeypatch.delenv("S2_API_KEY", raising=False)
+    for name, value in {**LOAD_ENV, **SEARCH_ENV}.items():
+        monkeypatch.setenv(name, value)
+    result = CliRunner().invoke(cli.main, ["search", "settle", "--index", "papers-v1"])
+    assert result.exit_code == 0, result.output
+    printed = json.loads(result.output.splitlines()[-1])
+    assert printed == {"index": "papers-v1", "refresh_interval": "default"}
+    assert (sink.intervals, sink.refreshed) == ({"papers-v1": None}, ["papers-v1"])

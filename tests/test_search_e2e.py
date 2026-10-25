@@ -23,7 +23,7 @@ INDEX = "papers"
 BASE, NEXT = "2026-10-13", "2026-10-20"
 
 
-def okp_search(ports: dict[str, str], *args: str) -> tuple[int, str]:
+def okp_search(ports: dict[str, str], *args: str, command: str = "index") -> tuple[int, str]:
     env = {
         "OKP_CLICKHOUSE_URL": f"http://127.0.0.1:{ports['CLICKHOUSE_PORT']}",
         "CLICKHOUSE_PASSWORD": "openknowledge",
@@ -32,7 +32,7 @@ def okp_search(ports: dict[str, str], *args: str) -> tuple[int, str]:
         "OPENSEARCH_PASSWORD": "unused-without-the-security-plugin",
         "OKP_INDEX_SHARDS": "1",
     }
-    result = CliRunner().invoke(cli.main, ["search", "index", "--index", INDEX, *args], env=env)
+    result = CliRunner().invoke(cli.main, ["search", command, "--index", INDEX, *args], env=env)
     return result.exit_code, result.output
 
 
@@ -72,11 +72,17 @@ def test_a_base_pass_then_a_diff_pass_keep_the_index_current(ports: dict[str, st
     ran(ports, "load", "--release", BASE, "--dataset", "papers")
     ran(ports, "load", "--release", BASE, "--dataset", "abstracts")
 
-    result = indexed(ports, "--release", BASE)
+    result = indexed(ports, "--release", BASE, "--range", "1/1")
     assert (result["created"], result["written"], result["deleted"]) == (True, 5, 0)
     assert (result["requests"], result["documents"]) == (1, 5)
     hits = search(ports, {"match_phrase": {"title": "A Synthetic Paper"}})
     assert [hit["_source"]["corpusid"] for hit in hits] == ["101"]
+    hits = search(ports, {"match": {"title": "papers"}})  # stemmed, so it finds each "Paper"
+    titled = {"101", "103", "104", "18446744073709551615"}
+    assert {hit["_source"]["corpusid"] for hit in hits} == titled
+    since = {"gte": "01/01/2000", "format": "dd/MM/yyyy"}  # a keyword field would match 1665 too
+    hits = search(ports, {"range": {"publicationdate": since}})
+    assert [hit["_source"]["corpusid"] for hit in hits] == ["101"]  # the others: 1665 and none
     expected = {
         str(json.loads(line)["corpusid"]): json.loads(line)["abstract"] for line in abstracts
     }
@@ -86,13 +92,17 @@ def test_a_base_pass_then_a_diff_pass_keep_the_index_current(ports: dict[str, st
         assert found is not None, corpusid
         assert found["_source"].get("abstract") == expected.get(corpusid), corpusid
         assert (found["_version"], found["_source"]["contract_version"]) == (version_of(BASE), 1)
+    code, output = okp_search(ports, command="settle")
+    assert code == 0, output
+    index_settings = httpx.get(f"http://127.0.0.1:{ports['OPENSEARCH_PORT']}/{INDEX}/_settings")
+    assert "refresh_interval" not in index_settings.json()[INDEX]["settings"]["index"]
 
     retitled = {**json.loads(papers[4]), "title": "A Retitled Paper"}
     assert retitled["corpusid"] == 104
     archive_diff(ports, BASE, NEXT, [json.dumps(retitled)], ['{"corpusid": 103}'], dataset="papers")
     ran(ports, "load-diff", "--from-release", BASE, "--release", NEXT, "--dataset", "papers")
     for _ in range(2):  # the second pass repeats every write, which external_gte accepts
-        result = indexed(ports, "--release", NEXT, "--from-release", BASE)
+        result = indexed(ports, "--release", NEXT, "--from-release", BASE, "--range", "1/1")
         assert (result["created"], result["written"], result["deleted"]) == (False, 1, 1)
         assert result["documents"] == 4
     assert document(ports, "103") is None

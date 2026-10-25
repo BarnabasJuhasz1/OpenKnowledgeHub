@@ -24,7 +24,7 @@ from openknowledge_core.ingestion import (
     PinRelease,
 )
 from openknowledge_core.ingestion.families import ArchiveFamily, archive_family
-from openknowledge_core.search import IndexPapers
+from openknowledge_core.search import IndexPapers, SettleIndex
 from openknowledge_pipelines import bootstrap
 from openknowledge_pipelines.settings import (
     BatchSettings,
@@ -42,6 +42,7 @@ LOAD_HELP = "Load an archived dataset into its ClickHouse table through the Pref
 LOAD_DIFF_HELP = "Load an archived diff into its ClickHouse table through the Prefect flow."
 SERVE_HELP = "Serve the flows the control VM runs, until stopped."
 INDEX_HELP = "Write one corpusid slice of the papers into an OpenSearch index, without Prefect."
+SETTLE_HELP = "Reset an index's refresh interval to the default and refresh it after a base build."
 RELEASE_HELP = "The release_id that okp s2 pin printed, such as 2026-10-06."
 DATASET_HELP = "Dataset name, such as publication-venues."
 PREFIX_HELP = "Folder in the bucket that every object goes under."
@@ -499,8 +500,7 @@ def search() -> None:
 @click.option(
     "--range",
     "corpus_range",
-    default="1/1",
-    show_default=True,
+    required=True,
     metavar="I/N",
     help="Part I of the corpusid range split into N equal parts.",
 )
@@ -522,6 +522,23 @@ def index(index: str, release: str, from_release: str | None, corpus_range: str)
     async def run() -> BaseModel:
         async with bootstrap.open_search_service(settings) as service:
             return await service.index(command)
+
+    _run(run)
+
+
+@search.command("settle", help=SETTLE_HELP, short_help=SETTLE_HELP)
+@click.option(
+    "--index",
+    required=True,
+    help="Index name, such as papers-v1, whose base build has written its last part.",
+)
+def settle(index: str) -> None:
+    command = _command(SettleIndex, SEARCH_RULES, index=index)
+    settings = _settings(SearchSettings)
+
+    async def run() -> BaseModel:
+        async with bootstrap.open_search_service(settings) as service:
+            return await service.settle(command)
 
     _run(run)
 
