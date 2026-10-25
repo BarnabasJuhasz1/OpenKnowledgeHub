@@ -5,8 +5,15 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from typing import Any, Protocol
 
+from openknowledge_contracts.embeddings import EmbeddingMutation
+
 from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_core.search.models import BulkOperation, IndexName, SourceRows
+from openknowledge_core.search.vector_models import (
+    SearchVectorNeighbors,
+    VectorNeighbors,
+    VectorPublication,
+)
 
 
 class SearchSource(Protocol):
@@ -52,3 +59,29 @@ class SearchSink(Protocol):
     async def refresh(self, index: IndexName) -> None: ...
 
     async def count(self, index: IndexName) -> int: ...
+
+
+class VectorStore(Protocol):
+    """Separate physical vector indices; implementations must enforce publication gates."""
+
+    async def begin(self, publication: VectorPublication) -> None:
+        """Exclusively create a fresh, incomplete index. Never overwrite or adopt one."""
+        ...
+
+    async def write(
+        self, publication: VectorPublication, records: tuple[EmbeddingMutation, ...]
+    ) -> None:
+        """Create every record (including retained tombstones), or fail the attempt."""
+        ...
+
+    async def complete(self, publication: VectorPublication) -> None:
+        """Block writes, refresh, verify counts, then persist completion. No alias changes."""
+        ...
+
+    async def neighbors(self, command: SearchVectorNeighbors) -> VectorNeighbors:
+        """Verify selected identity, completion, block and exact seed provenance before ANN.
+
+        Missing/deleted seeds return no vector hits. Malformed, partial or mismatched
+        responses fail closed; they do not silently become a missing vector.
+        """
+        ...
