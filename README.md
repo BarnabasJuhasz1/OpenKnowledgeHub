@@ -181,7 +181,7 @@ Without `--from-release`, every live paper at the release is written.
 With it, only the papers with a newer row in `papers` or `abstracts` are written, and a paper deleted since is deleted from the index.
 `--range I/N` writes part I of the corpusid range split into N equal parts, and is required.
 The range is the smallest to the largest corpusid at the release, read again by every part, so run all parts of one pass before the next load.
-A part streams from ClickHouse into the bulk requests, so the pass never holds it whole, but ClickHouse joins and sorts the whole part before it sends the first row, so a part should hold about 1M papers, or 1M changed papers in a diff pass.
+A part streams from ClickHouse into the bulk requests, so the pass never holds it whole, but ClickHouse reads one side of each join whole into a hash table before it sends the first row, so a part should hold about 1M papers, or 1M changed papers in a diff pass.
 ClickHouse ends the stream when it cannot write to it for `http_send_timeout`, 30 s unless the server's default profile raises it, so a bulk write that stalls that long stops the part with exit 1, and a rerun repeats it.
 The release must be the latest applied. The tables keep no history, so a base pass at an older release does not rebuild that release, it drops every paper whose latest row is newer, can carry an older abstract, and still reports success.
 Each document carries the larger `version` of its two rows, and the writes use `external_gte`, which accepts an equal version again.

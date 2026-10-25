@@ -18,7 +18,8 @@ class SearchSource(Protocol):
         """The live rows of both tables at ``release``, one item per corpus ID from low to high.
 
         The tables keep one row per key, so ``release`` must be the one they hold: an older
-        state cannot be read back once a later release replaced a row.
+        state cannot be read back once a later release replaced a row. Items come in no set
+        order.
         """
         ...
 

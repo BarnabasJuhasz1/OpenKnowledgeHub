@@ -81,7 +81,6 @@ LEFT JOIN (
     WHERE {_RANGE} AND {_AT}
     {_LATEST}
 ) AS a ON a.corpusid = p.corpusid
-ORDER BY corpusid
 {_SETTINGS}"""
 DIFF_QUERY = f"""
 WITH touched AS (
@@ -101,7 +100,6 @@ LEFT JOIN (
     WHERE {_RANGE} AND {_AT} AND corpusid IN (SELECT corpusid FROM touched)
     {_LATEST}
 ) AS a ON a.corpusid = t.corpusid
-ORDER BY corpusid
 {_SETTINGS}"""
 
 
