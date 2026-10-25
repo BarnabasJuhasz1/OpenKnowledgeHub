@@ -1,9 +1,9 @@
 from collections.abc import AsyncGenerator
 
 import pytest
-from openknowledge_contracts.embeddings import EmbeddingMutation
 from pydantic import ValidationError
 
+from openknowledge_contracts.embeddings import EmbeddingMutation
 from openknowledge_core.search.errors import SearchRejected
 from openknowledge_core.search.vector_models import (
     SearchVectorNeighbors,

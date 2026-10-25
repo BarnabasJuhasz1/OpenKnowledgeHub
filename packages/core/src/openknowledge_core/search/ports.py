@@ -5,9 +5,8 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Mapping, Sequence
 from typing import Any, Protocol
 
-from openknowledge_contracts.embeddings import EmbeddingMutation
-
 from openknowledge_contracts.datasets import ReleaseId
+from openknowledge_contracts.embeddings import EmbeddingMutation
 from openknowledge_core.search.models import BulkOperation, IndexName, SourceRows
 from openknowledge_core.search.vector_models import (
     SearchVectorNeighbors,

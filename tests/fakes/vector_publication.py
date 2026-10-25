@@ -3,7 +3,6 @@
 import hashlib
 
 from openknowledge_contracts.embeddings import EmbeddingMutation, EmbeddingSnapshot
-
 from openknowledge_core.search.vector_models import ResolvedVectors, VectorPublication
 from openknowledge_core.search.vectors import vector_record_bytes
 

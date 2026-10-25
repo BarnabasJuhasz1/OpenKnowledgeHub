@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from typing import Annotated, Literal, Self
 
-from openknowledge_contracts.embeddings import CorpusId, EmbeddingMutation, EmbeddingSnapshot
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, model_validator
+
+from openknowledge_contracts.embeddings import CorpusId, EmbeddingMutation, EmbeddingSnapshot
 
 VectorIndex = Annotated[str, Field(pattern=r"^paper-vectors-[0-9a-f]{32}$")]
 Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
