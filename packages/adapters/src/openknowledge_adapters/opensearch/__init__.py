@@ -9,12 +9,15 @@ from contextlib import asynccontextmanager
 from opensearchpy import AsyncConnection, AsyncHttpConnection, AsyncOpenSearch
 
 from openknowledge_adapters.opensearch.config import OpenSearchConfig
-from openknowledge_adapters.opensearch.sink import OpenSearchSink
+from openknowledge_adapters.opensearch.sink import INITIAL_BACKOFF, OpenSearchSink
 
 
 @asynccontextmanager
 async def connect(
-    config: OpenSearchConfig, *, connection_class: type[AsyncConnection] = AsyncHttpConnection
+    config: OpenSearchConfig,
+    *,
+    connection_class: type[AsyncConnection] = AsyncHttpConnection,
+    initial_backoff: float = INITIAL_BACKOFF,
 ) -> AsyncGenerator[OpenSearchSink, None]:
     """One client per run, closed with its sessions when the run ends.
 
@@ -41,7 +44,7 @@ async def connect(
         timeout=config.timeout_seconds,
     )
     try:
-        yield OpenSearchSink(client)
+        yield OpenSearchSink(client, initial_backoff=initial_backoff)
     finally:
         await client.close()
 

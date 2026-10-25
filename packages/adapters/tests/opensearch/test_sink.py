@@ -1,7 +1,7 @@
 import json
 from base64 import b64encode
 from collections.abc import Collection, Mapping
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from opensearchpy import AsyncConnection
@@ -38,11 +38,18 @@ CONFLICT = {
 REJECTED = {"type": "es_rejected_execution_exception", "reason": "rejected execution of bulk"}
 REFUSED = {"errors": True, "items": [item("101", 201), item("102", 409, CONFLICT)]}
 BUSY = {"errors": True, "items": [item("101", 429, REJECTED), item("102", 429, REJECTED)]}
+ONE_BUSY = {"errors": True, "items": [item("101", 429, REJECTED), item("102", 201)]}
+TAKEN = {"errors": False, "items": [item("101", 201)]}
 ECHO = "<html>Bad gateway; the request said Authorization: Basic hunter2 and more</html>"
 
 
 def answering(status: int, answer: object) -> type[AsyncConnection]:
-    """A connection class whose every request gets ``status`` with ``answer``, or no connection."""
+    """A connection class whose every request gets ``status`` with ``answer``, or no connection.
+
+    A list answers each request with its next item, taken out of the list, and bytes are a body
+    marked as JSON. An error status is raised as opensearch-py 3.2's AsyncHttpConnection raises
+    it, without the content type.
+    """
 
     class FakeConnection(AsyncConnection):
         headers: dict[str, str]
@@ -61,10 +68,14 @@ def answering(status: int, answer: object) -> type[AsyncConnection]:
             assert self.headers["authorization"] == AUTHORIZATION
             if status == 0:
                 raise OpenSearchConnectionError("N/A", "connection refused", None)
-            text = answer if isinstance(answer, str) else json.dumps(answer)
-            content_type = "text/html" if isinstance(answer, str) else "application/json"
+            found = cast("list[object]", answer).pop(0) if isinstance(answer, list) else answer
+            if isinstance(found, bytes):
+                text, content_type = found.decode(), "application/json"
+            else:
+                text = found if isinstance(found, str) else json.dumps(found)
+                content_type = "text/html" if isinstance(found, str) else "application/json"
             if not 200 <= status < 300 and status not in ignore:
-                self._raise_error(status, text, content_type)
+                self._raise_error(status, text)
             return status, {"content-type": content_type}, text
 
         async def close(self) -> None:
@@ -98,19 +109,33 @@ def answering(status: int, answer: object) -> type[AsyncConnection]:
             SearchUnavailable,
             "OpenSearch bulk write to papers failed with status 502: an answer that is not",
         ),
+        (200, [ONE_BUSY, TAKEN], None, ""),
+        (200, ECHO.encode(), SearchRejected, "OpenSearch bulk write to papers failed: an answer"),
+        pytest.param(
+            200,
+            b"[" * 10_000 + b"]" * 10_000,
+            SearchRejected,
+            "OpenSearch bulk write to papers failed: an answer",
+            id="a deeply nested answer",
+        ),
     ],
 )
 async def test_bulk_failures_are_mapped_and_a_refused_item_is_named(
     status: int,
     answer: object,
-    error: type[IngestionError],
+    error: type[IngestionError] | None,
     message: str,
 ) -> None:
     operations: list[Any] = [
         search_document(paper_row(101, VERSION, title="A Synthetic Paper")),
         search_document(paper_row(102, VERSION)),
     ]
-    async with opensearch.connect(CONFIG, connection_class=answering(status, answer)) as sink:
+    connection = answering(status, answer)
+    async with opensearch.connect(CONFIG, connection_class=connection, initial_backoff=0) as sink:
+        if error is None:  # the helper sends the 429 again, and the second answer takes it
+            await sink.bulk("papers", operations)
+            assert answer == []  # two requests, one per answer
+            return
         with pytest.raises(error) as raised:
             await sink.bulk("papers", operations)
     assert str(raised.value).startswith(message), str(raised.value)
