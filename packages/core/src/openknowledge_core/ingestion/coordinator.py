@@ -8,6 +8,7 @@ from openknowledge_contracts.datasets import DatasetName, ReleaseId
 from openknowledge_contracts.manifests import BucketName, DatasetManifest, ObjectPrefix
 from openknowledge_contracts.tables.s2 import CONTRACTS
 from openknowledge_core.ingestion.archive_progress import HashedRef
+from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.commands import DownloadDataset
 from openknowledge_core.ingestion.errors import IngestionError
 
@@ -61,19 +62,21 @@ class DatasetSyncResult(BaseModel):
 
 class SyncResult(BaseModel):
     datasets: list[DatasetSyncResult] = Field(default_factory=lambda: [])
+    citation_edges: BuildCitationEdgesResult | None = None
+    citation_edges_failure: str | None = None
 
 
 class SyncIncomplete(IngestionError):
     def __init__(self, result: SyncResult) -> None:
         self.result = result
-        super().__init__(
-            "S2 sync incomplete: "
-            + "; ".join(
-                f"{item.dataset}: {item.reason or item.outcome}"
-                for item in result.datasets
-                if item.outcome in ("failed", "needs_base")
-            )
-        )
+        failures = [
+            f"{item.dataset}: {item.reason or item.outcome}"
+            for item in result.datasets
+            if item.outcome in ("failed", "needs_base")
+        ]
+        if result.citation_edges_failure is not None:
+            failures.append(f"citation edges: {result.citation_edges_failure}")
+        super().__init__("S2 sync incomplete: " + "; ".join(failures))
 
 
 def guard_diff(base: DatasetManifest, dataset: str, diff_bytes: int) -> None:

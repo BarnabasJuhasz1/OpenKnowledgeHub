@@ -2,7 +2,7 @@
 
 ## Semantic Scholar download, locally
 
-Needs `uv` and `gcloud auth application-default login` with an account that can create and read objects in the bucket.
+Needs `uv`, the shared `PREFECT_API_URL`, and `gcloud auth application-default login` with an account that can create and read objects in the bucket.
 Keep the API key in `~/.config/openknowledge/.env` as `S2_API_KEY=...` and let uv load it.
 Run only `publication-venues` locally. Every other dataset downloads through Batch.
 Direct local downloads do not participate in the shared managed-download budget.
@@ -40,8 +40,9 @@ It refreshes a signed link that has expired.
 Settings come from the environment.
 The key is `S2_API_KEY`, and every other setting is `OKP_` plus a field name from `pipelines/src/openknowledge_pipelines/settings.py`.
 
-Unmanaged local flows can use Prefect's temporary local server when no API URL is configured.
-`okp` turns that server's telemetry off.
+Mutating commands, including `okp s2 pin` and `okp s2 download`, require the shared
+`PREFECT_API_URL` and an open deployment admission gate; a temporary local server is insufficient.
+`okp` turns Prefect server telemetry off.
 
 ## Downloading through Batch
 
@@ -93,6 +94,8 @@ The Prefect deployment `s2-sync/control-vm` (or `okp s2 sync` on the shared serv
 seven core datasets in ClickHouse, then archives full text and SPECTER2 in GCS.
 It selects per-dataset releases and resumes contiguous diffs from verified progress.
 Core failures, including a missing base, block both archives; initial bases require manual setup.
+When citations holds a release the citation edge tables were not built from, the sync rebuilds
+them before the archives; a failed rebuild blocks the archives like a core failure.
 Core diffs above 30% of the configured full-base size are not loaded. This reference stays fixed
 as diffs advance; refresh `core_baselines` after installing a replacement base.
 
@@ -134,16 +137,18 @@ A citations load refuses until 00014 is applied, and 00014 refuses while `citati
 To get past it, stop citation loads, run `RENAME TABLE citations TO citations_legacy`, run the Up statement of 00007 to create an empty table with a new UUID, apply the migrations and load the base release again from all its raw objects.
 The old checkpoints no longer count and stay in place. Drop `citations_legacy` once that load passes its checks.
 Migration 00015 adds `citation_edges_out` and `citation_edges_in`, slim tables ordered for
-outgoing and incoming neighbourhood lookups. Rebuild them manually with
-`okp s2 build-citation-edges` or the unscheduled Prefect deployment
-`s2-build-citation-edges/control-vm`; both take the shared `clickhouse` limit.
+outgoing and incoming neighbourhood lookups. The sync rebuilds them after citations takes a new
+release; rebuild them manually with `okp s2 build-citation-edges` or the unscheduled Prefect
+deployment `s2-build-citation-edges/control-vm`. All three take the shared `clickhouse` limit.
 They retain duplicate citing/cited pairs, so readers use `DISTINCT`, and they are plain
 MergeTree, so a query with `FINAL` on them fails. `intents` is a mask of background (1),
 methodology (2) and result (4); a null and an empty list both give 0, and other values are dropped.
 A rebuild refuses unless `citations` holds a completed release, which it records in `applied`
 for each edge table. It needs about 12 bytes of free disk per `citations` row and refuses to swap
-in fewer than 90% of the live edges. A cancelled rebuild's insert keeps running in ClickHouse;
-the next rebuild kills it before staging again.
+in fewer than 90% of the live edges. An edge-count refusal leaves the live tables unchanged;
+each sync repeats the rebuild until an operator resolves the refusal. A cancelled rebuild's
+insert keeps running in ClickHouse; the next rebuild stops it and removes stale staging tables
+before checking disk capacity.
 
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.
@@ -219,3 +224,39 @@ docker run --rm pipelines s2 download-shard --help
 Pull requests build and smoke-test it.
 Every push to `main` publishes it as `europe-west4-docker.pkg.dev/openknowledge-508216/openknowledge/pipelines:<commit>` and writes the digest to the job summary.
 Deployments pin that digest, never a tag, and pass it as `OKP_IMAGE_DIGEST`: receipts record it, and an image cannot know its own digest.
+
+## Deployment admission
+
+All mutating CLI commands and served flows hold a shared Prefect
+`deployment-admission` slot for their lifetime. Read-only `read-base`,
+`verify-base-manifest` and watchdog work while closed. Existing admitted Google Batch
+shard workers finish without Prefect access; direct shard commands require admission.
+
+Fresh `okp serve` creates the gate closed; restarts preserve it. Install this prerequisite
+in an idle window with old clients disabled: existing binaries do not honor admission.
+Never delete/recreate, deactivate or enable decay on the gate while clients can run.
+
+- `okp admission status` prints `{"supported": true, "closed": bool, "active_slots": int}`.
+- `okp admission close` sets capacity to zero, refusing new work while admitted work finishes.
+- `okp admission open` reopens after deployment verification; it refuses while slots are held.
+- `okp admission release --slots N` frees all held slots, only while closed and when `N`
+  matches the held count. First reconcile every run and external job using admission owner
+  logs, Prefect run states, Batch operations and ClickHouse activity (`system.processes`,
+  checked as the ClickHouse container default user, not the `openknowledge` user).
+  Never release to bypass drain.
+
+Sync holds the `semantic-scholar` lease from before admission through the whole cycle,
+including ClickHouse loads; managed downloads refuse while it runs. Batch recovery still
+precedes each source operation.
+Standalone loads, load-diff and citation edge rebuilds (CLI and served flows) acquire `clickhouse`
+before admission and fail promptly when busy, without capacity retries. Sync waits for
+ClickHouse while holding its source lease and admission; it does not refuse on load contention.
+Source lease refusals or cancellation before admission take no admission slot.
+Once admitted, only successful work releases its slot. Failed/interrupted runs and uncertain API responses
+require operator reconciliation: external work may survive. Counter mutations are never
+replayed on uncertain responses. This includes a load of a release that has not been archived,
+even if validation failed before writes: close admission, verify no surviving work, and use
+`admission release` before reopening. Loads require the archived manifest and objects first.
+Closing alone does not establish idleness.
+A scheduled sync or load starting while closed ends Failed and mails `run_failed`;
+a gate left closed for days mails at every scheduled run.
