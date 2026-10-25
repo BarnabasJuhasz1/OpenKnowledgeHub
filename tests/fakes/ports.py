@@ -46,7 +46,6 @@ from openknowledge_core.search.errors import BulkRefused
 from openknowledge_core.search.models import (
     AbstractRow,
     BulkOperation,
-    CorpusSlice,
     DeleteDocument,
     PaperRow,
     SourceRows,
@@ -458,16 +457,23 @@ class FakeSearchSource:
     def __init__(self) -> None:
         self.base_rows: list[SourceRows] = []
         self.diff_rows: list[SourceRows] = []
-        self.asked: list[tuple[str | None, str, CorpusSlice]] = []
+        self.asked: list[tuple[str | None, str, int, int]] = []
+        self.bounded: list[str] = []
+        """The releases whose bounds were read, once per read."""
 
-    async def base(self, release: str, corpus_slice: CorpusSlice) -> AsyncGenerator[SourceRows]:
-        self.asked.append((None, release, corpus_slice))
+    async def bounds(self, release: str) -> tuple[int, int]:
+        self.bounded.append(release)
+        keys = [rows.corpusid for rows in (*self.base_rows, *self.diff_rows)] or [0]
+        return min(keys), max(keys)
+
+    async def base(self, release: str, low: int, high: int) -> AsyncGenerator[SourceRows]:
+        self.asked.append((None, release, low, high))
         return self._stream(self.base_rows)
 
     async def diff(
-        self, from_release: str, release: str, corpus_slice: CorpusSlice
+        self, from_release: str, release: str, low: int, high: int
     ) -> AsyncGenerator[SourceRows]:
-        self.asked.append((from_release, release, corpus_slice))
+        self.asked.append((from_release, release, low, high))
         return self._stream(self.diff_rows)
 
     async def _stream(self, rows: list[SourceRows]) -> AsyncGenerator[SourceRows]:
@@ -483,6 +489,8 @@ class FakeSearchSink:
         self.created: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
         self.requests: list[tuple[str, int]] = []
         self.refreshed: list[str] = []
+        self.intervals: dict[str, str | None] = {}
+        """Each index's refresh interval, once set."""
         self.refused: str | None = None
         """A corpus ID whose item every bulk request refuses."""
 
@@ -507,6 +515,9 @@ class FakeSearchSink:
                 )
             source = None if isinstance(operation, DeleteDocument) else operation.document.source()
             documents[operation.id] = (operation.version, source)
+
+    async def set_refresh_interval(self, index: str, interval: str | None) -> None:
+        self.intervals[index] = interval
 
     async def refresh(self, index: str) -> None:
         self.refreshed.append(index)

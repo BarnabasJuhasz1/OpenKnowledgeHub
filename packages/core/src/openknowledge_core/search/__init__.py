@@ -1,6 +1,11 @@
 """Turning the current rows of the paper tables into search documents, and writing them."""
 
-from openknowledge_core.search.commands import IndexPapers, IndexPapersResult
+from openknowledge_core.search.commands import (
+    IndexPapers,
+    IndexPapersResult,
+    SettleIndex,
+    SettleIndexResult,
+)
 from openknowledge_core.search.errors import BulkRefused, SearchRejected, SearchUnavailable
 from openknowledge_core.search.models import (
     AbstractRow,
@@ -29,6 +34,8 @@ __all__ = [
     "SearchSink",
     "SearchSource",
     "SearchUnavailable",
+    "SettleIndex",
+    "SettleIndexResult",
     "SourceRows",
     "document_operation",
 ]

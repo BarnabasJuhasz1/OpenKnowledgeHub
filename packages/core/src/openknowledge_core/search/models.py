@@ -25,8 +25,8 @@ class CorpusSlice(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
-    part: PositiveInt = 1
-    parts: PositiveInt = 1
+    part: PositiveInt
+    parts: PositiveInt
 
     @model_validator(mode="after")
     def _within(self) -> Self:

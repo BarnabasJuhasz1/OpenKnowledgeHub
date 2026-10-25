@@ -48,7 +48,8 @@ async def test_a_base_pass_writes_every_document_with_the_larger_version() -> No
         SourceRows(corpusid=101, paper=paper, abstract=abstract_row(101, V2)),
         SourceRows(corpusid=102, paper=paper_row(102, V1)),
     ]
-    result = await service(source, sink, bulk_bytes=1).index(IndexPapers(index=INDEX, release=NEXT))
+    command = IndexPapers(index=INDEX, release=NEXT, part=1, parts=1)
+    result = await service(source, sink, bulk_bytes=1).index(command)
     assert (result.created, result.written, result.deleted, result.documents) == (True, 2, 0, 2)
     assert result.requests == 2 and sink.requests == [(INDEX, 1), (INDEX, 1)]
     mapping, settings = sink.created[INDEX]
@@ -63,7 +64,8 @@ async def test_a_base_pass_writes_every_document_with_the_larger_version() -> No
     assert source_101["journal"] == {"name": "Example Journal"}
     version, source_102 = sink.indices[INDEX]["102"]
     assert version == V1 and source_102 is not None and "abstract" not in source_102
-    assert source.asked == [(None, NEXT, CorpusSlice(part=1, parts=1))]
+    assert source.asked == [(None, NEXT, 101, 102)]
+    assert source.bounded == [NEXT]  # once, for both bulk requests
 
 
 async def test_a_diff_pass_deletes_a_papers_tombstone_and_drops_a_tombstoned_abstract() -> None:
@@ -85,7 +87,7 @@ async def test_a_diff_pass_deletes_a_papers_tombstone_and_drops_a_tombstoned_abs
     version, source_102 = sink.indices[INDEX]["102"]
     assert version == V2 + 1 and source_102 is not None and "abstract" not in source_102
     assert "104" not in sink.indices[INDEX]
-    assert source.asked == [(RELEASE, NEXT, CorpusSlice(part=2, parts=3))]
+    assert source.asked == [(RELEASE, NEXT, *CorpusSlice(part=2, parts=3).bounds(102, 105))]
     # Over an index that does not exist, a diff pass refuses before it asks for anything.
     missing = FakeSearchSink()
     with pytest.raises(SearchRejected, match=f"{INDEX} does not exist; a base pass must create"):
@@ -98,8 +100,9 @@ async def test_a_refused_bulk_item_fails_the_pass() -> None:
     source, sink = FakeSearchSource(), FakeSearchSink()
     source.base_rows = [SourceRows(corpusid=101, paper=paper_row(101, V1))]
     sink.refused = "101"
+    command = IndexPapers(index=INDEX, release=RELEASE, part=1, parts=1)
     with pytest.raises(BulkRefused, match="corpusid 101: version_conflict_engine_exception"):
-        await service(source, sink).index(IndexPapers(index=INDEX, release=RELEASE))
+        await service(source, sink).index(command)
     assert sink.refreshed == []
 
 

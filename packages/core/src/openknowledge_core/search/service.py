@@ -12,7 +12,12 @@ from __future__ import annotations
 from contextlib import aclosing
 
 from openknowledge_contracts.search import PAPERS, SearchContract, index_body
-from openknowledge_core.search.commands import IndexPapers, IndexPapersResult
+from openknowledge_core.search.commands import (
+    IndexPapers,
+    IndexPapersResult,
+    SettleIndex,
+    SettleIndexResult,
+)
 from openknowledge_core.search.errors import SearchRejected
 from openknowledge_core.search.models import (
     BulkOperation,
@@ -91,12 +96,13 @@ class SearchIndexService:
     async def index(self, command: IndexPapers) -> IndexPapersResult:
         """One pass over one slice, in bulk requests of about ``bulk_bytes`` each.
 
-        A base pass asks the source for its rows before it creates a missing index, so a table
+        A base pass reads the source's bounds before it creates a missing index, so a table
         that cannot be reached leaves OpenSearch untouched. A diff pass only follows a base pass,
-        so it refuses a missing index before it asks for anything.
+        so it refuses a missing index before it asks for anything. Either reads the bounds once.
         """
         if command.from_release is None:
-            rows = await self._source.base(command.release, command.corpus_slice)
+            low, high = command.corpus_slice.bounds(*await self._source.bounds(command.release))
+            rows = await self._source.base(command.release, low, high)
             created = await self._ensure(command.index)
         else:
             if not await self._sink.exists(command.index):
@@ -104,9 +110,8 @@ class SearchIndexService:
                     f"{command.index} does not exist; a base pass must create it before a diff "
                     "pass writes into it"
                 )
-            rows = await self._source.diff(
-                command.from_release, command.release, command.corpus_slice
-            )
+            low, high = command.corpus_slice.bounds(*await self._source.bounds(command.release))
+            rows = await self._source.diff(command.from_release, command.release, low, high)
             created = False
         written = deleted = requests = 0
         batch: list[BulkOperation] = []
@@ -138,6 +143,16 @@ class SearchIndexService:
             requests=requests,
             documents=await self._sink.count(command.index),
         )
+
+    async def settle(self, command: SettleIndex) -> SettleIndexResult:
+        """Reset the refresh interval to the default and refresh, once a base build is in.
+
+        Unset, OpenSearch skips background refreshes of a shard that has
+        had no search for a while, where an explicit 1s refreshes every shard every second.
+        """
+        await self._sink.set_refresh_interval(command.index, None)
+        await self._sink.refresh(command.index)
+        return SettleIndexResult(index=command.index, refresh_interval="default")
 
     async def _ensure(self, index: IndexName) -> bool:
         """Create the index with the contract's mapping unless it exists; True when created.

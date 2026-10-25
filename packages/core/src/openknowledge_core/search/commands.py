@@ -23,8 +23,8 @@ class IndexPapers(BaseModel):
     index: IndexName
     release: ReleaseId
     from_release: ReleaseId | None = None
-    part: PositiveInt = 1
-    parts: PositiveInt = 1
+    part: PositiveInt
+    parts: PositiveInt
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -54,6 +54,21 @@ class IndexPapersResult(BaseModel):
     written: NonNegativeInt
     deleted: NonNegativeInt
     requests: NonNegativeInt
-    """Bulk requests sent."""
+    """Bulk batches sent, which the client and the bulk helper may each send more than once."""
     documents: NonNegativeInt
     """Documents the index holds after the pass, once refreshed."""
+
+
+class SettleIndex(BaseModel):
+    """Reset the refresh interval of ``index`` to the default and refresh it after a base build."""
+
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+    index: IndexName
+
+
+class SettleIndexResult(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    index: IndexName
+    refresh_interval: str

@@ -6,14 +6,16 @@ from collections.abc import AsyncGenerator, Mapping, Sequence
 from typing import Any, Protocol
 
 from openknowledge_contracts.datasets import ReleaseId
-from openknowledge_core.search.models import BulkOperation, CorpusSlice, IndexName, SourceRows
+from openknowledge_core.search.models import BulkOperation, IndexName, SourceRows
 
 
 class SearchSource(Protocol):
-    async def base(
-        self, release: ReleaseId, corpus_slice: CorpusSlice
-    ) -> AsyncGenerator[SourceRows]:
-        """The live rows of both tables at ``release``, one item per corpus ID in the slice.
+    async def bounds(self, release: ReleaseId) -> tuple[int, int]:
+        """The smallest and the largest corpus ID at ``release``, which every part splits."""
+        ...
+
+    async def base(self, release: ReleaseId, low: int, high: int) -> AsyncGenerator[SourceRows]:
+        """The live rows of both tables at ``release``, one item per corpus ID from low to high.
 
         The tables keep one row per key, so ``release`` must be the one they hold: an older
         state cannot be read back once a later release replaced a row.
@@ -21,7 +23,7 @@ class SearchSource(Protocol):
         ...
 
     async def diff(
-        self, from_release: ReleaseId, release: ReleaseId, corpus_slice: CorpusSlice
+        self, from_release: ReleaseId, release: ReleaseId, low: int, high: int
     ) -> AsyncGenerator[SourceRows]:
         """The latest row per key in both tables, tombstones included, for the changed keys.
 
@@ -40,6 +42,10 @@ class SearchSink(Protocol):
 
     async def bulk(self, index: IndexName, operations: Sequence[BulkOperation]) -> None:
         """Apply every operation, or raise BulkRefused naming a refused corpus ID and why."""
+        ...
+
+    async def set_refresh_interval(self, index: IndexName, interval: str | None) -> None:
+        """Set how often the index refreshes: ``1s``, ``-1`` for never, or None for the default."""
         ...
 
     async def refresh(self, index: IndexName) -> None: ...
