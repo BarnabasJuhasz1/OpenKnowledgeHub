@@ -144,8 +144,10 @@ MergeTree, so a query with `FINAL` on them fails. `intents` is a mask of backgro
 methodology (2) and result (4); a null and an empty list both give 0, and other values are dropped.
 A rebuild refuses unless `citations` holds a completed release, which it records in `applied`
 for each edge table. It needs about 12 bytes of free disk per `citations` row and refuses to swap
-in fewer than 90% of the live edges. A cancelled rebuild's insert keeps running in ClickHouse;
-the next rebuild kills it before staging again.
+in fewer than 90% of the live edges. An edge-count refusal leaves the live tables unchanged;
+each sync repeats the rebuild until an operator resolves the refusal. A cancelled rebuild's
+insert keeps running in ClickHouse; the next rebuild stops it and removes stale staging tables
+before checking disk capacity.
 
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.

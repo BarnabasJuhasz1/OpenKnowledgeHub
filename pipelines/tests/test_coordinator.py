@@ -229,7 +229,10 @@ class Cycle:
         async def edges_current(release: str) -> bool:
             assert self.loading, "freshness must be checked under the shared lease"
             built = [await self.applied.latest(table) for table in EDGE_TABLES]
-            return all(row is not None and row.release == release for row in built)
+            return all(
+                row is not None and row.release == release and row.target_uuid == self.tables.uuid
+                for row in built
+            )
 
         async def build_edges() -> BuildCitationEdgesResult:
             assert self.loading
@@ -328,6 +331,32 @@ async def test_core_failure_preserves_checkpoints_and_blocks_archives(
     assert applied is not None and applied.release == RELEASE
     assert all(item.final == NEXT for item in others)
     assert not any(dataset in LARGE_ORDER for _, dataset, _ in cycle.events)
+
+
+async def test_old_citation_edges_rebuild_at_final_release_before_archives(cycle: Cycle) -> None:
+    for table in EDGE_TABLES:
+        await cycle.applied.record(applied_release(table, RELEASE, timedelta()))
+    command = cycle.command.model_copy(update={"enabled_archives": frozenset(LARGE_ORDER)})
+    services = cycle.services()
+    async with cycle.load_lease():
+        assert await services.edges.is_current(RELEASE)
+        assert not await services.edges.is_current(NEXT)
+    result = await s2_sync.run_sync(command, services)
+    citations = next(item for item in result.datasets if item.dataset == "citations")
+    assert (citations.start, citations.final) == (RELEASE, NEXT)
+    assert result.citation_edges is not None and result.citation_edges.source_release == NEXT
+    assert [event for event in cycle.events if event[0] == "edges"] == [
+        ("edges", "citations", NEXT)
+    ]
+    built = cycle.events.index(("edges", "citations", NEXT))
+    assert built > cycle.events.index(("load", "citations", NEXT))
+    archives = [
+        index for index, (_, dataset, _) in enumerate(cycle.events) if dataset in LARGE_ORDER
+    ]
+    assert archives and min(archives) > built
+    for table in EDGE_TABLES:
+        marker = await cycle.applied.latest(table)
+        assert marker is not None and marker.release == NEXT
 
 
 async def test_citation_edges_rebuild_once_per_citations_release(

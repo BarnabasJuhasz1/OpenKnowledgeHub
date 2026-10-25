@@ -75,14 +75,17 @@ class ClickHouseCitationEdges:
             raise TableRejected(
                 "citations holds no completed release; finish its load before building edges"
             )
-        live = await self._preflight()
         # A cancelled run's insert keeps running on the server. Replacing its query ID stops it,
         # unlike KILL QUERY, without a grant.
         await self._client.post("SELECT 1 SETTINGS replace_running_query = 1", query_id=QUERY_ID)
+        # Reclaim abandoned copies, including an old live table after a partial swap.
+        # Stop the old insert first; never drop the published names.
+        for table in TABLES:
+            await self._client.post(f"DROP TABLE IF EXISTS {table}_new SYNC")
+        live = await self._preflight()
         results: dict[str, CitationEdgeTableResult] = {}
         for table in TABLES:
             started = monotonic()
-            await self._client.post(f"DROP TABLE IF EXISTS {table}_new SYNC")
             await self._client.post(f"CREATE TABLE {table}_new AS {table}")
             rows = await self._client.written(
                 f"INSERT INTO {table}_new (citing, cited, isinfluential, intents) "
