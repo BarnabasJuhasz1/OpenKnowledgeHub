@@ -190,32 +190,24 @@ Deployments pin that digest, never a tag, and pass it as `OKP_IMAGE_DIGEST`: rec
 
 ## Deployment admission
 
-All mutating CLI commands and served flows acquire the shared Prefect
-`deployment-admission` limit for their full lifetime. `okp admission close` sets its
-capacity to zero atomically, refusing new execution while admitted work finishes.
-`okp admission status` emits sanitized JSON; `okp admission open` is reserved for
-the deployment owner after verification. Fresh `okp serve` creates the limit closed;
-restarts preserve it. Existing binaries do not honor this boundary: install this
-prerequisite only in an operator-controlled idle window after disabling all old
-clients. Do not infer support from creation of a limit alone.
+All mutating CLI commands and served flows hold a shared Prefect
+`deployment-admission` slot for their lifetime. Read-only `read-base`,
+`verify-base-manifest` and watchdog work while closed. Existing admitted Google Batch
+shard workers finish without Prefect access; direct shard commands require admission.
 
-Slots do not expire: failed work, a crashed/interrupted process or an uncertain API response blocks deployment
-until an operator reconciles the process and external jobs. Once every run and job of
-the held slots is gone, `okp admission release --slots N` frees them while admission is
-closed; `N` must match `status`. Never release slots just to pass drain. Existing Google Batch shard workers (valid task index/count, admitted operation marker
-and matching shard environment) finish
-already admitted work without Prefect access; direct shard commands require admission.
-This worker environment is an execution convention, not an authorization boundary.
-External Batch jobs, Prefect run states and ClickHouse activity must independently
-be checked before mutation. Closing admission alone does not establish idleness.
+Fresh `okp serve` creates the gate closed; restarts preserve it. Install this prerequisite
+in an idle window with old clients disabled: existing binaries do not honor admission.
+Never delete/recreate, deactivate or enable decay on the gate while clients can run.
 
-Admission logs include an owner identifier at acquisition and completion. Preserve these
-logs with Prefect run and Batch operation evidence for explicit recovery. A failed command
-may still have external work running; only successful completion releases its slot.
-The read-only watchdog takes no slot, so it keeps its heartbeat while closed. A refusal the API proves applied nothing (a closed or
-missing limit) holds no slot, and a database error Prefect rolled back is retried.
-Never delete/recreate, deactivate or change decay on the gate while clients can run.
-Read-only `read-base` and `verify-base-manifest` commands remain usable while closed.
-A scheduled sync or load that starts while admission is closed is refused, ends Failed and
-sends a `run_failed` mail. That is expected during a deployment window; a gate left closed
-for days mails at every scheduled run.
+- `okp admission status` prints `{"supported": true, "closed": bool, "active_slots": int}`.
+- `okp admission close` sets capacity to zero, refusing new work while admitted work finishes.
+- `okp admission open` reopens after deployment verification; it refuses while slots are held.
+- `okp admission release --slots N` frees all held slots, only while closed and when `N`
+  matches the held count. First reconcile every run and external job using admission owner
+  logs, Prefect run states, Batch operations and ClickHouse activity. Never release to bypass drain.
+
+Only successful work releases its slot. Failed/interrupted runs and uncertain API responses
+require operator reconciliation: external work may survive. Counter mutations are never
+replayed on uncertain responses. Closing alone does not establish idleness.
+A scheduled sync or load starting while closed ends Failed and mails `run_failed`;
+a gate left closed for days mails at every scheduled run.

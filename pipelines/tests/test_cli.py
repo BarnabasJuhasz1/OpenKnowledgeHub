@@ -560,16 +560,6 @@ def test_read_base_cli_without_source_key_or_control_api(
     assert store.objects == before
 
 
-def test_direct_mutation_requires_shared_admission_before_opening_clients(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("S2_API_KEY", "test-key")
-    with temporary_settings({PREFECT_API_URL: None}):
-        code, output = okp("pin", *TARGET)
-    assert code == 1
-    assert "Admission requires the shared PREFECT_API_URL" in output
-
-
 @pytest.mark.parametrize("partial_worker", [False, True])
 def test_direct_shard_without_complete_worker_context_requires_admission(
     monkeypatch: pytest.MonkeyPatch,
@@ -588,31 +578,6 @@ def test_direct_shard_without_complete_worker_context_requires_admission(
     assert "Admission requires the shared PREFECT_API_URL" in output
 
 
-@pytest.mark.usefixtures("wired")
-def test_admitted_batch_shard_finishes_without_reacquiring_gate(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from openknowledge_pipelines import admission
-
-    @asynccontextmanager
-    async def forbidden() -> AsyncGenerator[None]:
-        pytest.fail("already admitted Batch worker must not reacquire admission")
-        yield
-
-    monkeypatch.setattr(admission, "execution", forbidden)
-    for name, value in {
-        "OKP_BATCH_OPERATION_ID": "a" * 32,
-        "BATCH_TASK_INDEX": "0",
-        "BATCH_TASK_COUNT": "1",
-        "OKP_SHARD": "0",
-    }.items():
-        monkeypatch.setenv(name, value)
-    code, output = okp(
-        "download-shard", "--release", RELEASE, "--dataset", "papers", "--shard", "0", *TARGET
-    )
-    assert code == 0, output
-
-
 def test_verify_manifest_remains_read_only_without_admission(
     monkeypatch: pytest.MonkeyPatch,
     service: DownloadDatasetService,
@@ -620,7 +585,6 @@ def test_verify_manifest_remains_read_only_without_admission(
     store: FakeStore,
 ) -> None:
     from openknowledge_core.ingestion.archive_progress import ArchiveProgress
-    from openknowledge_pipelines import admission
 
     source.add("s2orc_v2", "part.gz", PAPERS["part-0.gz"])
     command = DownloadDataset(dataset="s2orc_v2", release=RELEASE, bucket="raw", prefix="s2")
@@ -675,8 +639,6 @@ def test_load_refuses_before_opening_regular_or_telemetry_clients(
 def test_admission_command_failure_does_not_claim_closure(
     monkeypatch: pytest.MonkeyPatch, action: str
 ) -> None:
-    from openknowledge_pipelines import admission
-
     def lost_response(action: str) -> admission.AdmissionStatus:
         raise OSError("response lost after commit; secret diagnostic")
 

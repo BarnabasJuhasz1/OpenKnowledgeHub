@@ -214,7 +214,6 @@ def sync_deployment() -> RunnerDeployment:
 @flow(name="watchdog", persist_result=False)
 async def watchdog() -> WatchdogResult:
     settings = WatchdogSettings()  # pyright: ignore[reportCallIssue]
-    # It only reads, so it runs while admission is closed and keeps its heartbeat.
     async with bootstrap.open_watchdog(settings) as service:
         return await bootstrap.watchdog_flow(service, settings).fn()
 

@@ -32,8 +32,8 @@ class _Refused(AdmissionError):
     """The API answered that it applied nothing: a missing limit or a closed gate."""
 
 
-class _RolledBack(AdmissionError):
-    """A retryable database error: safe to retry a read, but a mutation may have committed."""
+class _DatabaseUnavailable(AdmissionError):
+    """A read may retry this response; a mutation may have committed."""
 
 
 class AdmissionStatus(BaseModel):
@@ -68,8 +68,8 @@ def _check_response(response: httpx.Response) -> None:
     if response.is_success or expected:
         return
     if response.headers.get("Prefect-Maintenance") != "true":
-        if response.status_code == 503 and _body(response) == _ROLLED_BACK:
-            raise _RolledBack("Admission API database busy")
+        if response.status_code == 503 and _body(response) == _DATABASE_UNAVAILABLE:
+            raise _DatabaseUnavailable("Admission API database busy")
         if response.status_code in (404, 423):
             raise _Refused("Admission limit missing or closed")
     raise AdmissionError(
@@ -79,7 +79,7 @@ def _check_response(response: httpx.Response) -> None:
 
 # Prefect's handler for retryable database errors answers 503 with this body. It covers
 # lost connections too, so it does not prove a rollback.
-_ROLLED_BACK = {"exception_message": "Service Unavailable"}
+_DATABASE_UNAVAILABLE = {"exception_message": "Service Unavailable"}
 
 
 def _body(response: httpx.Response) -> object:
@@ -100,7 +100,7 @@ async def _retrying[T](call: Callable[[], Awaitable[T]]) -> T:
     for delay in (0.5, 1, 2):
         try:
             return await call()
-        except _RolledBack:
+        except _DatabaseUnavailable:
             await asyncio.sleep(delay)
     return await call()
 
@@ -109,7 +109,7 @@ def _retried[T](call: Callable[[], T]) -> T:
     for delay in (0.5, 1, 2):
         try:
             return call()
-        except _RolledBack:
+        except _DatabaseUnavailable:
             time.sleep(delay)
     return call()
 
@@ -215,15 +215,8 @@ async def _release(client: PrefectClient, identity: UUID, owner: str) -> None:
 
 def ensure_closed() -> None:
     """Initial install requires explicit operator admission after verification."""
-    _require_server()
     try:
-        with (
-            temporary_settings({PREFECT_CLIENT_MAX_RETRIES: 0}),
-            get_client(
-                sync_client=True,
-                httpx_settings={"timeout": 10, "event_hooks": {"response": [_check_response]}},
-            ) as client,
-        ):
+        with _control() as client:
             try:
                 current = _retried(lambda: client.read_global_concurrency_limit_by_name(NAME))
             except ObjectNotFound:
@@ -268,11 +261,7 @@ def status(action: Literal["status", "close", "open"] = "status") -> AdmissionSt
 
 
 def release(slots: int) -> AdmissionStatus:
-    """Free every held slot once the runs that took them are known to be gone.
-
-    Slots carry no owner, so all of them are freed at once, and only while admission is
-    closed. ``slots`` must match the count held, so nothing changed since it was inspected.
-    """
+    """Free all held slots after operator reconciliation, only while closed."""
     with _control() as client:
         current = _retried(lambda: client.read_global_concurrency_limit_by_name(NAME))
         _validate(current)

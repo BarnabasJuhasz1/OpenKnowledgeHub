@@ -25,6 +25,10 @@ from openknowledge_pipelines import admission
         "release-maintenance",
         "acquire-busy",
         "release-busy",
+        "acquire-timeout",
+        "release-timeout",
+        "close-on-release",
+        "read-busy",
     ],
 )
 async def test_uncertainty_never_replays_or_compensates_counter_mutations(
@@ -48,6 +52,8 @@ async def test_uncertainty_never_replays_or_compensates_counter_mutations(
                 return httpx.Response(
                     503, headers={"Prefect-Maintenance": "true", "Retry-After": "0"}
                 )
+            if failure == "acquire-timeout":
+                raise httpx.ReadTimeout("response timed out after commit")
             if failure == "acquire":
                 raise httpx.ReadError("response lost after commit")
             if failure == "acquire-busy":
@@ -58,6 +64,12 @@ async def test_uncertainty_never_replays_or_compensates_counter_mutations(
             assert json.loads(request.content) == {"names": [admission.NAME], "slots": 1}
             decrements += 1
             slots -= 1
+            if failure == "release-timeout":
+                raise httpx.ReadTimeout("response timed out after commit")
+            if failure in ("close-on-release", "read-busy"):
+                return httpx.Response(
+                    200, json=[{"id": identity, "name": admission.NAME, "limit": 0}]
+                )
             if failure == "release-maintenance":
                 return httpx.Response(
                     503, headers={"Prefect-Maintenance": "true", "Retry-After": "0"}
@@ -67,6 +79,8 @@ async def test_uncertainty_never_replays_or_compensates_counter_mutations(
             raise httpx.ReadError("response lost after commit")
         else:
             reads += 1
+            if failure == "read-busy" and reads == 1:
+                return httpx.Response(503, json={"exception_message": "Service Unavailable"})
             return httpx.Response(
                 200,
                 json={
@@ -91,18 +105,28 @@ async def test_uncertainty_never_replays_or_compensates_counter_mutations(
             yield instance
 
     monkeypatch.setattr(admission, "get_client", client)
-    expected = asyncio.CancelledError if failure == "cancel" else RuntimeError
+
+    async def work() -> None:
+        async with admission.execution():
+            if failure == "body":
+                raise RuntimeError("external job may survive")
+            if failure == "cancel":
+                raise asyncio.CancelledError
+
+    success = failure in ("close-on-release", "read-busy")
     with temporary_settings({PREFECT_API_URL: "http://127.0.0.1:1/api"}):
-        with pytest.raises(expected):
-            async with admission.execution():
-                assert failure not in ("acquire", "inactive", "acquire-maintenance", "acquire-busy")
-                if failure == "body":
-                    raise RuntimeError("external job may survive")
-                if failure == "cancel":
-                    raise asyncio.CancelledError
+        if success:
+            await work()
+        else:
+            expected = asyncio.CancelledError if failure == "cancel" else RuntimeError
+            with pytest.raises(expected):
+                await work()
+    released = failure.startswith("release") or success
     assert increments == 1
-    assert decrements == (1 if failure.startswith("release") else 0)
-    assert slots == (0 if failure.startswith("release") else 1)
+    assert decrements == int(released)
+    assert slots == (0 if released else 1)
+    if failure == "read-busy":
+        assert reads == 4
 
 
 def test_status_does_not_loop_on_maintenance(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -129,50 +153,3 @@ def test_status_does_not_loop_on_maintenance(monkeypatch: pytest.MonkeyPatch) ->
         with pytest.raises(admission.AdmissionError, match="request refused"):
             admission.status()
     assert calls == 1
-
-
-async def test_release_accepts_capacity_close_after_its_pre_read(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    identity = "00000000-0000-0000-0000-000000000001"
-    slots = 0
-
-    def send(request: httpx.Request) -> httpx.Response:
-        nonlocal slots
-        if request.url.path.endswith("/csrf-token"):
-            return httpx.Response(404)
-        if request.url.path.endswith("/increment"):
-            slots += 1
-            return httpx.Response(
-                200, json=[{"id": identity, "name": admission.NAME, "limit": admission.OPEN_LIMIT}]
-            )
-        if request.url.path.endswith("/decrement"):
-            assert json.loads(request.content) == {"names": [admission.NAME], "slots": 1}
-            slots -= 1
-            # Close committed after the pre-read, before the decrement transaction.
-            return httpx.Response(200, json=[{"id": identity, "name": admission.NAME, "limit": 0}])
-        return httpx.Response(
-            200,
-            json={
-                "id": identity,
-                "name": admission.NAME,
-                "limit": admission.OPEN_LIMIT,
-                "active_slots": slots,
-                "slot_decay_per_second": 0,
-                "active": True,
-            },
-        )
-
-    @asynccontextmanager
-    async def client(httpx_settings: dict[str, object]) -> AsyncGenerator[PrefectClient]:
-        async with PrefectClient(
-            "http://127.0.0.1:1/api",
-            httpx_settings={**httpx_settings, "transport": httpx.MockTransport(send)},
-        ) as instance:
-            yield instance
-
-    monkeypatch.setattr(admission, "get_client", client)
-    with temporary_settings({PREFECT_API_URL: "http://127.0.0.1:1/api"}):
-        async with admission.execution():
-            assert slots == 1
-    assert slots == 0

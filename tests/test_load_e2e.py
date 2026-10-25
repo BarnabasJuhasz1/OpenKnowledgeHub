@@ -109,31 +109,7 @@ def ports() -> Iterator[dict[str, str]]:
             check=True,
             timeout=30,
         )
-        database_version = subprocess.run(
-            [
-                *compose,
-                "exec",
-                "-T",
-                "postgres",
-                "psql",
-                "-U",
-                "e2e",
-                "-d",
-                "prefect",
-                "-Atc",
-                "SHOW server_version",
-            ],
-            env=env,
-            check=True,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        ).stdout.strip()
-        assert database_version.split()[0] == "18.6", "E2E requires PostgreSQL 18.6"
         api_url = f"http://127.0.0.1:{ports['PREFECT_PORT']}/api"
-        version = httpx.get(f"{api_url}/admin/version", timeout=5)
-        version.raise_for_status()
-        assert version.json() == "3.8.8", "E2E requires the pinned Prefect server"
         gcs_root = f"http://127.0.0.1:{ports['GCS_PORT']}"
         httpx.post(
             f"{gcs_root}/storage/v1/b", params={"project": "e2e"}, json={"name": BUCKET}

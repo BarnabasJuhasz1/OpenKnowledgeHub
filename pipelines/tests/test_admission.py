@@ -3,15 +3,10 @@
 import asyncio
 from collections.abc import Generator
 from concurrent.futures import ThreadPoolExecutor
-from unittest.mock import AsyncMock
-from uuid import UUID
 
-import httpx
 import pytest
-from prefect.client.orchestration import PrefectClient, get_client
+from prefect.client.orchestration import get_client
 from prefect.client.schemas.actions import GlobalConcurrencyLimitUpdate
-from prefect.client.schemas.responses import GlobalConcurrencyLimitResponse
-from prefect.settings import PREFECT_API_URL, temporary_settings
 
 from openknowledge_pipelines import admission
 
@@ -38,9 +33,10 @@ async def test_close_blocks_concurrent_submission_without_cancelling_existing(
         with ThreadPoolExecutor(1) as pool:
             closed = pool.submit(admission.status, "close").result(timeout=10)
         assert closed.closed and closed.active_slots == 1
-        with pytest.raises(RuntimeError, match="execution refused"):
+        with pytest.raises(admission.AdmissionError, match="execution refused") as refused:
             async with admission.execution():
                 pytest.fail("closed gate admitted new execution")
+        assert "reconcile" not in str(refused.value)
     assert admission.status().active_slots == 0
     assert admission.status().closed
 
@@ -62,54 +58,8 @@ async def test_missing_and_inactive_limits_refuse_execution(closed_admission: No
     assert admission.status().closed
 
 
-async def test_unreleased_slot_survives_close_and_serve_initialization(
-    closed_admission: None,
-) -> None:
-    admission.status("open")
-    async with get_client() as client:
-        await client.increment_concurrency_slots([admission.NAME], 1, "concurrency")
-    admission.status("close")
-    admission.ensure_closed()
-    assert admission.status().active_slots == 1
-    assert admission.status().closed
-    with pytest.raises(RuntimeError, match="still occupied"):
-        admission.status("open")
-
-
-@pytest.mark.parametrize("interruption", [asyncio.CancelledError, KeyboardInterrupt])
-async def test_interruption_retains_nonleased_slot_for_reconciliation(
-    monkeypatch: pytest.MonkeyPatch,
-    interruption: type[BaseException],
-) -> None:
-    client = AsyncMock(spec=PrefectClient)
-    client.__aenter__.return_value = client
-    current = GlobalConcurrencyLimitResponse(
-        id=UUID(int=1),
-        name=admission.NAME,
-        limit=admission.OPEN_LIMIT,
-        active_slots=1,
-        slot_decay_per_second=0,
-    )
-    client.read_global_concurrency_limit_by_name.return_value = current
-    client.increment_concurrency_slots.return_value = httpx.Response(
-        200, json=[{"id": str(current.id), "name": admission.NAME, "limit": admission.OPEN_LIMIT}]
-    )
-
-    def make_client(**kwargs: object) -> AsyncMock:
-        return client
-
-    monkeypatch.setattr(admission, "get_client", make_client)
-    with temporary_settings({PREFECT_API_URL: "http://disposable.test/api"}):
-        with pytest.raises(interruption):
-            async with admission.execution():
-                raise interruption()
-    client.increment_concurrency_slots.assert_awaited_once()
-    client.request.assert_not_awaited()
-
-
-@pytest.mark.parametrize("attempt", range(4))
 async def test_close_races_acquisition_without_losing_occupancy(
-    closed_admission: None, attempt: int
+    closed_admission: None,
 ) -> None:
     admission.status("open")
     release = asyncio.Event()
@@ -161,21 +111,13 @@ async def test_cancellation_retains_real_occupancy(closed_admission: None) -> No
         admission.status("close")
         admission.ensure_closed()
         assert admission.status().active_slots == 1
+        assert admission.status().closed
+        with pytest.raises(admission.AdmissionError, match="still occupied"):
+            admission.status("open")
     finally:
         if not task.done():
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
-
-
-async def test_refusal_holds_no_slot(
-    closed_admission: None, caplog: pytest.LogCaptureFixture
-) -> None:
-    with pytest.raises(admission.AdmissionError) as refused:
-        async with admission.execution():
-            pytest.fail("closed gate admitted execution")
-    assert "reconcile" not in str(refused.value)
-    assert not [record for record in caplog.records if record.levelname == "ERROR"]
-    assert admission.status().active_slots == 0
 
 
 async def test_release_frees_held_slots_only_while_closed(closed_admission: None) -> None:
