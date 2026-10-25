@@ -6,10 +6,14 @@ from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
+from pathlib import Path
 from typing import TYPE_CHECKING
 
-from openknowledge_adapters import batch, clickhouse, gcs, opensearch, semantic_scholar
+from openknowledge_adapters import batch, clickhouse, gcs, opensearch, parquet, semantic_scholar
+from openknowledge_contracts.embedding_artifacts import ParquetReceipt
 from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
+from openknowledge_core.embedding_conversion.ports import ConversionJobs
+from openknowledge_core.embedding_conversion.service import EmbeddingConversionService
 from openknowledge_core.ingestion import (
     DownloadDatasetService,
     LoadDatasetService,
@@ -26,6 +30,7 @@ from openknowledge_core.search import SearchIndexService
 from openknowledge_pipelines.settings import (
     BatchSettings,
     CommonSettings,
+    ConversionBatchSettings,
     LoadSettings,
     PipelineSettings,
     SearchSettings,
@@ -286,3 +291,39 @@ async def open_citation_edges(settings: LoadSettings) -> AsyncGenerator[Citation
     # A full rebuild can outlast the per-object load timeout. Keep the connect timeout.
     async with clickhouse.connect(_clickhouse(settings, None)) as ch:
         yield ch.edges
+
+
+@asynccontextmanager
+async def open_embedding_conversion(
+    settings: CommonSettings,
+) -> AsyncGenerator[EmbeddingConversionService]:
+    async with gcs.connect(_gcs(settings)) as store:
+        yield EmbeddingConversionService(store, parquet.StoredParquetArtifacts(store))
+
+
+@asynccontextmanager
+async def open_conversion_batch(
+    settings: ConversionBatchSettings,
+) -> AsyncGenerator[tuple[EmbeddingConversionService, ConversionJobs]]:
+    config = batch.BatchConfig(
+        project=settings.batch_project,
+        region=settings.batch_region,
+        service_account=settings.batch_service_account,
+        network=settings.batch_network,
+        subnetwork=settings.batch_subnetwork,
+        image=f"{settings.batch_image_repository}@{settings.image_digest}",
+        machine_type=settings.batch_machine_type,
+        parallelism=settings.batch_parallelism,
+        provisioning_model=settings.batch_provisioning_model,
+        max_run_seconds=settings.batch_max_run_seconds,
+        poll_seconds=settings.batch_poll_seconds,
+        wait_timeout_seconds=settings.batch_wait_timeout_seconds,
+        environment={"OKP_IMAGE_DIGEST": settings.image_digest},
+        secrets={},
+    )
+    async with open_embedding_conversion(settings) as service, batch.connect(config) as jobs:
+        yield service, jobs
+
+
+def convert_local_embeddings(source: Path, receipt: Path, destination: Path) -> ParquetReceipt:
+    return parquet.convert(source, receipt, destination)

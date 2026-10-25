@@ -1,4 +1,4 @@
-"""Sequential coordinator composition; each source call owns exactly one S2 lease."""
+"""Sequential coordinator composition under one S2 lease, with per-operation recovery."""
 
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
@@ -61,12 +61,17 @@ async def _source_operation(
     services: SyncServices,
     family: ArchiveFamily = ArchiveFamily.CORE,
 ) -> AsyncGenerator[None]:
-    async with services.s2_lease():
-        await recover_jobs(services.jobs, family)
-        yield
+    await recover_jobs(services.jobs, family)
+    yield
 
 
 async def run_sync(command: SyncCommand, services: SyncServices) -> SyncResult:
+    # Keep manual source work out even while this sync is loading ClickHouse.
+    async with services.s2_lease():
+        return await _run_sync(command, services)
+
+
+async def _run_sync(command: SyncCommand, services: SyncServices) -> SyncResult:
     async with _source_operation(services):
         discovery = ReleaseDiscovery(services.catalog, await services.catalog.list_releases())
     result = SyncResult()
