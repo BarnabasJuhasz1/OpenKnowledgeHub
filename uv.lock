@@ -1772,6 +1772,9 @@ gcs = [
 opensearch = [
     { name = "opensearch-py", extra = ["async"] },
 ]
+parquet = [
+    { name = "pyarrow" },
+]
 semantic-scholar = [
     { name = "httpx" },
 ]
@@ -1795,9 +1798,10 @@ requires-dist = [
     { name = "openknowledge-core", editable = "packages/core" },
     { name = "opensearch-py", extras = ["async"], marker = "extra == 'opensearch'", specifier = ">=3,<4" },
     { name = "pyarrow", marker = "extra == 'clickhouse'", specifier = ">=26,<27" },
+    { name = "pyarrow", marker = "extra == 'parquet'", specifier = ">=26,<27" },
     { name = "pydantic", specifier = ">=2.11,<3" },
 ]
-provides-extras = ["gcs", "semantic-scholar", "clickhouse", "batch", "opensearch"]
+provides-extras = ["gcs", "semantic-scholar", "clickhouse", "batch", "parquet", "opensearch"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -1866,7 +1870,7 @@ source = { editable = "pipelines" }
 dependencies = [
     { name = "click" },
     { name = "httpx" },
-    { name = "openknowledge-adapters", extra = ["batch", "clickhouse", "gcs", "opensearch", "semantic-scholar"] },
+    { name = "openknowledge-adapters", extra = ["batch", "clickhouse", "gcs", "opensearch", "parquet", "semantic-scholar"] },
     { name = "openknowledge-contracts" },
     { name = "openknowledge-core" },
     { name = "prefect" },
@@ -1884,7 +1888,7 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8,<9" },
     { name = "httpx", specifier = ">=0.28,<1" },
-    { name = "openknowledge-adapters", extras = ["batch", "clickhouse", "gcs", "opensearch", "semantic-scholar"], editable = "packages/adapters" },
+    { name = "openknowledge-adapters", extras = ["batch", "clickhouse", "gcs", "opensearch", "parquet", "semantic-scholar"], editable = "packages/adapters" },
     { name = "openknowledge-contracts", editable = "packages/contracts" },
     { name = "openknowledge-core", editable = "packages/core" },
     { name = "prefect", specifier = "==3.8.8" },

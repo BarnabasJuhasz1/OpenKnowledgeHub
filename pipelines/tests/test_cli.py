@@ -205,6 +205,7 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
     assert result.exit_code == 0, result.output
     assert [load_flow_from_entrypoint(str(found.entrypoint)) for found in served] == [
         deployments.s2_sync,
+        deployments.embedding_conversion,
         deployments.s2_load,
         deployments.s2_load_diff,
         deployments.s2_build_citation_edges,
@@ -216,9 +217,9 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_batch_download_embeddings_diff,
         deployments.watchdog,
     ]
-    assert [found.concurrency_limit for found in served] == [1] * 10 + [None]
+    assert [found.concurrency_limit for found in served] == [1] * 11 + [None]
     _coordinator, *unscheduled, watchdog = served
-    assert [found.schedules for found in unscheduled] == [[]] * 9
+    assert [found.schedules for found in unscheduled] == [[]] * 10
     [scheduled] = cast("list[DeploymentScheduleCreate]", watchdog.schedules)
     assert isinstance(scheduled.schedule, CronSchedule)
     # from_flow stores no timezone for a cron, and the server reads None as UTC.

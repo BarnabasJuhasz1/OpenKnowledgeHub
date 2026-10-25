@@ -1,6 +1,8 @@
-# Local embeddings Parquet pilot
+# Local embeddings conversion example
 
-From the repository root, using already cached dependencies:
+The installed `okp embeddings` commands and managed Batch flow are documented in
+[Archived embeddings to Parquet](../docs/embedding-conversion.md). This example is a
+thin compatibility wrapper. From the repository root, using cached dependencies:
 
 ```sh
 uv run --offline --frozen python -m examples.embedding_parquet \

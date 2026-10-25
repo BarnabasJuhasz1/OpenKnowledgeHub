@@ -10,6 +10,7 @@ import aiohttp
 from gcloud.aio.auth import Token
 
 from openknowledge_adapters.batch.config import BatchConfig
+from openknowledge_core.embedding_conversion.models import ConversionJob
 from openknowledge_core.ingestion.errors import (
     TRANSIENT_STATUSES,
     BatchRejected,
@@ -72,7 +73,17 @@ class CloudBatchJobs:
         return name
 
     async def running(self, family: ArchiveFamily = ArchiveFamily.CORE) -> dict[str, bool]:
-        """Inspect all pages before allowing family cleanup or a new submission."""
+        return await self._running(family.value)
+
+    async def conversion_running(self) -> tuple[str, ...]:
+        """Inspect every page before returning owned jobs; foreign active work refuses admission.
+
+        Queued conversion jobs are retained and waited on, just like running jobs. A timeout
+        leaves them discoverable so a later attempt drains them before any new submission.
+        """
+        return tuple(await self._running("embedding-conversion"))
+
+    async def _running(self, family: str) -> dict[str, bool]:
         found: dict[str, bool] = {}
         params: dict[str, str] = {}
         while True:
@@ -87,9 +98,9 @@ class CloudBatchJobs:
                         and ARCHIVE_DATASETS.get(labels.get("dataset", "")) == ArchiveFamily.CORE
                     ):
                         job_family = ArchiveFamily.CORE.value
-                    if job_family != family.value:
+                    if job_family != family:
                         raise SharedCapacityError(
-                            f"Active foreign or legacy download job {job['name']}; "
+                            f"Active foreign or legacy Batch job {job['name']}; "
                             "drain it to a terminal state before retrying. "
                             "This lookup did not cancel or wait on jobs"
                         )
@@ -150,7 +161,8 @@ class CloudBatchJobs:
 def job_id(job: ShardJob) -> str:
     """At most 63 lowercase characters, stable for retries of the same operation."""
     part = f"-{job.part}" if job.part else ""
-    name = f"s2-{job.dataset.replace('_', '-')}-{job.release_id}{part}"[:30].rstrip("-")
+    prefix = "ep" if isinstance(job, ConversionJob) else "s2"
+    name = f"{prefix}-{job.dataset.replace('_', '-')}-{job.release_id}{part}"[:30].rstrip("-")
     return f"{name}-{job.operation_id.hex}"
 
 
@@ -159,6 +171,9 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
     command += ["--bucket", job.bucket, "--prefix", job.prefix]
     if job.from_release is not None and job.part is not None:
         command += ["--from-release", job.from_release, "--part", job.part]
+    conversion = isinstance(job, ConversionJob)
+    if conversion:
+        command = ["embeddings", "convert-shard", "--plan", job.plan.model_dump_json()]
     return {
         "taskGroups": [
             {
@@ -171,7 +186,7 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
                     "runnables": [{"container": {"imageUri": config.image, "commands": command}}],
                     "environment": {
                         "variables": config.environment,
-                        "secretVariables": config.secrets,
+                        "secretVariables": {} if conversion else config.secrets,
                     },
                     "maxRunDuration": f"{config.max_run_seconds}s",
                 },
@@ -192,7 +207,9 @@ def job_spec(config: BatchConfig, job: ShardJob) -> dict[str, Any]:
             },
         },
         "labels": {
-            "archive-family": archive_family(job.dataset).value,
+            "archive-family": "embedding-conversion"
+            if conversion
+            else archive_family(job.dataset).value,
             "dataset": job.dataset.replace("_", "-"),
             "release": job.release_id,
             "part": job.part or "base",

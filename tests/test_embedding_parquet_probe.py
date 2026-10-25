@@ -9,7 +9,7 @@ from pathlib import Path
 import pyarrow.parquet as pq
 import pytest
 
-from examples.embedding_parquet import convert
+from openknowledge_adapters.parquet.local import convert
 from openknowledge_core.ingestion.errors import IngestionError
 
 
@@ -179,7 +179,7 @@ def test_publish_failure_cleanup_and_retry(tmp_path: Path, monkeypatch: pytest.M
         raise OSError("fixture publication failure")
 
     with monkeypatch.context() as patch:
-        patch.setattr("examples.embedding_parquet.os.rename", fail_rename)
+        patch.setattr("openknowledge_adapters.parquet.local.os.rename", fail_rename)
         with pytest.raises(OSError, match="fixture publication failure"):
             convert(source, receipt, out)
     assert not out.exists()
