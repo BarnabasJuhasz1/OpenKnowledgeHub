@@ -28,7 +28,25 @@ completion references a manifest only after every shard's bytes and receipt agre
 Retries reuse verified outputs; conflicting or corrupt output fails rather than being
 silently replaced. Active foreign Batch jobs refuse admission, and queued/running
 conversion jobs are waited on before new work starts. This enumeration is not a
-cross-controller lock; deployment admission must also protect the managed entrypoint.
+cross-controller lock. Both managed CLI and served flow take deployment admission
+before preparing or publishing new conversion work, after draining owned jobs. They
+never take the S2 lease. A `convert-shard` worker bypasses duplicate parent admission
+only with the existing complete Batch operation/task identity; manual shard runs
+require admission. Pure offline `convert-local` does not contact the control server.
+
+Persisted conversion plans use internal format 2 and contain generation/SHA256 receipt
+references rather than full receipts. Preparation reads each source receipt once;
+a worker rechecks bounded completion/inventory/manifest metadata and only its selected
+receipt, including its position and count. Final completion rechecks all source receipts
+and all converted outputs. Plans above the existing 16 MiB archive document limit are rejected before upload; completion,
+inventory, manifest and output manifest must fit the existing archive document limit
+(currently 16 MiB), and source receipts must fit 64 KiB. Limits are byte bounds, not a
+promised shard count. Long paths reduce the number of references that fit.
+
+Older plans embedding full receipts are not accepted by the new worker. Reprepare them
+with the new image; their output namespace changes with the plan hash. Existing public
+Parquet receipts, converted-shard descriptors and completed manifests stay readable;
+no existing data is rewritten. Drain existing jobs before switching the image.
 
 PyArrow lives in the packaged Parquet adapter, included in the pipeline image. The
 example script is only a compatibility wrapper. Conversion buffers bounded records

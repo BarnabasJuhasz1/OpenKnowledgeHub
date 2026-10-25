@@ -6,22 +6,24 @@ ParquetArtifacts port. No implicit latest or archive listing is performed.
 
 from __future__ import annotations
 
-import hashlib
-import json
 from contextlib import aclosing
 from pathlib import Path
 from typing import Literal
 
-from openknowledge_contracts.embedding_artifacts import ConversionManifest, ConvertedShard
-from openknowledge_core.embedding_conversion.ports import ParquetArtifacts
-
 from openknowledge_contracts.datasets import DatasetInventory, DiffInventory, ShardRef
+from openknowledge_contracts.embedding_artifacts import ConversionManifest, ConvertedShard
 from openknowledge_contracts.embeddings import EmbeddingMutation
 from openknowledge_contracts.manifests import DatasetManifest, ShardReceipt
+from openknowledge_core.embedding_conversion.ports import ParquetArtifacts
 from openknowledge_core.embeddings.resolution import (
-    ResolutionModel,
+    ConversionSelection as ConversionSelection,
+)
+from openknowledge_core.embeddings.resolution import (
     ResolutionPlan,
     ResolvedArtifact,
+)
+from openknowledge_core.embeddings.resolution import (
+    conversion_completeness_evidence as conversion_completeness_evidence,
 )
 from openknowledge_core.ingestion.archive_progress import (
     ArchiveCompletion,
@@ -33,40 +35,6 @@ from openknowledge_core.ingestion.models import PinnedDataset
 from openknowledge_core.ingestion.ports import ArtifactStore
 
 from .store import resolution_writer
-
-
-class ConversionSelection(ResolutionModel):
-    """One explicit archive release and all nonempty converted parts.
-
-    ``conversions`` pins conversion complete.json documents, each pointing to its
-    ConversionManifest. Empty parts may be evidenced solely by the inventory or
-    additionally by an explicit empty-part ConversionManifest.
-    """
-
-    completion: HashedRef
-    conversions: tuple[HashedRef, ...]
-
-    @property
-    def identity(self) -> str:
-        return (
-            "sha256:"
-            + hashlib.sha256(
-                json.dumps(
-                    self.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-                ).encode()
-            ).hexdigest()
-        )
-
-
-def conversion_completeness_evidence(
-    selections: tuple[ConversionSelection, ...],
-    scope: Literal["corpus", "bounded-sample"] = "bounded-sample",
-) -> str:
-    """Bind completion to every selected inventory in the declared scope."""
-    digest = hashlib.sha256(
-        json.dumps([s.identity for s in selections], separators=(",", ":")).encode()
-    ).hexdigest()
-    return f"{scope}-inventories:sha256:{digest}"
 
 
 async def resolve_parquet_vectors(

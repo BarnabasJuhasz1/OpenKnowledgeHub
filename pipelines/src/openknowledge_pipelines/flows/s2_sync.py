@@ -1,6 +1,6 @@
 """Sequential coordinator composition under one S2 lease, with per-operation recovery."""
 
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 
@@ -9,6 +9,7 @@ from prefect import get_run_logger
 from openknowledge_contracts.manifests import DatasetManifest
 from openknowledge_contracts.tables.s2 import CONTRACTS
 from openknowledge_core.ingestion.archive_progress import ArchiveProgress
+from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.commands import (
     DownloadDataset,
     DownloadDiff,
@@ -35,6 +36,7 @@ from openknowledge_core.ingestion.families import ArchiveFamily, archive_family
 from openknowledge_core.ingestion.models import held_release
 from openknowledge_core.ingestion.ports import (
     AppliedReleases,
+    CitationEdges,
     ReleaseCatalog,
     ShardJobs,
     TableLoader,
@@ -54,6 +56,8 @@ class SyncServices:
     loads: S2LoadFlows
     s2_lease: Callable[[], AbstractAsyncContextManager[None]]
     load_lease: Callable[[], AbstractAsyncContextManager[None]]
+    edges: CitationEdges
+    build_edges: Callable[[], Awaitable[BuildCitationEdgesResult]]
 
 
 @asynccontextmanager
@@ -103,7 +107,10 @@ async def _run_sync(command: SyncCommand, services: SyncServices) -> SyncResult:
             raise
         except IngestionError as exc:
             item.outcome, item.reason = "failed", str(exc)
-    if any(item.outcome in ("failed", "needs_base") for item in result.datasets):
+    await _citation_edges(services, result)
+    if result.citation_edges_failure is not None or any(
+        item.outcome in ("failed", "needs_base") for item in result.datasets
+    ):
         _incomplete(result)
     for dataset in LARGE_ORDER:
         item = DatasetSyncResult(dataset=dataset)
@@ -207,6 +214,20 @@ async def _core(command: SyncCommand, services: SyncServices, item: DatasetSyncR
             await services.loads.diff.fn(LoadDiff(**common, from_release=old, release=new))
         item.loaded.append(transition)
         item.final = new
+
+
+async def _citation_edges(services: SyncServices, result: SyncResult) -> None:
+    """Rebuild the edge tables when citations holds a release they were not built from."""
+    citations = next(item for item in result.datasets if item.dataset == "citations")
+    if citations.outcome not in ("synced", "current"):
+        return
+    try:
+        async with services.load_lease():
+            if citations.final is not None and await services.edges.is_current(citations.final):
+                return
+            result.citation_edges = await services.build_edges()
+    except IngestionError as exc:
+        result.citation_edges_failure = str(exc)
 
 
 def _incomplete(result: SyncResult) -> None:

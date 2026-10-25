@@ -2,12 +2,18 @@ from collections.abc import AsyncGenerator
 from typing import Protocol
 
 from openknowledge_contracts.embedding_artifacts import ConvertedShard, EmbeddingArtifactRow
-from openknowledge_core.embedding_conversion.models import ConversionJob, ConversionPlan
+from openknowledge_core.embedding_conversion.models import (
+    ConversionJob,
+    ConversionPlan,
+    ConversionSource,
+)
 from openknowledge_core.ingestion.models import JobOutcome
 
 
 class ParquetArtifacts(Protocol):
-    async def convert(self, plan: ConversionPlan, shard: int) -> ConvertedShard: ...
+    async def convert(
+        self, plan: ConversionPlan, shard: int, source: ConversionSource
+    ) -> ConvertedShard: ...
 
     async def verify(self, artifact: ConvertedShard) -> None: ...
 

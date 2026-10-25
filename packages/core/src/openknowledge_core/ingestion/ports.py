@@ -140,6 +140,10 @@ class LoadTelemetry(Protocol):
 
 
 class CitationEdges(Protocol):
+    async def is_current(self, release: ReleaseId) -> bool:
+        """Both live tables have publication markers for this release and their UUIDs."""
+        ...
+
     async def build(
         self, producer: Producer, clock: Callable[[], datetime]
     ) -> BuildCitationEdgesResult: ...

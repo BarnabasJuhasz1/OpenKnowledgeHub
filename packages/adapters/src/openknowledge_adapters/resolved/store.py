@@ -6,9 +6,10 @@ import hashlib
 import os
 import shutil
 import sqlite3
+import stat
 import struct
 import tempfile
-from collections.abc import AsyncIterator, Generator, Iterable, Iterator
+from collections.abc import AsyncGenerator, Generator, Iterable, Iterator
 from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import Literal
@@ -30,18 +31,46 @@ _SCHEMA = pa.schema(
 )
 _BATCH_ROWS = 1024
 _PART_ROWS = 262144
+_METADATA_BYTES = 16 * 1024 * 1024
 
 
 def _part_name(ordinal: int) -> str:
     return f"part-{ordinal:08d}.parquet"
 
 
-def _file_digest(path: Path) -> tuple[int, str]:
+def _regular_file_size(path: Path) -> int:
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode):
+        raise ValueError("resolved inputs must be regular files, without symlinks")
+    return metadata.st_size
+
+
+def read_regular_document(path: Path) -> bytes:
+    """Read a nonsymlink regular metadata document, limited to 16 MiB.
+
+    Both requests and finalized manifests use this hard bound. Parent directories
+    and protection against concurrent local file replacement remain caller-owned.
+    """
+    if _regular_file_size(path) > _METADATA_BYTES:
+        raise ValueError("embedding metadata exceeds the 16 MiB limit")
+    with path.open("rb") as stream:
+        data = stream.read(_METADATA_BYTES + 1)
+    if len(data) > _METADATA_BYTES:
+        raise ValueError("embedding metadata exceeds the 16 MiB limit")
+    return data
+
+
+def _file_digest(path: Path, expected_bytes: int | None = None) -> tuple[int, str]:
+    file_size = _regular_file_size(path)
+    if expected_bytes is not None and file_size != expected_bytes:
+        raise ValueError("resolved Parquet bytes differ from finalized manifest")
     digest = hashlib.sha256()
     size = 0
     with path.open("rb") as stream:
         while block := stream.read(1024 * 1024):
             size += len(block)
+            if expected_bytes is not None and size > expected_bytes:
+                raise ValueError("resolved Parquet bytes exceed finalized size")
             digest.update(block)
     return size, "sha256:" + digest.hexdigest()
 
@@ -268,7 +297,7 @@ def write_resolved_artifact(
 
 def read_resolved_artifact(directory: Path) -> ResolvedArtifact:
     """Read finalized metadata; this alone does not verify Parquet content."""
-    return ResolvedArtifact.model_validate_json((directory / "manifest.json").read_bytes())
+    return ResolvedArtifact.model_validate_json(read_regular_document(directory / "manifest.json"))
 
 
 def iter_resolved_vectors(
@@ -288,7 +317,7 @@ def iter_resolved_vectors(
     identity = expected.plan.identity
     for part in expected.parts:
         path = directory / _part_name(part.ordinal)
-        if _file_digest(path) != (part.parquet_bytes, part.sha256):
+        if _file_digest(path, part.parquet_bytes) != (part.parquet_bytes, part.sha256):
             raise ValueError("resolved Parquet bytes differ from finalized manifest")
         part_count = part_live = 0
         with path.open("rb") as stream:
@@ -327,7 +356,7 @@ def iter_resolved_vectors(
         if (
             part_count != part.records
             or part_live != part.live_records
-            or _file_digest(path) != (part.parquet_bytes, part.sha256)
+            or _file_digest(path, part.parquet_bytes) != (part.parquet_bytes, part.sha256)
         ):
             raise ValueError("resolved part counts or digest mismatch")
     if (
@@ -354,7 +383,7 @@ def reuse_resolved_artifact(
 
 async def stream_resolved_vectors(
     directory: Path, expected: ResolvedArtifact
-) -> AsyncIterator[EmbeddingMutation]:
+) -> AsyncGenerator[EmbeddingMutation]:
     """Async iterable hook shared by publication and load services."""
     for record in iter_resolved_vectors(directory, expected):
         yield record

@@ -84,3 +84,28 @@ server boundary. Set `CLICKHOUSE_EMBEDDINGS_TEST_URL=http://127.0.0.1:18124` and
 drop unique `embedding_lookup_test_*` databases, exercise migration idempotency and the
 packaged connection, and never start a server. Local schema tests exercise the actual template migration, Float32 storage, UInt64 IDs
 and vector constraints.
+
+## Installed commands
+
+`okp embeddings resolve --request request.json --destination resolved/` accepts a
+`ResolveEmbeddings` JSON request with `model_revision`, `space_evidence`, `scope`
+(`corpus` or `bounded-sample`) and `selections`. Each selection contains a pinned
+archive `completion` HashedRef and `conversions`, the pinned conversion complete.json
+HashedRefs for its parts. Supply the base followed by every contiguous completed diff.
+The command derives release sequence, completeness evidence and snapshot identity;
+operators do not compute another hash. Corpus scope covers that complete explicit
+archive chain, rather than every paper worldwide. Resolution takes deployment admission.
+
+`okp embeddings load --artifact resolved/` requires finalized receipt-backed metadata
+and exhausts the verified source under the existing managed ClickHouse loader limit
+and deployment admission. Retries are whole-job retries with a fresh iterator.
+`okp embeddings lookup --artifact resolved/ --id 123 --id 456` reads source metadata
+without scanning local Parquet, requires no deployment lease, and prints the typed
+found/missing result. Both use existing `LoadSettings` ClickHouse configuration.
+
+Request JSON and manifest.json must be nonsymlink regular files of at most 16 MiB;
+reads check file size and enforce that bound during reading. Parquet parts must also
+be nonsymlink regular files and match their finalized sizes before hashing/reading.
+Parent directories and concurrent local file replacement remain trusted; these checks
+are not a filesystem race isolation mechanism. No cloud or control-plane operation is
+performed merely by installing these commands.

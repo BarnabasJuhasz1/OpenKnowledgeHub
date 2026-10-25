@@ -31,7 +31,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 
 FROM ${PYTHON_IMAGE}
 ARG REVISION=unknown
-LABEL org.opencontainers.image.source="https://github.com/OpenKnowledgeOrg/OpenKnowledgeHub" \
+LABEL org.opencontainers.image.source="https://github.com/OpenKnowledgeOrg/OpenKnowledge" \
       org.opencontainers.image.revision="${REVISION}" \
       org.opencontainers.image.title="openknowledge-pipelines"
 RUN useradd --create-home --uid 10001 okp

@@ -255,6 +255,7 @@ async def embedding_conversion(command: ConvertEmbeddings) -> HashedRef:
             jobs,
             task_retries=settings.task_retries,
             retry_delay_seconds=settings.task_retry_delay_seconds,
+            execution=admission.execution,
         ).fn(command)
 
 
