@@ -12,6 +12,7 @@ import httpx
 from openknowledge_adapters.clickhouse.citation_edges import ClickHouseCitationEdges
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.config import ClickHouseConfig
+from openknowledge_adapters.clickhouse.embeddings import ClickHouseEmbeddings
 from openknowledge_adapters.clickhouse.search import ClickHouseSearchSource
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_adapters.clickhouse.telemetry import ClickHouseLoadTelemetry
@@ -37,6 +38,7 @@ class ClickHouse(NamedTuple):
     applied: ClickHouseAppliedReleases
     telemetry: ClickHouseLoadTelemetry
     search: ClickHouseSearchSource
+    embeddings: ClickHouseEmbeddings
 
 
 @asynccontextmanager
@@ -63,6 +65,7 @@ async def connect(
             applied=applied,
             telemetry=ClickHouseLoadTelemetry(client),
             search=ClickHouseSearchSource(client),
+            embeddings=ClickHouseEmbeddings(client),
         )
 
 
@@ -70,6 +73,7 @@ __all__ = [
     "ClickHouse",
     "ClickHouseAppliedReleases",
     "ClickHouseConfig",
+    "ClickHouseEmbeddings",
     "ClickHouseSearchSource",
     "ClickHouseTables",
     "connect",

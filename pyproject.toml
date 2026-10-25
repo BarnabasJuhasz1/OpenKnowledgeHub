@@ -185,3 +185,15 @@ ancestors = [
     "openknowledge_adapters",
     "openknowledge_pipelines",
 ]
+
+
+[[tool.importlinter.contracts]]
+name = "The Parquet adapter imports only its own extra"
+type = "forbidden"
+source_modules = ["openknowledge_adapters.parquet"]
+forbidden_modules = [
+    "httpx", "google", "gcloud", "aiohttp", "opensearchpy",
+    "openknowledge_adapters.gcs", "openknowledge_adapters.semantic_scholar",
+    "openknowledge_adapters.clickhouse", "openknowledge_adapters.batch",
+    "openknowledge_adapters.opensearch",
+]

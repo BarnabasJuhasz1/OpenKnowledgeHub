@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractAsyncContextManager
+from collections.abc import AsyncGenerator
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 
 from prefect import flow
@@ -16,6 +17,7 @@ from prefect.deployments.runner import RunnerDeployment
 from prefect.exceptions import ObjectNotFound
 from prefect.types.entrypoint import EntrypointType
 
+from openknowledge_core.embedding_conversion.models import ConvertEmbeddings
 from openknowledge_core.ingestion import (
     BatchDiffDownloadResult,
     BatchDownloadResult,
@@ -27,14 +29,16 @@ from openknowledge_core.ingestion import (
     LoadDiffResult,
     WatchdogResult,
 )
+from openknowledge_core.ingestion.archive_progress import HashedRef
 from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.coordinator import SyncResult
 from openknowledge_core.ingestion.errors import IngestionError
 from openknowledge_core.ingestion.families import ArchiveFamily, require_family
-from openknowledge_pipelines import bootstrap
+from openknowledge_pipelines import admission, bootstrap
 from openknowledge_pipelines.flows.s2_sync import run_sync
 from openknowledge_pipelines.settings import (
     BatchSettings,
+    ConversionBatchSettings,
     LoadSettings,
     ScheduleSettings,
     SyncSettings,
@@ -61,16 +65,26 @@ def one_s2_user() -> AbstractAsyncContextManager[None]:
     )
 
 
-def one_clickhouse_loader() -> AbstractAsyncContextManager[None]:
+def one_clickhouse_loader(*, wait: bool = True) -> AbstractAsyncContextManager[None]:
     # A missing limit must fail. Keep a load running through a failed renewal so an insert
-    # of hours is not interrupted.
-    return concurrency(LOAD_LIMIT, strict=True, raise_on_lease_renewal_failure=False)
+    # of hours is not interrupted. Sync waits after starting external work; standalone
+    # loads refuse busy capacity before admission.
+    return concurrency(
+        LOAD_LIMIT,
+        strict=True,
+        max_retries=None if wait else 0,
+        raise_on_lease_renewal_failure=False,
+    )
 
 
 @flow(name="s2-load", persist_result=False)
 async def s2_load(command: LoadDataset) -> LoadDatasetResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]  # fields come from the environment
-    async with one_clickhouse_loader(), bootstrap.open_load_service(settings) as service:
+    async with (
+        one_clickhouse_loader(wait=False),
+        admission.execution(),
+        bootstrap.open_load_service(settings) as service,
+    ):
         # fn runs the body in this flow run, so its tasks do not start a subflow.
         return await bootstrap.load_flows(service, settings).dataset.fn(command)
 
@@ -78,21 +92,33 @@ async def s2_load(command: LoadDataset) -> LoadDatasetResult:
 @flow(name="s2-load-diff", persist_result=False)
 async def s2_load_diff(command: LoadDiff) -> LoadDiffResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]
-    async with one_clickhouse_loader(), bootstrap.open_load_service(settings) as service:
+    async with (
+        one_clickhouse_loader(wait=False),
+        admission.execution(),
+        bootstrap.open_load_service(settings) as service,
+    ):
         return await bootstrap.load_flows(service, settings).diff.fn(command)
 
 
 @flow(name="s2-build-citation-edges", persist_result=False, retries=0)
 async def s2_build_citation_edges() -> BuildCitationEdgesResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]
-    async with one_clickhouse_loader(), bootstrap.open_citation_edges(settings) as edges:
+    async with (
+        one_clickhouse_loader(wait=False),
+        admission.execution(),
+        bootstrap.open_citation_edges(settings) as edges,
+    ):
         return await edges.build(bootstrap.producer(settings), lambda: datetime.now(UTC))
 
 
 async def _download(command: DownloadDataset, family: ArchiveFamily) -> BatchDownloadResult:
     require_family(command.dataset, family)
     settings = BatchSettings()  # pyright: ignore[reportCallIssue]
-    async with one_s2_user(), bootstrap.open_batch_download(settings) as (service, jobs):
+    async with (
+        one_s2_user(),
+        admission.execution(),
+        bootstrap.open_batch_download(settings) as (service, jobs),
+    ):
         result = await bootstrap.batch_download_flows(service, jobs, settings, family).dataset.fn(
             command
         )
@@ -105,7 +131,7 @@ async def _download(command: DownloadDataset, family: ArchiveFamily) -> BatchDow
 async def _download_diff(command: DownloadDiff, family: ArchiveFamily) -> BatchDiffDownloadResult:
     require_family(command.dataset, family)
     settings = BatchSettings()  # pyright: ignore[reportCallIssue]
-    async with one_s2_user():
+    async with one_s2_user(), admission.execution():
         predecessor = None
         if family != ArchiveFamily.CORE:
             baseline = settings.sync.archives.get(command.dataset) if settings.sync else None
@@ -168,7 +194,14 @@ async def s2_sync() -> SyncResult:
     settings = SyncSettings()  # pyright: ignore[reportCallIssue]
     if settings.sync is None:
         raise IngestionError("OKP_SYNC must configure the coordinator bucket and baselines")
-    async with bootstrap.open_sync(settings, one_s2_user, one_clickhouse_loader) as services:
+
+    @asynccontextmanager
+    async def admitted_source() -> AsyncGenerator[None]:
+        # run_sync enters this once, before recovery, and holds it through all loads.
+        async with one_s2_user(), admission.execution():
+            yield
+
+    async with bootstrap.open_sync(settings, admitted_source, one_clickhouse_loader) as services:
         return await run_sync(settings.sync, services)
 
 
@@ -180,6 +213,7 @@ def sync_deployment() -> RunnerDeployment:
         entrypoint_type=EntrypointType.MODULE_PATH,
         schedules=[
             DeploymentScheduleCreate(
+                slug="s2-sync",
                 schedule=CronSchedule(cron="30 1 * * *", timezone="Europe/Zurich"),
                 active=settings.sync_schedule_enabled,
             )
@@ -210,13 +244,34 @@ def ensure_limits() -> None:
                 )
 
 
+@flow(name="embedding-conversion", persist_result=False)
+async def embedding_conversion(command: ConvertEmbeddings) -> HashedRef:
+    from openknowledge_pipelines.flows.embedding_conversion import conversion_flow
+
+    settings = ConversionBatchSettings()  # pyright: ignore[reportCallIssue]
+    async with bootstrap.open_conversion_batch(settings) as (service, jobs):
+        return await conversion_flow(
+            service,
+            jobs,
+            task_retries=settings.task_retries,
+            retry_delay_seconds=settings.task_retry_delay_seconds,
+        ).fn(command)
+
+
 def serve() -> None:
+    admission.ensure_closed()
     ensure_limits()
     prefect_serve(
         sync_deployment(),
+        RunnerDeployment.from_flow(
+            embedding_conversion,
+            DEPLOYMENT,
+            entrypoint_type=EntrypointType.MODULE_PATH,
+            concurrency_limit=1,
+        ),
         # One run of each load at a time, held in Prefect's queue, so a second run of the same load
         # holds no serve slot. LOAD_LIMIT keeps both loads and the edge rebuild apart, so no two
-        # served runs hit ClickHouse at once; a run waiting on it does hold a slot.
+        # served runs hit ClickHouse at once. Standalone runs refuse busy capacity; sync waits.
         # The deployment limit gives a running load a lease that Prefect renews every 225 seconds,
         # up to three attempts per renewal, and cancels the run when all three fail. The global
         # limit's raise_on_lease_renewal_failure=False does not cover that lease.
@@ -258,7 +313,12 @@ def serve() -> None:
             watchdog,
             DEPLOYMENT,
             entrypoint_type=EntrypointType.MODULE_PATH,
-            cron=WATCHDOG_CRON,
+            schedules=[
+                DeploymentScheduleCreate(
+                    slug="watchdog",
+                    schedule=CronSchedule(cron=WATCHDOG_CRON),
+                )
+            ],
         ),
         limit=RUNS_AT_ONCE,
     )

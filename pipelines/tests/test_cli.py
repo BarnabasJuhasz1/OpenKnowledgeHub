@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import os
@@ -13,7 +14,7 @@ from typing import cast
 import pytest
 from click.testing import CliRunner
 from prefect.client.orchestration import get_client
-from prefect.client.schemas.actions import DeploymentScheduleCreate
+from prefect.client.schemas.actions import DeploymentScheduleCreate, GlobalConcurrencyLimitUpdate
 from prefect.client.schemas.objects import State
 from prefect.client.schemas.schedules import CronSchedule
 from prefect.context import use_profile
@@ -30,7 +31,7 @@ from openknowledge_core.ingestion import (
     WatchdogService,
 )
 from openknowledge_core.search import SearchIndexService, SourceRows
-from openknowledge_pipelines import bootstrap, cli, deployments
+from openknowledge_pipelines import admission, bootstrap, cli, deployments
 from openknowledge_pipelines.settings import (
     LoadSettings,
     PipelineSettings,
@@ -169,6 +170,7 @@ def test_bad_options_exit_2(args: list[str], message: str) -> None:
 def test_load_runs_the_flow_without_an_s2_key(
     monkeypatch: pytest.MonkeyPatch, wired: DownloadDatasetService, store: FakeStore
 ) -> None:
+    deployments.ensure_limits()
     assert okp("download", "--release", "2026-10-06", "--dataset", "papers", *TARGET)[0] == 0
 
     @asynccontextmanager
@@ -205,6 +207,7 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
     assert result.exit_code == 0, result.output
     assert [load_flow_from_entrypoint(str(found.entrypoint)) for found in served] == [
         deployments.s2_sync,
+        deployments.embedding_conversion,
         deployments.s2_load,
         deployments.s2_load_diff,
         deployments.s2_build_citation_edges,
@@ -216,9 +219,9 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_batch_download_embeddings_diff,
         deployments.watchdog,
     ]
-    assert [found.concurrency_limit for found in served] == [1] * 10 + [None]
+    assert [found.concurrency_limit for found in served] == [1] * 11 + [None]
     _coordinator, *unscheduled, watchdog = served
-    assert [found.schedules for found in unscheduled] == [[]] * 9
+    assert [found.schedules for found in unscheduled] == [[]] * 10
     [scheduled] = cast("list[DeploymentScheduleCreate]", watchdog.schedules)
     assert isinstance(scheduled.schedule, CronSchedule)
     # from_flow stores no timezone for a cron, and the server reads None as UTC.
@@ -248,8 +251,19 @@ async def test_the_watchdog_deployment_runs_over_the_wired_service(
     for name, value in LOAD_ENV.items():
         monkeypatch.setenv(name, value)
     caplog.set_level(logging.INFO)
-    # Flow is invariant in its return type, so pyright cannot pick the awaitable overload here.
-    state = await cast("Awaitable[State[WatchdogResult]]", deployments.watchdog(return_state=True))
+    # The watchdog only reads, so it keeps reporting while admission is closed.
+    admission.status("close")
+    try:
+        # Flow is invariant in its return type, so pyright cannot pick the awaitable overload.
+        state = await cast(
+            "Awaitable[State[WatchdogResult]]", deployments.watchdog(return_state=True)
+        )
+    finally:
+        # Other tests may leave a slot held, which open refuses; restore capacity directly.
+        with get_client(sync_client=True) as client:
+            client.update_global_concurrency_limit(
+                admission.NAME, GlobalConcurrencyLimitUpdate(limit=admission.OPEN_LIMIT)
+            )
     assert state.is_completed()
     result = await state.aresult()
     assert (result.stale, len(result.never_loaded)) == ((), 5)
@@ -348,12 +362,14 @@ async def open_service(settings):
 bootstrap.open_service = open_service
 args = ["s2", "download-shard", "--release", "2026-10-06", "--dataset", "papers", "--shard", "0",
         "--bucket", "raw"]
-result = CliRunner().invoke(cli.main, args, env={"S2_API_KEY": "k"})
+worker_env = {"S2_API_KEY": "k", "BATCH_TASK_INDEX": "0", "BATCH_TASK_COUNT": "1",
+              "OKP_SHARD": "0", "OKP_BATCH_OPERATION_ID": "a" * 32}
+result = CliRunner().invoke(cli.main, args, env=worker_env)
 print(result.exit_code, "prefect" in sys.modules)
 """
 
 
-def test_download_shard_never_loads_prefect() -> None:
+def test_admitted_batch_worker_never_loads_prefect() -> None:
     env = {"PATH": os.environ["PATH"], "PYTHONPATH": str(ROOT)}
     result = subprocess.run(
         [sys.executable, "-c", NO_PREFECT], cwd=ROOT, env=env, capture_output=True, text=True
@@ -560,6 +576,98 @@ def test_read_base_cli_without_source_key_or_control_api(
     assert store.objects == before
 
 
+@pytest.mark.parametrize("partial_worker", [False, True])
+def test_direct_shard_without_complete_worker_context_requires_admission(
+    monkeypatch: pytest.MonkeyPatch,
+    partial_worker: bool,
+) -> None:
+    monkeypatch.setenv("S2_API_KEY", "test-key")
+    for name in ("BATCH_TASK_INDEX", "BATCH_TASK_COUNT", "OKP_BATCH_OPERATION_ID", "OKP_SHARD"):
+        monkeypatch.delenv(name, raising=False)
+    if partial_worker:
+        monkeypatch.setenv("BATCH_TASK_INDEX", "0")
+    with temporary_settings({PREFECT_API_URL: None}):
+        code, output = okp(
+            "download-shard", "--release", RELEASE, "--dataset", "papers", "--shard", "0", *TARGET
+        )
+    assert code == 1
+    assert "Admission requires the shared PREFECT_API_URL" in output
+
+
+def test_verify_manifest_remains_read_only_without_admission(
+    monkeypatch: pytest.MonkeyPatch,
+    service: DownloadDatasetService,
+    source: FakeSource,
+    store: FakeStore,
+) -> None:
+    from openknowledge_core.ingestion.archive_progress import ArchiveProgress
+
+    source.add("s2orc_v2", "part.gz", PAPERS["part-0.gz"])
+    command = DownloadDataset(dataset="s2orc_v2", release=RELEASE, bucket="raw", prefix="s2")
+
+    async def archive() -> None:
+        pinned = await service.pin_dataset(command)
+        await service.archive_shard(pinned, pinned.shards[0])
+        await service.write_manifest(pinned)
+
+    asyncio.run(archive())
+    before = dict(store.objects)
+
+    @asynccontextmanager
+    async def progress(settings: PipelineSettings) -> AsyncGenerator[ArchiveProgress]:
+        yield ArchiveProgress(store, service, PRODUCER, clock)
+
+    def forbidden() -> None:
+        pytest.fail("read-only verification must not acquire admission")
+
+    monkeypatch.setenv("S2_API_KEY", "test-key")
+    monkeypatch.setattr(bootstrap, "open_archive_progress", progress)
+    monkeypatch.setattr(admission, "execution", forbidden)
+    with temporary_settings({PREFECT_API_URL: None}):
+        code, output = okp(
+            "verify-base-manifest", "--dataset", "s2orc_v2", "--release", RELEASE, *TARGET
+        )
+    assert code == 0, output
+    assert json.loads(output)["ref"]["path"]["bucket"] == "raw"
+    assert store.objects == before
+
+
+@pytest.mark.parametrize("measured", [False, True])
+def test_load_refuses_before_opening_regular_or_telemetry_clients(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, measured: bool
+) -> None:
+    for key, value in LOAD_ENV.items():
+        monkeypatch.setenv(key, value)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("closed admission must not open load or telemetry clients")
+
+    monkeypatch.setattr(bootstrap, "open_load_service", forbidden)
+    monkeypatch.setattr(bootstrap, "open_measured_load", forbidden)
+    options = ["--measurement-report", str(tmp_path / "measurement.json")] if measured else []
+    with temporary_settings({PREFECT_API_URL: None}):
+        code, output = okp("load", "--release", RELEASE, "--dataset", "papers", *TARGET, *options)
+    assert code == 1
+    assert "Managed commands require the shared control VM Prefect server" in output
+
+
+@pytest.mark.parametrize("action", ["status", "close", "open"])
+def test_admission_command_failure_does_not_claim_closure(
+    monkeypatch: pytest.MonkeyPatch, action: str
+) -> None:
+    def lost_response(action: str) -> admission.AdmissionStatus:
+        raise OSError("response lost after commit; secret diagnostic")
+
+    monkeypatch.setattr(admission, "status", lost_response)
+    result = CliRunner().invoke(cli.main, ["admission", action])
+    assert result.exit_code == 1
+    assert "state may be uncertain" in result.output
+    assert "inspect status before retrying" in result.output
+    assert "closed" not in result.output
+    assert "secret diagnostic" not in result.output
+
+
+@pytest.mark.usefixtures("wired")
 def test_search_index_creates_the_index_and_prints_the_result(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -597,6 +705,7 @@ def test_search_index_creates_the_index_and_prints_the_result(
     assert "Missing option '--range'" in result.output
 
 
+@pytest.mark.usefixtures("wired")
 def test_search_settle_lets_the_index_refresh_again_and_refreshes_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -615,3 +724,148 @@ def test_search_settle_lets_the_index_refresh_again_and_refreshes_it(
     printed = json.loads(result.output.splitlines()[-1])
     assert printed == {"index": "papers-v1", "refresh_interval": "default"}
     assert (sink.intervals, sink.refreshed) == ({"papers-v1": None}, ["papers-v1"])
+
+
+@pytest.mark.parametrize("command", ["index", "settle"])
+def test_search_requires_admission_before_opening_clients(
+    monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    for name, value in {**LOAD_ENV, **SEARCH_ENV}.items():
+        monkeypatch.setenv(name, value)
+
+    def forbidden(*args: object, **kwargs: object) -> None:
+        pytest.fail("search must acquire admission before opening clients")
+
+    monkeypatch.setattr(bootstrap, "open_search_service", forbidden)
+    options = ["--release", RELEASE, "--range", "1/1"] if command == "index" else []
+    with temporary_settings({PREFECT_API_URL: None}):
+        result = CliRunner().invoke(cli.main, ["search", command, "--index", "papers-v1", *options])
+    assert result.exit_code == 1
+    assert "Admission requires the shared PREFECT_API_URL" in result.output
+
+
+@pytest.mark.parametrize("scenario", ["busy", "success", "failure"])
+def test_measured_cli_capacity_preserves_report_and_load_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    wired: DownloadDatasetService,
+    store: FakeStore,
+    scenario: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
+
+    from openknowledge_core.ingestion import LoadDataset, LoadDatasetResult
+    from openknowledge_core.ingestion.errors import TableRejected
+    from openknowledge_core.ingestion.measurement import LoadObservation, LoadSnapshot
+    from openknowledge_core.ingestion.ports import LoadTelemetry
+
+    for key, value in LOAD_ENV.items():
+        monkeypatch.setenv(key, value)
+    command = DownloadDataset(bucket="raw", prefix="s2", dataset="papers", release=RELEASE)
+
+    async def archive() -> None:
+        pinned = await wired.pin_dataset(command)
+        for shard in pinned.shards:
+            await wired.archive_shard(pinned, shard)
+        await wired.write_manifest(pinned)
+
+    asyncio.run(archive())
+    events: list[str] = []
+
+    def require(limits: tuple[str, ...]) -> None:
+        assert limits == (deployments.LOAD_LIMIT,)
+
+    @asynccontextmanager
+    async def capacity(*, wait: bool = True) -> AsyncGenerator[None]:
+        assert not wait
+        events.append("capacity")
+        if scenario == "busy":
+            raise ConcurrencySlotAcquisitionError("busy ClickHouse")
+        yield
+        events.append("capacity released")
+
+    @asynccontextmanager
+    async def admitted() -> AsyncGenerator[None]:
+        assert events == ["capacity"]
+        events.append("admitted")
+        yield
+        events.append("admission released")
+
+    class Telemetry:
+        async def snapshot(self, dataset: str) -> LoadSnapshot:
+            events.append("snapshot")
+            return LoadSnapshot(captured_at=clock())
+
+    applied = FakeApplied()
+
+    @asynccontextmanager
+    async def opened(
+        settings: LoadSettings,
+    ) -> AsyncGenerator[tuple[LoadDatasetService, LoadObservation, LoadTelemetry]]:
+        assert events == ["capacity", "admitted"]
+        observation = LoadObservation()
+        tables = FakeTables(store)
+        if scenario == "failure":
+            tables.failures.append(TableRejected("synthetic insert failure"))
+        yield (
+            LoadDatasetService(
+                store=store,
+                tables=tables,
+                applied=applied,
+                producer=PRODUCER,
+                clock=clock,
+                observer=observation,
+            ),
+            observation,
+            Telemetry(),
+        )
+
+    def flows(service: LoadDatasetService, settings: LoadSettings) -> SimpleNamespace:
+        async def dataset(command: LoadDataset) -> LoadDatasetResult:
+            prepared = await service.prepare(command)
+            outcomes = [
+                await service.load_object(prepared, entry) for entry in prepared.manifest.entries
+            ]
+            return await service.finish(prepared, outcomes)
+
+        return SimpleNamespace(dataset=dataset)
+
+    monkeypatch.setattr(cli, "_require_managed_server", require)
+    monkeypatch.setattr(deployments, "one_clickhouse_loader", capacity)
+    monkeypatch.setattr(admission, "execution", admitted)
+    monkeypatch.setattr(bootstrap, "open_measured_load", opened)
+    monkeypatch.setattr(bootstrap, "load_flows", flows)
+    path = tmp_path / "measurement.json"
+    args = [
+        "load",
+        "--release",
+        RELEASE,
+        "--dataset",
+        "papers",
+        *TARGET,
+        "--measurement-report",
+        str(path),
+    ]
+    code, output = okp(*args)
+    if scenario == "busy":
+        assert code == 1 and "retry when free" in output
+        assert events == ["capacity"]
+        assert path.read_text() == ""
+    else:
+        report = json.loads(path.read_text())
+        assert report["status"] == ("completed" if scenario == "success" else "failed")
+        assert events.count("snapshot") == 2
+        if scenario == "failure":
+            assert code == 1 and "synthetic insert failure" in output
+            assert report["error_type"] == "TableRejected"
+            assert applied.records == []
+        else:
+            assert code == 0, output
+            assert len(applied.records) == 1
+            assert events[-2:] == ["admission released", "capacity released"]
+    before = path.read_bytes()
+    code, output = okp(*args)
+    assert code == 1 and "choose a new writable file" in output
+    assert path.read_bytes() == before
