@@ -5,16 +5,18 @@ from uuid import UUID
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
+from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_contracts.manifests import Producer
 from openknowledge_core.ingestion.citation_edges import (
+    EDGE_TABLES,
     BuildCitationEdgesResult,
     CitationEdgeTableResult,
 )
 from openknowledge_core.ingestion.errors import TableAccessDenied, TableRejected
 from openknowledge_core.ingestion.models import AppliedRelease, held_release
 
-OUT, IN = "citation_edges_out", "citation_edges_in"
-TABLES = (OUT, IN)
+OUT, IN = EDGE_TABLES
+TABLES = EDGE_TABLES
 QUERY_ID = "citation-edges"
 SOURCES = {
     OUT: "SELECT citingcorpusid, assumeNotNull(citedcorpusid), isinfluential, "
@@ -48,6 +50,22 @@ class ClickHouseCitationEdges:
         self._tables = tables
         self._applied = applied
 
+    async def is_current(self, release: ReleaseId) -> bool:
+        rows = await self._client.rows(
+            "SELECT name, uuid FROM system.tables WHERE database = currentDatabase() "
+            f"AND name IN ('{OUT}', '{IN}')"
+        )
+        live = {row["name"]: UUID(row["uuid"]) for row in rows}
+        for table in TABLES:
+            applied = await self._applied.latest(table)
+            if (
+                applied is None
+                or applied.release != release
+                or live.get(table) != applied.target_uuid
+            ):
+                return False
+        return True
+
     async def build(
         self, producer: Producer, clock: Callable[[], datetime]
     ) -> BuildCitationEdgesResult:
@@ -57,14 +75,17 @@ class ClickHouseCitationEdges:
             raise TableRejected(
                 "citations holds no completed release; finish its load before building edges"
             )
-        live = await self._preflight()
         # A cancelled run's insert keeps running on the server. Replacing its query ID stops it,
         # unlike KILL QUERY, without a grant.
         await self._client.post("SELECT 1 SETTINGS replace_running_query = 1", query_id=QUERY_ID)
+        # Reclaim abandoned copies, including an old live table after a partial swap.
+        # Stop the old insert first; never drop the published names.
+        for table in TABLES:
+            await self._client.post(f"DROP TABLE IF EXISTS {table}_new SYNC")
+        live = await self._preflight()
         results: dict[str, CitationEdgeTableResult] = {}
         for table in TABLES:
             started = monotonic()
-            await self._client.post(f"DROP TABLE IF EXISTS {table}_new SYNC")
             await self._client.post(f"CREATE TABLE {table}_new AS {table}")
             rows = await self._client.written(
                 f"INSERT INTO {table}_new (citing, cited, isinfluential, intents) "
