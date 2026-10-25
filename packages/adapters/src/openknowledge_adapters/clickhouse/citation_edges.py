@@ -7,14 +7,15 @@ from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_contracts.manifests import Producer
 from openknowledge_core.ingestion.citation_edges import (
+    EDGE_TABLES,
     BuildCitationEdgesResult,
     CitationEdgeTableResult,
 )
 from openknowledge_core.ingestion.errors import TableAccessDenied, TableRejected
 from openknowledge_core.ingestion.models import AppliedRelease, held_release
 
-OUT, IN = "citation_edges_out", "citation_edges_in"
-TABLES = (OUT, IN)
+OUT, IN = EDGE_TABLES
+TABLES = EDGE_TABLES
 QUERY_ID = "citation-edges"
 SOURCES = {
     OUT: "SELECT citingcorpusid, assumeNotNull(citedcorpusid), isinfluential, "

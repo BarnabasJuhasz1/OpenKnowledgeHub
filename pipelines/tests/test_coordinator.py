@@ -28,6 +28,11 @@ from openknowledge_core.ingestion import (
     LoadDiffResult,
 )
 from openknowledge_core.ingestion.archive_progress import ArchiveProgress
+from openknowledge_core.ingestion.citation_edges import (
+    EDGE_TABLES,
+    BuildCitationEdgesResult,
+    CitationEdgeTableResult,
+)
 from openknowledge_core.ingestion.coordinator import (
     CORE_ORDER,
     LARGE_ORDER,
@@ -39,6 +44,7 @@ from openknowledge_core.ingestion.errors import (
     CredentialRejected,
     IngestionError,
     SharedCapacityError,
+    TableRejected,
 )
 from openknowledge_core.ingestion.models import TableState
 from openknowledge_pipelines import deployments
@@ -109,6 +115,7 @@ class Cycle:
         self.events: list[tuple[str, str, str]] = []
         self.active = 0
         self.leases = 0
+        self.loading = False
         self.fail: str | None = None
         self.command = SyncCommand(bucket="raw", prefix="s2")
 
@@ -125,7 +132,11 @@ class Cycle:
     @asynccontextmanager
     async def load_lease(self) -> AsyncGenerator[None]:
         assert self.active == 0
-        yield
+        self.loading = True
+        try:
+            yield
+        finally:
+            self.loading = False
 
     async def initialize(self) -> None:
         self.source.releases = [RELEASE, NEXT, TARGET]
@@ -214,6 +225,20 @@ class Cycle:
             ]
             return await self.loader.finish_diff(prepared, outcomes)
 
+        async def build_edges() -> BuildCitationEdgesResult:
+            assert self.loading
+            if self.fail == "edges":
+                raise TableRejected("not enough disk")
+            citations = await self.applied.latest("citations")
+            assert citations is not None
+            self.events.append(("edges", "citations", citations.release))
+            for table in EDGE_TABLES:
+                await self.applied.record(applied_release(table, citations.release, timedelta()))
+            built = CitationEdgeTableResult(rows=1, seconds=0)
+            return BuildCitationEdgesResult(
+                source_release=citations.release, citation_edges_out=built, citation_edges_in=built
+            )
+
         return s2_sync.SyncServices(
             jobs=self.jobs,
             catalog=self.source,
@@ -226,6 +251,7 @@ class Cycle:
             loads=S2LoadFlows(load_base, load_diff),
             s2_lease=self.lease,
             load_lease=self.load_lease,
+            build_edges=build_edges,
         )
 
 
@@ -295,6 +321,27 @@ async def test_core_failure_preserves_checkpoints_and_blocks_archives(
     assert applied is not None and applied.release == RELEASE
     assert all(item.final == NEXT for item in others)
     assert not any(dataset in LARGE_ORDER for _, dataset, _ in cycle.events)
+
+
+async def test_citation_edges_rebuild_once_per_citations_release(
+    cycle: Cycle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(s2_sync, "get_run_logger", lambda: logging.getLogger(__name__))
+    command = cycle.command.model_copy(update={"enabled_archives": frozenset(LARGE_ORDER)})
+    cycle.fail = "edges"
+    with pytest.raises(SyncIncomplete, match="citation edges: not enough disk"):
+        await s2_sync.run_sync(command, cycle.services())
+    assert not any(dataset in LARGE_ORDER for _, dataset, _ in cycle.events)
+    cycle.fail, cycle.events = None, []
+    await cycle.applied.record(applied_release(EDGE_TABLES[0], NEXT, timedelta()))
+    assert await cycle.applied.latest(EDGE_TABLES[1]) is None
+    result = await s2_sync.run_sync(command, cycle.services())
+    assert result.citation_edges is not None and result.citation_edges.source_release == NEXT
+    assert cycle.events[0] == ("edges", "citations", NEXT)
+    cycle.events.clear()
+    await s2_sync.run_sync(command, cycle.services())
+    assert cycle.events == []
 
 
 @pytest.mark.parametrize("failure", ["shared", "cancel"])
