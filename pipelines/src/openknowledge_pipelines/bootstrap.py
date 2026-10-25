@@ -250,6 +250,7 @@ async def open_sync(
             loads=load_flows(loader, settings),
             s2_lease=s2_lease,
             load_lease=load_lease,
+            edges=edges,
             build_edges=lambda: edges.build(producer(settings), lambda: datetime.now(UTC)),
         )
 

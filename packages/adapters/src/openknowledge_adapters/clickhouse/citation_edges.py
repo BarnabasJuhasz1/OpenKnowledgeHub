@@ -5,6 +5,7 @@ from uuid import UUID
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
+from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_contracts.manifests import Producer
 from openknowledge_core.ingestion.citation_edges import (
     EDGE_TABLES,
@@ -48,6 +49,22 @@ class ClickHouseCitationEdges:
         self._client = client
         self._tables = tables
         self._applied = applied
+
+    async def is_current(self, release: ReleaseId) -> bool:
+        rows = await self._client.rows(
+            "SELECT name, uuid FROM system.tables WHERE database = currentDatabase() "
+            f"AND name IN ('{OUT}', '{IN}')"
+        )
+        live = {row["name"]: UUID(row["uuid"]) for row in rows}
+        for table in TABLES:
+            applied = await self._applied.latest(table)
+            if (
+                applied is None
+                or applied.release != release
+                or live.get(table) != applied.target_uuid
+            ):
+                return False
+        return True
 
     async def build(
         self, producer: Producer, clock: Callable[[], datetime]

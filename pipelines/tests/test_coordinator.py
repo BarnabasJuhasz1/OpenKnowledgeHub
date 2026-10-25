@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import timedelta
 from unittest.mock import AsyncMock
 
@@ -225,6 +226,11 @@ class Cycle:
             ]
             return await self.loader.finish_diff(prepared, outcomes)
 
+        async def edges_current(release: str) -> bool:
+            assert self.loading, "freshness must be checked under the shared lease"
+            built = [await self.applied.latest(table) for table in EDGE_TABLES]
+            return all(row is not None and row.release == release for row in built)
+
         async def build_edges() -> BuildCitationEdgesResult:
             assert self.loading
             if self.fail == "edges":
@@ -251,6 +257,7 @@ class Cycle:
             loads=S2LoadFlows(load_base, load_diff),
             s2_lease=self.lease,
             load_lease=self.load_lease,
+            edges=AsyncMock(is_current=edges_current),
             build_edges=build_edges,
         )
 
@@ -484,3 +491,46 @@ async def test_orphan_recovery_precedes_source_calls(
         command = cycle.command.model_copy(update={"enabled_archives": frozenset({"s2orc_v2"})})
         await s2_sync.run_sync(command, cycle.services())
         assert order == ["inspect", "wait", "source", "source", "source"]
+
+
+async def test_competing_edge_builder_finishes_during_lease_acquisition(cycle: Cycle) -> None:
+    # Settle core loads, then invalidate one marker to require an edge rebuild.
+    await s2_sync.run_sync(cycle.command, cycle.services())
+    cycle.applied.records = [row for row in cycle.applied.records if row.target != EDGE_TABLES[1]]
+    cycle.events.clear()
+
+    @asynccontextmanager
+    async def competing_lease() -> AsyncGenerator[None]:
+        assert not cycle.loading
+        # The competing builder publishes before handing over the shared slot.
+        await cycle.applied.record(applied_release(EDGE_TABLES[1], NEXT, timedelta()))
+        async with cycle.load_lease():
+            yield
+
+    services = replace(cycle.services(), load_lease=competing_lease)
+    result = await s2_sync.run_sync(cycle.command, services)
+    assert result.citation_edges is None
+    assert cycle.events == []
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_edge_freshness_failure_blocks_archives(
+    cycle: Cycle, monkeypatch: pytest.MonkeyPatch, cancel: bool
+) -> None:
+    monkeypatch.setattr(s2_sync, "get_run_logger", lambda: logging.getLogger(__name__))
+    services = cycle.services()
+    check = AsyncMock(
+        side_effect=asyncio.CancelledError() if cancel else TableRejected("read denied")
+    )
+    monkeypatch.setattr(services.edges, "is_current", check)
+    command = cycle.command.model_copy(update={"enabled_archives": frozenset(LARGE_ORDER)})
+    if cancel:
+        with pytest.raises(asyncio.CancelledError):
+            await s2_sync.run_sync(command, services)
+    else:
+        with pytest.raises(SyncIncomplete, match="citation edges: read denied"):
+            await s2_sync.run_sync(command, services)
+    assert not cycle.loading
+    assert not any(
+        action == "edges" or dataset in LARGE_ORDER for action, dataset, _ in cycle.events
+    )

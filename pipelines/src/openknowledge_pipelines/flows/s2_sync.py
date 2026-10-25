@@ -9,7 +9,7 @@ from prefect import get_run_logger
 from openknowledge_contracts.manifests import DatasetManifest
 from openknowledge_contracts.tables.s2 import CONTRACTS
 from openknowledge_core.ingestion.archive_progress import ArchiveProgress
-from openknowledge_core.ingestion.citation_edges import EDGE_TABLES, BuildCitationEdgesResult
+from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.commands import (
     DownloadDataset,
     DownloadDiff,
@@ -36,6 +36,7 @@ from openknowledge_core.ingestion.families import ArchiveFamily, archive_family
 from openknowledge_core.ingestion.models import held_release
 from openknowledge_core.ingestion.ports import (
     AppliedReleases,
+    CitationEdges,
     ReleaseCatalog,
     ShardJobs,
     TableLoader,
@@ -55,6 +56,7 @@ class SyncServices:
     loads: S2LoadFlows
     s2_lease: Callable[[], AbstractAsyncContextManager[None]]
     load_lease: Callable[[], AbstractAsyncContextManager[None]]
+    edges: CitationEdges
     build_edges: Callable[[], Awaitable[BuildCitationEdgesResult]]
 
 
@@ -214,11 +216,10 @@ async def _citation_edges(services: SyncServices, result: SyncResult) -> None:
     citations = next(item for item in result.datasets if item.dataset == "citations")
     if citations.outcome not in ("synced", "current"):
         return
-    built = [await services.applied.latest(table) for table in EDGE_TABLES]
-    if all(row is not None and row.release == citations.final for row in built):
-        return
     try:
         async with services.load_lease():
+            if citations.final is not None and await services.edges.is_current(citations.final):
+                return
             result.citation_edges = await services.build_edges()
     except IngestionError as exc:
         result.citation_edges_failure = str(exc)
