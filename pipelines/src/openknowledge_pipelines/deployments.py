@@ -93,7 +93,11 @@ async def s2_load_diff(command: LoadDiff) -> LoadDiffResult:
 @flow(name="s2-build-citation-edges", persist_result=False, retries=0)
 async def s2_build_citation_edges() -> BuildCitationEdgesResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]
-    async with one_clickhouse_loader(), bootstrap.open_citation_edges(settings) as edges:
+    async with (
+        admission.execution(),
+        one_clickhouse_loader(),
+        bootstrap.open_citation_edges(settings) as edges,
+    ):
         return await edges.build(bootstrap.producer(settings), lambda: datetime.now(UTC))
 
 

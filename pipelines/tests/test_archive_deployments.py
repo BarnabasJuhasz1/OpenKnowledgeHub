@@ -12,8 +12,8 @@ from prefect.client.schemas.objects import ConcurrencyLeaseHolder
 from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
 
 from openknowledge_core.ingestion import DownloadDatasetService, ShardJobs
-from openknowledge_pipelines import bootstrap, deployments
-from openknowledge_pipelines.settings import BatchSettings
+from openknowledge_pipelines import admission, bootstrap, deployments
+from openknowledge_pipelines.settings import BatchSettings, LoadSettings
 from tests.fakes.ports import COMMAND, DIFF, FakeSource, FakeStore
 
 
@@ -196,3 +196,22 @@ async def test_managed_manual_diff_retries_only_anchored_completions(
     store.put(completion_path(command), record.model_copy(update={"predecessor": anchor}).to_json())
     with pytest.raises(IngestionError, match="predecessor"):
         await deployments.s2_batch_download_fulltext_diff.fn(diff)
+
+
+async def test_closed_admission_refuses_edge_build_before_clickhouse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    @asynccontextmanager
+    async def closed() -> AsyncGenerator[None]:
+        raise admission.AdmissionError("admission is closed")
+        yield  # pragma: no cover
+
+    def forbidden(*args: object) -> None:
+        pytest.fail("closed admission must not open ClickHouse")
+
+    monkeypatch.setattr(deployments, "LoadSettings", LoadSettings.model_construct)
+    monkeypatch.setattr(admission, "execution", closed)
+    monkeypatch.setattr(deployments, "one_clickhouse_loader", forbidden)
+    monkeypatch.setattr(bootstrap, "open_citation_edges", forbidden)
+    with pytest.raises(admission.AdmissionError, match="closed"):
+        await deployments.s2_build_citation_edges.fn()
