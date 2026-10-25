@@ -12,8 +12,8 @@ from prefect.client.schemas.objects import ConcurrencyLeaseHolder
 from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
 
 from openknowledge_core.ingestion import DownloadDatasetService, ShardJobs
-from openknowledge_pipelines import bootstrap, deployments
-from openknowledge_pipelines.settings import BatchSettings
+from openknowledge_pipelines import admission, bootstrap, deployments
+from openknowledge_pipelines.settings import BatchSettings, LoadSettings
 from tests.fakes.ports import COMMAND, DIFF, FakeSource, FakeStore
 
 
@@ -40,6 +40,45 @@ async def test_archive_mismatch_precedes_client_construction() -> None:
             await diff.fn(DIFF)
 
 
+@pytest.mark.parametrize("dataset", ["papers", "s2orc_v2", "embeddings-specter_v2"])
+@pytest.mark.parametrize("diff", [False, True])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_download_lease_refusal_or_cancellation_precedes_admission(
+    monkeypatch: pytest.MonkeyPatch, dataset: str, diff: bool, cancel: bool
+) -> None:
+    monkeypatch.setattr(deployments, "BatchSettings", BatchSettings.model_construct)
+
+    @asynccontextmanager
+    async def refused() -> AsyncGenerator[None]:
+        if cancel:
+            raise asyncio.CancelledError()
+        raise ConcurrencySlotAcquisitionError("busy semantic-scholar")
+        yield  # pragma: no cover
+
+    @asynccontextmanager
+    async def forbidden() -> AsyncGenerator[None]:
+        pytest.fail("a refused or cancelled lease must not take admission")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(deployments, "one_s2_user", refused)
+    monkeypatch.setattr(admission, "execution", forbidden)
+    with pytest.raises(asyncio.CancelledError if cancel else ConcurrencySlotAcquisitionError):
+        if diff:
+            route = {
+                "papers": deployments.s2_batch_download_diff,
+                "s2orc_v2": deployments.s2_batch_download_fulltext_diff,
+                "embeddings-specter_v2": deployments.s2_batch_download_embeddings_diff,
+            }[dataset]
+            await route.fn(DIFF.model_copy(update={"dataset": dataset}))
+        else:
+            base_route = {
+                "papers": deployments.s2_batch_download,
+                "s2orc_v2": deployments.s2_batch_download_fulltext,
+                "embeddings-specter_v2": deployments.s2_batch_download_embeddings,
+            }[dataset]
+            await base_route.fn(COMMAND.model_copy(update={"dataset": dataset}))
+
+
 @pytest.mark.usefixtures("prefect_server")
 async def test_managed_routes_share_budget_and_release_after_errors(
     monkeypatch: pytest.MonkeyPatch,
@@ -56,6 +95,7 @@ async def test_managed_routes_share_budget_and_release_after_errors(
 
     monkeypatch.setattr(bootstrap, "open_batch_download", forbidden)
     deployments.ensure_limits()
+    before = admission.status().active_slots
     async with deployments.one_s2_user():
         with pytest.raises(ConcurrencySlotAcquisitionError, match="semantic-scholar"):
             await deployments.s2_batch_download_fulltext.fn(
@@ -65,6 +105,7 @@ async def test_managed_routes_share_budget_and_release_after_errors(
             await deployments.s2_batch_download_embeddings_diff.fn(
                 DIFF.model_copy(update={"dataset": "embeddings-specter_v2"})
             )
+    assert admission.status().active_slots == before
     with pytest.raises(RuntimeError, match="job wait failed"):
         async with deployments.one_s2_user():
             raise RuntimeError("job wait failed")
@@ -145,6 +186,7 @@ async def test_managed_manual_diff_retries_only_anchored_completions(
         yield
 
     monkeypatch.setattr(deployments, "one_s2_user", lease)
+    monkeypatch.setattr(admission, "execution", lease)
     monkeypatch.setattr(
         deployments, "BatchSettings", lambda: BatchSettings.model_construct(sync=config)
     )
@@ -196,3 +238,35 @@ async def test_managed_manual_diff_retries_only_anchored_completions(
     store.put(completion_path(command), record.model_copy(update={"predecessor": anchor}).to_json())
     with pytest.raises(IngestionError, match="predecessor"):
         await deployments.s2_batch_download_fulltext_diff.fn(diff)
+
+
+async def test_closed_admission_refuses_edge_build_before_clickhouse(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+
+    @asynccontextmanager
+    async def capacity(*, wait: bool = True) -> AsyncGenerator[None]:
+        assert not wait
+        events.append("capacity")
+        try:
+            yield
+        finally:
+            events.append("released")
+
+    @asynccontextmanager
+    async def closed() -> AsyncGenerator[None]:
+        assert events == ["capacity"]
+        raise admission.AdmissionError("admission is closed")
+        yield  # pragma: no cover
+
+    def forbidden(*args: object) -> None:
+        pytest.fail("closed admission must not open ClickHouse")
+
+    monkeypatch.setattr(deployments, "LoadSettings", LoadSettings.model_construct)
+    monkeypatch.setattr(admission, "execution", closed)
+    monkeypatch.setattr(deployments, "one_clickhouse_loader", capacity)
+    monkeypatch.setattr(bootstrap, "open_citation_edges", forbidden)
+    with pytest.raises(admission.AdmissionError, match="closed"):
+        await deployments.s2_build_citation_edges.fn()
+    assert events == ["capacity", "released"]
