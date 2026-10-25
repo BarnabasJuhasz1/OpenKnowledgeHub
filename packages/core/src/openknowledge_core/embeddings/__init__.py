@@ -1,1 +1,1 @@
-"""Snapshot-scoped embedding lookup and ingestion."""
+"""Shared embedding processing boundaries."""
