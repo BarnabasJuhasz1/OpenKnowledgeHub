@@ -126,6 +126,7 @@ def ports() -> Iterator[dict[str, str]]:
         ):
             # One initialization per project; failed loads retain occupancy across tests.
             admission.ensure_closed()
+            deployments.ensure_limits()
             admission.status("open")
             try:
                 yield ports

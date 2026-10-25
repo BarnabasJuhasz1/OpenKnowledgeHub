@@ -41,7 +41,7 @@ from openknowledge_core.ingestion.errors import (
     IngestionError,
     SharedCapacityError,
 )
-from openknowledge_core.ingestion.models import TableState
+from openknowledge_core.ingestion.models import PreparedDiff, TableState
 from openknowledge_pipelines import admission, bootstrap, deployments
 from openknowledge_pipelines.flows import s2_batch_download, s2_sync
 from openknowledge_pipelines.flows.s2_batch_download import S2BatchDownloadFlows
@@ -125,7 +125,7 @@ class Cycle:
 
     @asynccontextmanager
     async def load_lease(self) -> AsyncGenerator[None]:
-        assert self.active == 0
+        assert self.active == 1
         yield
 
     async def initialize(self) -> None:
@@ -268,7 +268,7 @@ async def test_two_transitions_snapshot_order_distinct_targets_and_noop(
         for dataset in CORE_ORDER
         for _ in range(1 if CONTRACTS[dataset].updates == "snapshot" else 2)
     ] + ["s2orc_v2", "s2orc_v2", "embeddings-specter_v2"]
-    assert cycle.leases == 34
+    assert cycle.leases == 1
     cycle.events.clear()
     again = await s2_sync.run_sync(command, cycle.services())
     assert all(item.outcome == "current" for item in again.datasets)
@@ -440,8 +440,8 @@ async def test_orphan_recovery_precedes_source_calls(
         assert order == ["inspect", "wait", "source", "source", "source"]
 
 
-@pytest.mark.parametrize("failure", ["first", "later", "cancel", "none"])
-async def test_managed_sync_admits_after_first_lease_and_retains_on_failure(
+@pytest.mark.parametrize("failure", ["first", "load", "cancel", "none"])
+async def test_managed_sync_holds_one_lease_and_retains_admission_on_failure(
     cycle: Cycle, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
     slots = acquisitions = 0
@@ -462,7 +462,7 @@ async def test_managed_sync_admits_after_first_lease_and_retains_on_failure(
     async def source() -> AsyncGenerator[None]:
         nonlocal acquisitions
         acquisitions += 1
-        if (failure == "first" and acquisitions == 1) or (failure == "later" and acquisitions == 2):
+        if failure == "first":
             raise SharedCapacityError("busy source")
         async with cycle.lease():
             yield
@@ -486,13 +486,144 @@ async def test_managed_sync_admits_after_first_lease_and_retains_on_failure(
         cycle.fail = "cancel"
         with pytest.raises(asyncio.CancelledError):
             await deployments.s2_sync.fn()
+    elif failure == "load":
+        cycle.fail = "load"
+        monkeypatch.setattr(s2_sync, "get_run_logger", lambda: logging.getLogger(__name__))
+        with pytest.raises(SyncIncomplete):
+            await deployments.s2_sync.fn()
     elif failure != "none":
         with pytest.raises(SharedCapacityError, match="busy source"):
             await deployments.s2_sync.fn()
     else:
         await deployments.s2_sync.fn()
-    assert slots == (1 if failure in ("later", "cancel") else 0)
-    if failure == "first":
-        assert acquisitions == 1
-    else:
-        assert acquisitions > 1
+    assert slots == (1 if failure in ("load", "cancel") else 0)
+    assert acquisitions == 1
+
+
+@pytest.fixture
+async def managed_cycle(
+    cycle: Cycle, prefect_server: None, monkeypatch: pytest.MonkeyPatch
+) -> AsyncGenerator[Cycle]:
+    from prefect.client.orchestration import get_client
+    from prefect.client.schemas.actions import GlobalConcurrencyLimitUpdate
+
+    deployments.ensure_limits()
+    admission.status("open")
+
+    @asynccontextmanager
+    async def opened(
+        settings: SyncSettings,
+        s2_lease: Callable[[], AbstractAsyncContextManager[None]],
+        load_lease: Callable[[], AbstractAsyncContextManager[None]],
+    ) -> AsyncGenerator[s2_sync.SyncServices]:
+        @asynccontextmanager
+        async def tracked() -> AsyncGenerator[None]:
+            async with s2_lease(), cycle.lease():
+                yield
+
+        yield replace(cycle.services(), s2_lease=tracked, load_lease=load_lease)
+
+    monkeypatch.setattr(bootstrap, "open_sync", opened)
+    monkeypatch.setattr(
+        deployments, "SyncSettings", lambda: SyncSettings.model_construct(sync=cycle.command)
+    )
+    monkeypatch.setattr(s2_sync, "get_run_logger", lambda: logging.getLogger(__name__))
+    try:
+        yield cycle
+    finally:
+        # Isolated test database only; production occupancy needs operator reconciliation.
+        with get_client(sync_client=True) as client:
+            client.update_global_concurrency_limit(
+                admission.NAME,
+                GlobalConcurrencyLimitUpdate(limit=admission.OPEN_LIMIT, active_slots=0),
+            )
+
+
+async def test_manual_download_refuses_during_sync_load(
+    managed_cycle: Cycle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
+
+    from openknowledge_pipelines.settings import BatchSettings
+
+    entered, resume = asyncio.Event(), asyncio.Event()
+    original = managed_cycle.loader.prepare_diff
+
+    async def paused(command: LoadDiff) -> PreparedDiff:
+        entered.set()
+        await resume.wait()
+        return await original(command)
+
+    monkeypatch.setattr(managed_cycle.loader, "prepare_diff", paused)
+    monkeypatch.setattr(deployments, "BatchSettings", lambda: BatchSettings.model_construct())
+    task = asyncio.create_task(deployments.s2_sync.fn())
+    try:
+        async with asyncio.timeout(30):
+            await entered.wait()
+        assert admission.status().active_slots == 1
+        with pytest.raises(ConcurrencySlotAcquisitionError):
+            await deployments.s2_batch_download.fn(
+                DownloadDataset(bucket="raw", dataset="papers", release=NEXT)
+            )
+        assert admission.status().active_slots == 1
+    finally:
+        resume.set()
+        await task
+    assert admission.status().active_slots == 0
+
+
+async def test_sync_waits_for_standalone_load_then_finishes_without_retained_admission(
+    managed_cycle: Cycle, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from threading import Event
+    from typing import Literal
+
+    import httpx
+    from prefect.client.orchestration import PrefectClient
+    from prefect.client.schemas.objects import ConcurrencyLeaseHolder
+
+    busy = Event()
+    original = PrefectClient.increment_concurrency_slots_with_lease
+
+    async def observed(
+        client: PrefectClient,
+        names: list[str],
+        slots: int,
+        mode: Literal["concurrency", "rate_limit"],
+        lease_duration: float,
+        holder: ConcurrencyLeaseHolder | None = None,
+    ) -> httpx.Response:
+        try:
+            return await original(client, names, slots, mode, lease_duration, holder)
+        except httpx.HTTPStatusError as exc:
+            if names == [deployments.LOAD_LIMIT] and exc.response.status_code == 423:
+                busy.set()
+            raise
+
+    monkeypatch.setattr(PrefectClient, "increment_concurrency_slots_with_lease", observed)
+    acquire = deployments.one_clickhouse_loader
+    task: asyncio.Task[object] | None = None
+    try:
+        # A standalone load has already acquired capacity and admission before sync starts.
+        async with acquire(wait=False), admission.execution():
+            task = asyncio.create_task(deployments.s2_sync.fn())
+            assert await asyncio.to_thread(busy.wait, 30)
+            assert not task.done()
+            assert admission.status().active_slots == 2
+        async with asyncio.timeout(40):
+            await task
+        assert admission.status().active_slots == 0
+    finally:
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_managed_sync_failure_after_external_work_retains_real_admission(
+    managed_cycle: Cycle,
+) -> None:
+    managed_cycle.fail = "load"
+    with pytest.raises(SyncIncomplete):
+        await deployments.s2_sync.fn()
+    assert ("archive", "papers", NEXT) in managed_cycle.events
+    assert admission.status().active_slots == 1

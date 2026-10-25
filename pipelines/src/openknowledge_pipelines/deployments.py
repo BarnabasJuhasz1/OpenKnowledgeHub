@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
-from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
 
 from prefect import flow
@@ -62,18 +62,24 @@ def one_s2_user() -> AbstractAsyncContextManager[None]:
     )
 
 
-def one_clickhouse_loader() -> AbstractAsyncContextManager[None]:
+def one_clickhouse_loader(*, wait: bool = True) -> AbstractAsyncContextManager[None]:
     # A missing limit must fail. Keep a load running through a failed renewal so an insert
-    # of hours is not interrupted.
-    return concurrency(LOAD_LIMIT, strict=True, raise_on_lease_renewal_failure=False)
+    # of hours is not interrupted. Sync waits after starting external work; standalone
+    # loads refuse busy capacity before admission.
+    return concurrency(
+        LOAD_LIMIT,
+        strict=True,
+        max_retries=None if wait else 0,
+        raise_on_lease_renewal_failure=False,
+    )
 
 
 @flow(name="s2-load", persist_result=False)
 async def s2_load(command: LoadDataset) -> LoadDatasetResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]  # fields come from the environment
     async with (
+        one_clickhouse_loader(wait=False),
         admission.execution(),
-        one_clickhouse_loader(),
         bootstrap.open_load_service(settings) as service,
     ):
         # fn runs the body in this flow run, so its tasks do not start a subflow.
@@ -84,8 +90,8 @@ async def s2_load(command: LoadDataset) -> LoadDatasetResult:
 async def s2_load_diff(command: LoadDiff) -> LoadDiffResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]
     async with (
+        one_clickhouse_loader(wait=False),
         admission.execution(),
-        one_clickhouse_loader(),
         bootstrap.open_load_service(settings) as service,
     ):
         return await bootstrap.load_flows(service, settings).diff.fn(command)
@@ -95,8 +101,8 @@ async def s2_load_diff(command: LoadDiff) -> LoadDiffResult:
 async def s2_build_citation_edges() -> BuildCitationEdgesResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]
     async with (
+        one_clickhouse_loader(wait=False),
         admission.execution(),
-        one_clickhouse_loader(),
         bootstrap.open_citation_edges(settings) as edges,
     ):
         return await edges.build(bootstrap.producer(settings), lambda: datetime.now(UTC))
@@ -185,25 +191,15 @@ async def s2_sync() -> SyncResult:
     settings = SyncSettings()  # pyright: ignore[reportCallIssue]
     if settings.sync is None:
         raise IngestionError("OKP_SYNC must configure the coordinator bucket and baselines")
-    async with AsyncExitStack() as execution:
-        admitted = False
 
-        @asynccontextmanager
-        async def admitted_source() -> AsyncGenerator[None]:
-            nonlocal admitted
-            async with one_s2_user():
-                # The first source operation also recovers existing Batch work. Admit
-                # before that work, but only after a busy lease can refuse harmlessly.
-                # Keep admission through the entire sync, including later lease refusals.
-                if not admitted:
-                    await execution.enter_async_context(admission.execution())
-                    admitted = True
-                yield
+    @asynccontextmanager
+    async def admitted_source() -> AsyncGenerator[None]:
+        # run_sync enters this once, before recovery, and holds it through all loads.
+        async with one_s2_user(), admission.execution():
+            yield
 
-        async with bootstrap.open_sync(
-            settings, admitted_source, one_clickhouse_loader
-        ) as services:
-            return await run_sync(settings.sync, services)
+    async with bootstrap.open_sync(settings, admitted_source, one_clickhouse_loader) as services:
+        return await run_sync(settings.sync, services)
 
 
 def sync_deployment() -> RunnerDeployment:
@@ -252,7 +248,7 @@ def serve() -> None:
         sync_deployment(),
         # One run of each load at a time, held in Prefect's queue, so a second run of the same load
         # holds no serve slot. LOAD_LIMIT keeps both loads and the edge rebuild apart, so no two
-        # served runs hit ClickHouse at once; a run waiting on it does hold a slot.
+        # served runs hit ClickHouse at once. Standalone runs refuse busy capacity; sync waits.
         # The deployment limit gives a running load a lease that Prefect renews every 225 seconds,
         # up to three attempts per renewal, and cancels the run when all three fail. The global
         # limit's raise_on_lease_renewal_failure=False does not cover that lease.

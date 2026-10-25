@@ -237,9 +237,16 @@ Never delete/recreate, deactivate or enable decay on the gate while clients can 
 - `okp admission open` reopens after deployment verification; it refuses while slots are held.
 - `okp admission release --slots N` frees all held slots, only while closed and when `N`
   matches the held count. First reconcile every run and external job using admission owner
-  logs, Prefect run states, Batch operations and ClickHouse activity. Never release to bypass drain.
+  logs, Prefect run states, Batch operations and ClickHouse activity (`system.processes`,
+  checked as the ClickHouse container default user, not the `openknowledge` user).
+  Never release to bypass drain.
 
-Download and sync requests refused by a busy S2 lease before admission take no slot.
+Sync holds the `semantic-scholar` lease from before admission through its final ClickHouse
+load; manual managed downloads refuse while it runs. Batch recovery still precedes each source operation.
+Standalone loads, load-diff and citation edge rebuilds (CLI and served flows) acquire `clickhouse`
+before admission and fail promptly when busy, without capacity retries. Sync waits for
+ClickHouse while holding its source lease and admission; it does not refuse on load contention.
+Source lease refusals or cancellation before admission take no admission slot.
 Once admitted, only successful work releases its slot. Failed/interrupted runs and uncertain API responses
 require operator reconciliation: external work may survive. Counter mutations are never
 replayed on uncertain responses. This includes a load of a release that has not been archived,

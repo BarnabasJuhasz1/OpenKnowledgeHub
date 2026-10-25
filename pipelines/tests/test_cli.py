@@ -170,6 +170,7 @@ def test_bad_options_exit_2(args: list[str], message: str) -> None:
 def test_load_runs_the_flow_without_an_s2_key(
     monkeypatch: pytest.MonkeyPatch, wired: DownloadDatasetService, store: FakeStore
 ) -> None:
+    deployments.ensure_limits()
     assert okp("download", "--release", "2026-10-06", "--dataset", "papers", *TARGET)[0] == 0
 
     @asynccontextmanager
@@ -646,7 +647,7 @@ def test_load_refuses_before_opening_regular_or_telemetry_clients(
     with temporary_settings({PREFECT_API_URL: None}):
         code, output = okp("load", "--release", RELEASE, "--dataset", "papers", *TARGET, *options)
     assert code == 1
-    assert "Admission requires the shared PREFECT_API_URL" in output
+    assert "Managed commands require the shared control VM Prefect server" in output
 
 
 @pytest.mark.parametrize("action", ["status", "close", "open"])
@@ -740,3 +741,130 @@ def test_search_requires_admission_before_opening_clients(
         result = CliRunner().invoke(cli.main, ["search", command, "--index", "papers-v1", *options])
     assert result.exit_code == 1
     assert "Admission requires the shared PREFECT_API_URL" in result.output
+
+
+@pytest.mark.parametrize("scenario", ["busy", "success", "failure"])
+def test_measured_cli_capacity_preserves_report_and_load_outcome(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    wired: DownloadDatasetService,
+    store: FakeStore,
+    scenario: str,
+) -> None:
+    from types import SimpleNamespace
+
+    from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
+
+    from openknowledge_core.ingestion import LoadDataset, LoadDatasetResult
+    from openknowledge_core.ingestion.errors import TableRejected
+    from openknowledge_core.ingestion.measurement import LoadObservation, LoadSnapshot
+    from openknowledge_core.ingestion.ports import LoadTelemetry
+
+    for key, value in LOAD_ENV.items():
+        monkeypatch.setenv(key, value)
+    command = DownloadDataset(bucket="raw", prefix="s2", dataset="papers", release=RELEASE)
+
+    async def archive() -> None:
+        pinned = await wired.pin_dataset(command)
+        for shard in pinned.shards:
+            await wired.archive_shard(pinned, shard)
+        await wired.write_manifest(pinned)
+
+    asyncio.run(archive())
+    events: list[str] = []
+
+    def require(limits: tuple[str, ...]) -> None:
+        assert limits == (deployments.LOAD_LIMIT,)
+
+    @asynccontextmanager
+    async def capacity(*, wait: bool = True) -> AsyncGenerator[None]:
+        assert not wait
+        events.append("capacity")
+        if scenario == "busy":
+            raise ConcurrencySlotAcquisitionError("busy ClickHouse")
+        yield
+        events.append("capacity released")
+
+    @asynccontextmanager
+    async def admitted() -> AsyncGenerator[None]:
+        assert events == ["capacity"]
+        events.append("admitted")
+        yield
+        events.append("admission released")
+
+    class Telemetry:
+        async def snapshot(self, dataset: str) -> LoadSnapshot:
+            events.append("snapshot")
+            return LoadSnapshot(captured_at=clock())
+
+    applied = FakeApplied()
+
+    @asynccontextmanager
+    async def opened(
+        settings: LoadSettings,
+    ) -> AsyncGenerator[tuple[LoadDatasetService, LoadObservation, LoadTelemetry]]:
+        assert events == ["capacity", "admitted"]
+        observation = LoadObservation()
+        tables = FakeTables(store)
+        if scenario == "failure":
+            tables.failures.append(TableRejected("synthetic insert failure"))
+        yield (
+            LoadDatasetService(
+                store=store,
+                tables=tables,
+                applied=applied,
+                producer=PRODUCER,
+                clock=clock,
+                observer=observation,
+            ),
+            observation,
+            Telemetry(),
+        )
+
+    def flows(service: LoadDatasetService, settings: LoadSettings) -> SimpleNamespace:
+        async def dataset(command: LoadDataset) -> LoadDatasetResult:
+            prepared = await service.prepare(command)
+            outcomes = [
+                await service.load_object(prepared, entry) for entry in prepared.manifest.entries
+            ]
+            return await service.finish(prepared, outcomes)
+
+        return SimpleNamespace(dataset=dataset)
+
+    monkeypatch.setattr(cli, "_require_managed_server", require)
+    monkeypatch.setattr(deployments, "one_clickhouse_loader", capacity)
+    monkeypatch.setattr(admission, "execution", admitted)
+    monkeypatch.setattr(bootstrap, "open_measured_load", opened)
+    monkeypatch.setattr(bootstrap, "load_flows", flows)
+    path = tmp_path / "measurement.json"
+    args = [
+        "load",
+        "--release",
+        RELEASE,
+        "--dataset",
+        "papers",
+        *TARGET,
+        "--measurement-report",
+        str(path),
+    ]
+    code, output = okp(*args)
+    if scenario == "busy":
+        assert code == 1 and "retry when free" in output
+        assert events == ["capacity"]
+        assert path.read_text() == ""
+    else:
+        report = json.loads(path.read_text())
+        assert report["status"] == ("completed" if scenario == "success" else "failed")
+        assert events.count("snapshot") == 2
+        if scenario == "failure":
+            assert code == 1 and "synthetic insert failure" in output
+            assert report["error_type"] == "TableRejected"
+            assert applied.records == []
+        else:
+            assert code == 0, output
+            assert len(applied.records) == 1
+            assert events[-2:] == ["admission released", "capacity released"]
+    before = path.read_bytes()
+    code, output = okp(*args)
+    assert code == 1 and "choose a new writable file" in output
+    assert path.read_bytes() == before

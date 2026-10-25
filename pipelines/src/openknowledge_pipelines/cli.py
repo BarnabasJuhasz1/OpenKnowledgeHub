@@ -442,7 +442,7 @@ def load(
             return await bootstrap.load_flows(service, settings).dataset(command)
 
     if measurement_report is None:
-        _run(run)
+        _run_load(run)
     else:
         from openknowledge_pipelines.flows.measure_load import measured_load
 
@@ -467,7 +467,7 @@ def load(
                 "choose a new writable file"
             ) from None
         try:
-            _run(lambda: measured(report_file))
+            _run_load(lambda: measured(report_file))
         finally:
             try:
                 report_file.close()
@@ -501,7 +501,7 @@ def load_diff(from_release: str, release: str, dataset: str, bucket: str, prefix
         async with bootstrap.open_load_service(settings) as service:
             return await bootstrap.load_flows(service, settings).diff(command)
 
-    _run(run)
+    _run_load(run)
 
 
 @main.group("admission")
@@ -655,6 +655,18 @@ def _setting_problem(error: Any) -> str:  # noqa: ANN401 - pydantic's ErrorDetai
     if error["type"] == "missing":
         return MISSING_KEY if name == "S2_API_KEY" else f"{name} is not set"
     return SETTING_RULES.get(name, f"{name}: {str(error['msg']).removeprefix('Value error, ')}")
+
+
+def _run_load(run: Callable[[], Coroutine[Any, Any, BaseModel]]) -> None:
+    from openknowledge_pipelines import admission, deployments
+
+    _require_managed_server((deployments.LOAD_LIMIT,))
+
+    async def guarded() -> BaseModel:
+        async with deployments.one_clickhouse_loader(wait=False), admission.execution():
+            return await run()
+
+    _run_managed(guarded)
 
 
 def _run(
