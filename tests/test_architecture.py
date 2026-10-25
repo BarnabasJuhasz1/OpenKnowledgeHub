@@ -20,7 +20,12 @@ PROJECTS = {
 FEATURE_FILES = {"models.py", "commands.py", "service.py", "ports.py", "errors.py"}
 # No project, core feature, adapter or extra may exist outside these sets.
 ALLOWED_PROJECTS = {"packages/contracts", "packages/core", "packages/adapters", "pipelines"}
-ALLOWED_FEATURES = {"ingestion", "search"}
+ALLOWED_FEATURES = {
+    "ingestion": FEATURE_FILES,
+    "search": FEATURE_FILES,
+    # A contract/validation boundary only; no unwired orchestration or duplicate models.
+    "embeddings": {"ports.py", "resolve.py"},
+}
 ALLOWED_ADAPTERS = {"semantic_scholar", "gcs", "clickhouse", "batch", "opensearch"}
 ALLOWED_EXTRAS = {"semantic-scholar", "gcs", "clickhouse", "batch", "opensearch"}
 
@@ -60,7 +65,8 @@ def test_every_port_method_is_a_coroutine() -> None:
 def test_core_features_have_the_standard_files_and_nothing_is_called_utils() -> None:
     for feature in subpackages(source("openknowledge_core")):
         files = {path.name for path in (source("openknowledge_core") / feature).glob("*.py")}
-        assert FEATURE_FILES <= files, f"{feature} lacks {FEATURE_FILES - files}"
+        required = ALLOWED_FEATURES.get(feature, FEATURE_FILES)
+        assert required <= files, f"{feature} lacks {required - files}"
     for package in PROJECTS:
         assert not [path for path in source(package).rglob("*") if path.stem == "utils"]
 
@@ -169,7 +175,7 @@ def test_nothing_exists_outside_the_allowed_sets() -> None:
         for path in [*ROOT.glob("*/pyproject.toml"), *ROOT.glob("packages/*/pyproject.toml")]
     }
     assert projects == ALLOWED_PROJECTS
-    assert subpackages(source("openknowledge_core")) <= ALLOWED_FEATURES
+    assert subpackages(source("openknowledge_core")) <= ALLOWED_FEATURES.keys()
     assert subpackages(source("openknowledge_adapters")) <= ALLOWED_ADAPTERS
     adapters = tomllib.loads((PROJECTS["openknowledge_adapters"] / "pyproject.toml").read_text())
     assert set(adapters["project"]["optional-dependencies"]) <= ALLOWED_EXTRAS
