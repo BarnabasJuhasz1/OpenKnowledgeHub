@@ -241,8 +241,9 @@ Never delete/recreate, deactivate or enable decay on the gate while clients can 
   checked as the ClickHouse container default user, not the `openknowledge` user).
   Never release to bypass drain.
 
-Sync holds the `semantic-scholar` lease from before admission through its final ClickHouse
-load; manual managed downloads refuse while it runs. Batch recovery still precedes each source operation.
+Sync holds the `semantic-scholar` lease from before admission through the whole cycle,
+including ClickHouse loads; managed downloads refuse while it runs. Batch recovery still
+precedes each source operation.
 Standalone loads, load-diff and citation edge rebuilds (CLI and served flows) acquire `clickhouse`
 before admission and fail promptly when busy, without capacity retries. Sync waits for
 ClickHouse while holding its source lease and admission; it does not refuse on load contention.
