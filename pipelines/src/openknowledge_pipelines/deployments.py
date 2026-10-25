@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from contextlib import AbstractAsyncContextManager
+from collections.abc import AsyncGenerator
+from contextlib import AbstractAsyncContextManager, AsyncExitStack, asynccontextmanager
 from datetime import UTC, datetime
 
 from prefect import flow
@@ -105,8 +106,8 @@ async def _download(command: DownloadDataset, family: ArchiveFamily) -> BatchDow
     require_family(command.dataset, family)
     settings = BatchSettings()  # pyright: ignore[reportCallIssue]
     async with (
-        admission.execution(),
         one_s2_user(),
+        admission.execution(),
         bootstrap.open_batch_download(settings) as (service, jobs),
     ):
         result = await bootstrap.batch_download_flows(service, jobs, settings, family).dataset.fn(
@@ -121,7 +122,7 @@ async def _download(command: DownloadDataset, family: ArchiveFamily) -> BatchDow
 async def _download_diff(command: DownloadDiff, family: ArchiveFamily) -> BatchDiffDownloadResult:
     require_family(command.dataset, family)
     settings = BatchSettings()  # pyright: ignore[reportCallIssue]
-    async with admission.execution(), one_s2_user():
+    async with one_s2_user(), admission.execution():
         predecessor = None
         if family != ArchiveFamily.CORE:
             baseline = settings.sync.archives.get(command.dataset) if settings.sync else None
@@ -184,11 +185,25 @@ async def s2_sync() -> SyncResult:
     settings = SyncSettings()  # pyright: ignore[reportCallIssue]
     if settings.sync is None:
         raise IngestionError("OKP_SYNC must configure the coordinator bucket and baselines")
-    async with (
-        admission.execution(),
-        bootstrap.open_sync(settings, one_s2_user, one_clickhouse_loader) as services,
-    ):
-        return await run_sync(settings.sync, services)
+    async with AsyncExitStack() as execution:
+        admitted = False
+
+        @asynccontextmanager
+        async def admitted_source() -> AsyncGenerator[None]:
+            nonlocal admitted
+            async with one_s2_user():
+                # The first source operation also recovers existing Batch work. Admit
+                # before that work, but only after a busy lease can refuse harmlessly.
+                # Keep admission through the entire sync, including later lease refusals.
+                if not admitted:
+                    await execution.enter_async_context(admission.execution())
+                    admitted = True
+                yield
+
+        async with bootstrap.open_sync(
+            settings, admitted_source, one_clickhouse_loader
+        ) as services:
+            return await run_sync(settings.sync, services)
 
 
 def sync_deployment() -> RunnerDeployment:

@@ -40,6 +40,45 @@ async def test_archive_mismatch_precedes_client_construction() -> None:
             await diff.fn(DIFF)
 
 
+@pytest.mark.parametrize("dataset", ["papers", "s2orc_v2", "embeddings-specter_v2"])
+@pytest.mark.parametrize("diff", [False, True])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_download_lease_refusal_or_cancellation_precedes_admission(
+    monkeypatch: pytest.MonkeyPatch, dataset: str, diff: bool, cancel: bool
+) -> None:
+    monkeypatch.setattr(deployments, "BatchSettings", BatchSettings.model_construct)
+
+    @asynccontextmanager
+    async def refused() -> AsyncGenerator[None]:
+        if cancel:
+            raise asyncio.CancelledError()
+        raise ConcurrencySlotAcquisitionError("busy semantic-scholar")
+        yield  # pragma: no cover
+
+    @asynccontextmanager
+    async def forbidden() -> AsyncGenerator[None]:
+        pytest.fail("a refused or cancelled lease must not take admission")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(deployments, "one_s2_user", refused)
+    monkeypatch.setattr(admission, "execution", forbidden)
+    with pytest.raises(asyncio.CancelledError if cancel else ConcurrencySlotAcquisitionError):
+        if diff:
+            route = {
+                "papers": deployments.s2_batch_download_diff,
+                "s2orc_v2": deployments.s2_batch_download_fulltext_diff,
+                "embeddings-specter_v2": deployments.s2_batch_download_embeddings_diff,
+            }[dataset]
+            await route.fn(DIFF.model_copy(update={"dataset": dataset}))
+        else:
+            base_route = {
+                "papers": deployments.s2_batch_download,
+                "s2orc_v2": deployments.s2_batch_download_fulltext,
+                "embeddings-specter_v2": deployments.s2_batch_download_embeddings,
+            }[dataset]
+            await base_route.fn(COMMAND.model_copy(update={"dataset": dataset}))
+
+
 @pytest.mark.usefixtures("prefect_server")
 async def test_managed_routes_share_budget_and_release_after_errors(
     monkeypatch: pytest.MonkeyPatch,
@@ -56,6 +95,7 @@ async def test_managed_routes_share_budget_and_release_after_errors(
 
     monkeypatch.setattr(bootstrap, "open_batch_download", forbidden)
     deployments.ensure_limits()
+    before = admission.status().active_slots
     async with deployments.one_s2_user():
         with pytest.raises(ConcurrencySlotAcquisitionError, match="semantic-scholar"):
             await deployments.s2_batch_download_fulltext.fn(
@@ -65,6 +105,7 @@ async def test_managed_routes_share_budget_and_release_after_errors(
             await deployments.s2_batch_download_embeddings_diff.fn(
                 DIFF.model_copy(update={"dataset": "embeddings-specter_v2"})
             )
+    assert admission.status().active_slots == before
     with pytest.raises(RuntimeError, match="job wait failed"):
         async with deployments.one_s2_user():
             raise RuntimeError("job wait failed")

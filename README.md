@@ -40,8 +40,9 @@ It refreshes a signed link that has expired.
 Settings come from the environment.
 The key is `S2_API_KEY`, and every other setting is `OKP_` plus a field name from `pipelines/src/openknowledge_pipelines/settings.py`.
 
-Unmanaged local flows can use Prefect's temporary local server when no API URL is configured.
-`okp` turns that server's telemetry off.
+Mutating commands, including `okp s2 pin` and `okp s2 download`, require the shared
+`PREFECT_API_URL` and an open deployment admission gate; a temporary local server is insufficient.
+`okp` turns Prefect server telemetry off.
 
 ## Downloading through Batch
 
@@ -206,8 +207,12 @@ Never delete/recreate, deactivate or enable decay on the gate while clients can 
   matches the held count. First reconcile every run and external job using admission owner
   logs, Prefect run states, Batch operations and ClickHouse activity. Never release to bypass drain.
 
-Only successful work releases its slot. Failed/interrupted runs and uncertain API responses
+Download and sync requests refused by a busy S2 lease before admission take no slot.
+Once admitted, only successful work releases its slot. Failed/interrupted runs and uncertain API responses
 require operator reconciliation: external work may survive. Counter mutations are never
-replayed on uncertain responses. Closing alone does not establish idleness.
+replayed on uncertain responses. This includes a load of a release that has not been archived,
+even if validation failed before writes: close admission, verify no surviving work, and use
+`admission release` before reopening. Loads require the archived manifest and objects first.
+Closing alone does not establish idleness.
 A scheduled sync or load starting while closed ends Failed and mails `run_failed`;
 a gate left closed for days mails at every scheduled run.

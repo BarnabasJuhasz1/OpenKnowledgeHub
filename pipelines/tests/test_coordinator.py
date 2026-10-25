@@ -2,8 +2,9 @@
 
 import asyncio
 import logging
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from dataclasses import replace
 from datetime import timedelta
 from unittest.mock import AsyncMock
 
@@ -41,11 +42,11 @@ from openknowledge_core.ingestion.errors import (
     SharedCapacityError,
 )
 from openknowledge_core.ingestion.models import TableState
-from openknowledge_pipelines import deployments
+from openknowledge_pipelines import admission, bootstrap, deployments
 from openknowledge_pipelines.flows import s2_batch_download, s2_sync
 from openknowledge_pipelines.flows.s2_batch_download import S2BatchDownloadFlows
 from openknowledge_pipelines.flows.s2_load import S2LoadFlows
-from openknowledge_pipelines.settings import ScheduleSettings
+from openknowledge_pipelines.settings import ScheduleSettings, SyncSettings
 from tests.fakes.ports import (
     NEXT,
     PRODUCER,
@@ -437,3 +438,61 @@ async def test_orphan_recovery_precedes_source_calls(
         command = cycle.command.model_copy(update={"enabled_archives": frozenset({"s2orc_v2"})})
         await s2_sync.run_sync(command, cycle.services())
         assert order == ["inspect", "wait", "source", "source", "source"]
+
+
+@pytest.mark.parametrize("failure", ["first", "later", "cancel", "none"])
+async def test_managed_sync_admits_after_first_lease_and_retains_on_failure(
+    cycle: Cycle, monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    slots = acquisitions = 0
+
+    @asynccontextmanager
+    async def admitted() -> AsyncGenerator[None]:
+        nonlocal slots
+        assert cycle.active == 1
+        slots += 1
+        try:
+            yield
+        except BaseException:
+            raise
+        else:
+            slots -= 1
+
+    @asynccontextmanager
+    async def source() -> AsyncGenerator[None]:
+        nonlocal acquisitions
+        acquisitions += 1
+        if (failure == "first" and acquisitions == 1) or (failure == "later" and acquisitions == 2):
+            raise SharedCapacityError("busy source")
+        async with cycle.lease():
+            yield
+
+    @asynccontextmanager
+    async def opened(
+        settings: SyncSettings,
+        s2_lease: Callable[[], AbstractAsyncContextManager[None]],
+        load_lease: Callable[[], AbstractAsyncContextManager[None]],
+    ) -> AsyncGenerator[s2_sync.SyncServices]:
+        yield replace(cycle.services(), s2_lease=s2_lease, load_lease=load_lease)
+
+    monkeypatch.setattr(admission, "execution", admitted)
+    monkeypatch.setattr(deployments, "one_s2_user", source)
+    monkeypatch.setattr(deployments, "one_clickhouse_loader", cycle.load_lease)
+    monkeypatch.setattr(bootstrap, "open_sync", opened)
+    monkeypatch.setattr(
+        deployments, "SyncSettings", lambda: SyncSettings.model_construct(sync=cycle.command)
+    )
+    if failure == "cancel":
+        cycle.fail = "cancel"
+        with pytest.raises(asyncio.CancelledError):
+            await deployments.s2_sync.fn()
+    elif failure != "none":
+        with pytest.raises(SharedCapacityError, match="busy source"):
+            await deployments.s2_sync.fn()
+    else:
+        await deployments.s2_sync.fn()
+    assert slots == (1 if failure in ("later", "cancel") else 0)
+    if failure == "first":
+        assert acquisitions == 1
+    else:
+        assert acquisitions > 1
