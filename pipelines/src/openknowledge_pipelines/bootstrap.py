@@ -227,6 +227,7 @@ async def open_sync(
         open_batch_download(settings) as (service, jobs),
         gcs.connect(_gcs(settings)) as store,
         clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
+        open_citation_edges(settings) as edges,
     ):
         progress = ArchiveProgress(store, service, producer(settings), lambda: datetime.now(UTC))
         loader = LoadDatasetService(
@@ -249,6 +250,8 @@ async def open_sync(
             loads=load_flows(loader, settings),
             s2_lease=s2_lease,
             load_lease=load_lease,
+            edges=edges,
+            build_edges=lambda: edges.build(producer(settings), lambda: datetime.now(UTC)),
         )
 
 
