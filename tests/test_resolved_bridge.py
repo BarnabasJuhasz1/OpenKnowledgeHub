@@ -43,7 +43,7 @@ from openknowledge_core.ingestion.archive_progress import (
     HashedRef,
 )
 from openknowledge_core.ingestion.commands import DownloadDiff
-from openknowledge_core.ingestion.errors import ArchiveConflict
+from openknowledge_core.ingestion.errors import ArchiveConflict, ObjectChanged
 from openknowledge_core.ingestion.service import DownloadDatasetService
 from tests.fakes.ports import PRODUCER, FakeSource, FakeStore, clock, gz
 
@@ -201,7 +201,7 @@ async def test_pinned_input_corruption_fails_closed(tmp_path: Path, failure: str
         store.put(selected[-1].completion.ref.path, b"{}")
     else:
         selected = (*selected[:-1], selected[-1].model_copy(update={"conversions": ()}))
-    with pytest.raises((ValueError, ArchiveConflict)):
+    with pytest.raises((ValueError, ArchiveConflict, ObjectChanged)):
         await resolve_parquet_vectors(plan, selected, store, parquet, tmp_path / "resolved")
     assert not (tmp_path / "resolved").exists()
     assert_no_staging(tmp_path)
