@@ -145,6 +145,7 @@ async def test_managed_manual_diff_retries_only_anchored_completions(
         yield
 
     monkeypatch.setattr(deployments, "one_s2_user", lease)
+    monkeypatch.setattr(admission, "execution", lease)
     monkeypatch.setattr(
         deployments, "BatchSettings", lambda: BatchSettings.model_construct(sync=config)
     )

@@ -32,8 +32,8 @@ class _Refused(AdmissionError):
     """The API answered that it applied nothing: a missing limit or a closed gate."""
 
 
-class _RolledBack(_Refused):
-    """A database error the API rolled back; Prefect's own clients retry these."""
+class _RolledBack(AdmissionError):
+    """A retryable database error: safe to retry a read, but a mutation may have committed."""
 
 
 class AdmissionStatus(BaseModel):
@@ -77,7 +77,8 @@ def _check_response(response: httpx.Response) -> None:
     )
 
 
-# Only Prefect's handler for retryable database errors answers 503 with this body.
+# Prefect's handler for retryable database errors answers 503 with this body. It covers
+# lost connections too, so it does not prove a rollback.
 _ROLLED_BACK = {"exception_message": "Service Unavailable"}
 
 
@@ -141,9 +142,7 @@ async def execution() -> AsyncGenerator[None]:
                     if current.limit == 0:
                         raise AdmissionError("Admission closed")
                     sent = True
-                    response = await _retrying(
-                        lambda: client.increment_concurrency_slots([NAME], 1, "concurrency")
-                    )
+                    response = await client.increment_concurrency_slots([NAME], 1, "concurrency")
                     incremented = True
                     if response.json() != [
                         {"id": str(current.id), "name": NAME, "limit": OPEN_LIMIT}
@@ -193,12 +192,10 @@ async def _release(client: PrefectClient, identity: UUID, owner: str) -> None:
                     raise AdmissionError("Admission identity changed")
                 # Occupancy averaging divides by capacity in Prefect 3.8.8.
                 # Omit that optional statistic so release also works closed.
-                response = await _retrying(
-                    lambda: client.request(
-                        "POST",
-                        "/v2/concurrency_limits/decrement",
-                        json={"names": [NAME], "slots": 1},
-                    )
+                response = await client.request(
+                    "POST",
+                    "/v2/concurrency_limits/decrement",
+                    json={"names": [NAME], "slots": 1},
                 )
                 # Closing can race this request after the pre-read.
                 if response.json() not in (
