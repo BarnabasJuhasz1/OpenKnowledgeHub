@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 from collections.abc import Callable, Coroutine, Mapping
 from contextlib import aclosing
 from pathlib import Path
 from typing import Any, Literal, TextIO
+from uuid import UUID
 
 import click
 from pydantic import BaseModel, ValidationError
@@ -208,8 +210,12 @@ def _require_managed_server(required_limits: tuple[str, ...]) -> None:
 def _run_managed(run: Callable[[], Coroutine[Any, Any, BaseModel]]) -> None:
     from prefect.concurrency.asyncio import ConcurrencySlotAcquisitionError
 
+    from openknowledge_pipelines.admission import AdmissionError
+
     try:
-        _run(run)
+        _run(run, admission_required=False)
+    except AdmissionError as exc:
+        raise click.ClickException(str(exc)) from None
     except ConcurrencySlotAcquisitionError as exc:
         raise click.ClickException(
             "Cannot acquire the required shared Prefect limits. Check the shared control VM "
@@ -312,7 +318,7 @@ def verify_base_manifest(dataset: str, release: str, bucket: str, prefix: str) -
             await progress.baseline_manifest(reference, dataset, bucket, prefix)
             return reference
 
-    _run(run)
+    _run(run, admission_required=False)
 
 
 @s2.command("build-citation-edges", help="Rebuild both ClickHouse citation edge tables.")
@@ -381,7 +387,18 @@ def download_shard(
         async with bootstrap.open_service(settings) as service:
             return await service.archive_shard_at(command)
 
-    _run(run)
+    _run(run, admission_required=not _batch_worker(command.shard))
+
+
+def _batch_worker(shard: int) -> bool:
+    try:
+        operation = os.environ["OKP_BATCH_OPERATION_ID"]
+        index = int(os.environ["BATCH_TASK_INDEX"])
+        count = int(os.environ["BATCH_TASK_COUNT"])
+        selected = int(os.environ["OKP_SHARD"])
+        return UUID(operation).hex == operation and 0 <= index < count and selected == shard
+    except (KeyError, ValueError):
+        return False
 
 
 @s2.command(help=LOAD_HELP, short_help=LOAD_HELP)
@@ -425,7 +442,7 @@ def load(
             return await bootstrap.load_flows(service, settings).dataset(command)
 
     if measurement_report is None:
-        _run(run)
+        _run_load(run)
     else:
         from openknowledge_pipelines.flows.measure_load import measured_load
 
@@ -450,7 +467,7 @@ def load(
                 "choose a new writable file"
             ) from None
         try:
-            _run(lambda: measured(report_file))
+            _run_load(lambda: measured(report_file))
         finally:
             try:
                 report_file.close()
@@ -484,7 +501,56 @@ def load_diff(from_release: str, release: str, dataset: str, bucket: str, prefix
         async with bootstrap.open_load_service(settings) as service:
             return await bootstrap.load_flows(service, settings).diff(command)
 
-    _run(run)
+    _run_load(run)
+
+
+@main.group("admission")
+def admission_cli() -> None:
+    """Deployment admission; opening requires the deployment owner's verified recovery."""
+
+
+def _admission_action(action: Literal["status", "close", "open"], slots: int = 0) -> None:
+    from openknowledge_pipelines import admission
+
+    try:
+        current = admission.release(slots) if slots else admission.status(action)
+        click.echo(current.model_dump_json())
+    except admission.AdmissionError as exc:
+        raise click.ClickException(str(exc)) from None
+    except Exception:
+        raise click.ClickException(
+            "Admission unavailable or invalid; state may be uncertain; "
+            "inspect status before retrying"
+        ) from None
+
+
+@admission_cli.command("status")
+def admission_status() -> None:
+    _admission_action("status")
+
+
+@admission_cli.command("close")
+def admission_close() -> None:
+    _admission_action("close")
+
+
+@admission_cli.command("open")
+def admission_open() -> None:
+    _admission_action("open")
+
+
+@admission_cli.command(
+    "release",
+    help="Free all held slots while closed, once their runs and external work are gone.",
+)
+@click.option(
+    "--slots",
+    type=click.IntRange(min=1),
+    required=True,
+    help="The slots status reports as held.",
+)
+def admission_release(slots: int) -> None:
+    _admission_action("status", slots)
 
 
 @main.group()
@@ -591,9 +657,34 @@ def _setting_problem(error: Any) -> str:  # noqa: ANN401 - pydantic's ErrorDetai
     return SETTING_RULES.get(name, f"{name}: {str(error['msg']).removeprefix('Value error, ')}")
 
 
-def _run(run: Callable[[], Coroutine[Any, Any, BaseModel]]) -> None:
+def _run_load(run: Callable[[], Coroutine[Any, Any, BaseModel]]) -> None:
+    from openknowledge_pipelines import admission, deployments
+
+    _require_managed_server((deployments.LOAD_LIMIT,))
+
+    async def guarded() -> BaseModel:
+        async with deployments.one_clickhouse_loader(wait=False), admission.execution():
+            return await run()
+
+    _run_managed(guarded)
+
+
+def _run(
+    run: Callable[[], Coroutine[Any, Any, BaseModel]], *, admission_required: bool = True
+) -> None:
+    async def guarded() -> BaseModel:
+        if not admission_required:
+            return await run()
+        from openknowledge_pipelines import admission
+
+        try:
+            async with admission.execution():
+                return await run()
+        except admission.AdmissionError as exc:
+            raise click.ClickException(str(exc)) from None
+
     try:
-        result = asyncio.run(run())
+        result = asyncio.run(guarded())
     except IngestionError as exc:
         message = str(exc)
     else:
