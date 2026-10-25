@@ -21,6 +21,7 @@
                 <query>GRANT SELECT ON system.metrics</query>
                 <query>GRANT SELECT ON system.merges</query>
                 <query>GRANT SELECT ON system.events</query>
+                <query>GRANT SELECT ON system.disks</query>
                 <query>GRANT NAMED COLLECTION ON raw</query>
                 <query>GRANT READ ON S3('^http://gcs:4443/openknowledge-508216-raw/.*$')</query>
             </grants>

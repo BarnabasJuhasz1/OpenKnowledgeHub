@@ -9,6 +9,7 @@ from typing import NamedTuple
 
 import httpx
 
+from openknowledge_adapters.clickhouse.citation_edges import ClickHouseCitationEdges
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.config import ClickHouseConfig
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
@@ -30,6 +31,7 @@ def keepalive_options() -> list[tuple[int, int, int]]:
 
 
 class ClickHouse(NamedTuple):
+    edges: ClickHouseCitationEdges
     tables: ClickHouseTables
     applied: ClickHouseAppliedReleases
     telemetry: ClickHouseLoadTelemetry
@@ -51,9 +53,12 @@ async def connect(
     )
     async with http:
         client = ClickHouseClient(http, database=config.database)
+        tables = ClickHouseTables(client, raw_bucket=config.raw_bucket)
+        applied = ClickHouseAppliedReleases(client)
         yield ClickHouse(
-            tables=ClickHouseTables(client, raw_bucket=config.raw_bucket),
-            applied=ClickHouseAppliedReleases(client),
+            edges=ClickHouseCitationEdges(client, tables, applied),
+            tables=tables,
+            applied=applied,
             telemetry=ClickHouseLoadTelemetry(client),
         )
 

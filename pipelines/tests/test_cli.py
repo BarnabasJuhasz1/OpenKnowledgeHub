@@ -193,6 +193,7 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_sync,
         deployments.s2_load,
         deployments.s2_load_diff,
+        deployments.s2_build_citation_edges,
         deployments.s2_batch_download,
         deployments.s2_batch_download_diff,
         deployments.s2_batch_download_fulltext,
@@ -201,9 +202,9 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_batch_download_embeddings_diff,
         deployments.watchdog,
     ]
-    assert [found.concurrency_limit for found in served] == [1] * 9 + [None]
+    assert [found.concurrency_limit for found in served] == [1] * 10 + [None]
     _coordinator, *unscheduled, watchdog = served
-    assert [found.schedules for found in unscheduled] == [[]] * 8
+    assert [found.schedules for found in unscheduled] == [[]] * 9
     [scheduled] = cast("list[DeploymentScheduleCreate]", watchdog.schedules)
     assert isinstance(scheduled.schedule, CronSchedule)
     # from_flow stores no timezone for a cron, and the server reads None as UTC.
@@ -394,7 +395,8 @@ def test_archive_cli_routes_explicit_commands(
 
 
 @pytest.mark.parametrize(
-    "arguments", [["archive-fulltext", "--release", "2026-10-13", *TARGET], ["sync"]]
+    "arguments",
+    [["archive-fulltext", "--release", "2026-10-13", *TARGET], ["sync"], ["build-citation-edges"]],
 )
 def test_managed_requires_effective_server_before_flow(
     monkeypatch: pytest.MonkeyPatch, arguments: list[str]
@@ -404,6 +406,7 @@ def test_managed_requires_effective_server_before_flow(
 
     monkeypatch.setattr(deployments, "s2_batch_download_fulltext", forbidden)
     monkeypatch.setattr(deployments, "s2_sync", forbidden)
+    monkeypatch.setattr(deployments, "s2_build_citation_edges", forbidden)
     with temporary_settings({PREFECT_API_URL: None}):
         code, output = okp(*arguments)
     assert code == 1

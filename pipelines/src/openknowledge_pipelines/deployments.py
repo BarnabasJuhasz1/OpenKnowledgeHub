@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from contextlib import AbstractAsyncContextManager
+from datetime import UTC, datetime
 
 from prefect import flow
 from prefect import serve as prefect_serve
@@ -26,6 +27,7 @@ from openknowledge_core.ingestion import (
     LoadDiffResult,
     WatchdogResult,
 )
+from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.coordinator import SyncResult
 from openknowledge_core.ingestion.errors import IngestionError
 from openknowledge_core.ingestion.families import ArchiveFamily, require_family
@@ -78,6 +80,13 @@ async def s2_load_diff(command: LoadDiff) -> LoadDiffResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]
     async with one_clickhouse_loader(), bootstrap.open_load_service(settings) as service:
         return await bootstrap.load_flows(service, settings).diff.fn(command)
+
+
+@flow(name="s2-build-citation-edges", persist_result=False, retries=0)
+async def s2_build_citation_edges() -> BuildCitationEdgesResult:
+    settings = LoadSettings()  # pyright: ignore[reportCallIssue]
+    async with one_clickhouse_loader(), bootstrap.open_citation_edges(settings) as edges:
+        return await edges.build(bootstrap.producer(settings), lambda: datetime.now(UTC))
 
 
 async def _download(command: DownloadDataset, family: ArchiveFamily) -> BatchDownloadResult:
@@ -206,8 +215,8 @@ def serve() -> None:
     prefect_serve(
         sync_deployment(),
         # One run of each load at a time, held in Prefect's queue, so a second run of the same load
-        # holds no serve slot. LOAD_LIMIT keeps the two deployments apart, so no two served loads
-        # hit ClickHouse at once; a load waiting on it does hold a slot.
+        # holds no serve slot. LOAD_LIMIT keeps both loads and the edge rebuild apart, so no two
+        # served runs hit ClickHouse at once; a run waiting on it does hold a slot.
         # The deployment limit gives a running load a lease that Prefect renews every 225 seconds,
         # up to three attempts per renewal, and cancels the run when all three fail. The global
         # limit's raise_on_lease_renewal_failure=False does not cover that lease.
@@ -216,6 +225,12 @@ def serve() -> None:
         ),
         RunnerDeployment.from_flow(
             s2_load_diff,
+            DEPLOYMENT,
+            entrypoint_type=EntrypointType.MODULE_PATH,
+            concurrency_limit=1,
+        ),
+        RunnerDeployment.from_flow(
+            s2_build_citation_edges,
             DEPLOYMENT,
             entrypoint_type=EntrypointType.MODULE_PATH,
             concurrency_limit=1,

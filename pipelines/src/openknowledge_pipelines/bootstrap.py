@@ -21,7 +21,7 @@ from openknowledge_core.ingestion.consumers import ArchiveConsumer
 from openknowledge_core.ingestion.coordinator import CORE_ORDER, LARGE_ORDER
 from openknowledge_core.ingestion.families import ArchiveFamily
 from openknowledge_core.ingestion.measurement import LoadObservation
-from openknowledge_core.ingestion.ports import LoadTelemetry
+from openknowledge_core.ingestion.ports import CitationEdges, LoadTelemetry
 from openknowledge_pipelines.settings import (
     BatchSettings,
     CommonSettings,
@@ -91,7 +91,9 @@ def _gcs(settings: CommonSettings) -> gcs.GcsConfig:
     )
 
 
-def _clickhouse(settings: LoadSettings, timeout_seconds: float) -> clickhouse.ClickHouseConfig:
+def _clickhouse(
+    settings: LoadSettings, timeout_seconds: float | None
+) -> clickhouse.ClickHouseConfig:
     return clickhouse.ClickHouseConfig(
         url=settings.clickhouse_url,
         user=settings.clickhouse_user,
@@ -257,3 +259,10 @@ async def open_measured_load(
             observation,
             ch.telemetry,
         )
+
+
+@asynccontextmanager
+async def open_citation_edges(settings: LoadSettings) -> AsyncGenerator[CitationEdges, None]:
+    # A full rebuild can outlast the per-object load timeout. Keep the connect timeout.
+    async with clickhouse.connect(_clickhouse(settings, None)) as ch:
+        yield ch.edges

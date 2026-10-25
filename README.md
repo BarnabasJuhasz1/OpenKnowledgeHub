@@ -133,6 +133,18 @@ Migration 00014 orders citation versions by release, then deletion, then whether
 A citations load refuses until 00014 is applied, and 00014 refuses while `citations` holds rows or checkpoints from the old order, whose merges may have dropped contexts.
 To get past it, stop citation loads, run `RENAME TABLE citations TO citations_legacy`, run the Up statement of 00007 to create an empty table with a new UUID, apply the migrations and load the base release again from all its raw objects.
 The old checkpoints no longer count and stay in place. Drop `citations_legacy` once that load passes its checks.
+Migration 00015 adds `citation_edges_out` and `citation_edges_in`, slim tables ordered for
+outgoing and incoming neighbourhood lookups. Rebuild them manually with
+`okp s2 build-citation-edges` or the unscheduled Prefect deployment
+`s2-build-citation-edges/control-vm`; both take the shared `clickhouse` limit.
+They retain duplicate citing/cited pairs, so readers use `DISTINCT`, and they are plain
+MergeTree, so a query with `FINAL` on them fails. `intents` is a mask of background (1),
+methodology (2) and result (4); a null and an empty list both give 0, and other values are dropped.
+A rebuild refuses unless `citations` holds a completed release, which it records in `applied`
+for each edge table. It needs about 12 bytes of free disk per `citations` row and refuses to swap
+in fewer than 90% of the live edges. A cancelled rebuild's insert keeps running in ClickHouse;
+the next rebuild kills it before staging again.
+
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.
 
