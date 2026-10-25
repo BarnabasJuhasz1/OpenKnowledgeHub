@@ -47,6 +47,7 @@ jobs:
           CLICKHOUSE_PORT: "18123"
           GCS_PORT: "14443"
           PREFECT_PORT: "14200"
+          OPENSEARCH_PORT: "19200"
         run: docker compose -f tests/e2e/compose.yaml pull --policy always
       - run: uv run pytest -q
 
@@ -79,6 +80,10 @@ jobs:
             extra: batch
             module: openknowledge_adapters.batch
             tests: packages/adapters/tests/batch
+          - package: openknowledge-adapters
+            extra: opensearch
+            module: openknowledge_adapters.opensearch
+            tests: packages/adapters/tests/opensearch
           - package: openknowledge-pipelines
             tests: pipelines/tests
     steps:

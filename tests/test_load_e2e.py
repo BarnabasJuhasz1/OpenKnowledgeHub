@@ -65,7 +65,10 @@ def _free_port() -> str:
 
 @pytest.fixture(scope="module")
 def ports() -> Iterator[dict[str, str]]:
-    ports = {name: _free_port() for name in ("CLICKHOUSE_PORT", "GCS_PORT", "PREFECT_PORT")}
+    ports = {
+        name: _free_port()
+        for name in ("CLICKHOUSE_PORT", "GCS_PORT", "PREFECT_PORT", "OPENSEARCH_PORT")
+    }
     env = {**os.environ, **ports}
     project = f"okp-e2e-{uuid4().hex}"
     print(f"E2E Compose project: {project}", flush=True)
@@ -194,18 +197,27 @@ def archive(ports: dict[str, str], release: str, lines: list[str], dataset: str 
 
 
 def archive_diff(
-    ports: dict[str, str], from_release: str, release: str, updates: list[str], deletes: list[str]
+    ports: dict[str, str],
+    from_release: str,
+    release: str,
+    updates: list[str],
+    deletes: list[str],
+    dataset: str = TLDRS,
 ) -> None:
     """Archive one update file and one delete file with the given records."""
     source = FakeSource()
     source.releases = [release]
     source.add_diff(
-        TLDRS, from_release, release, {"part-0.gz": packed(updates)}, {"part-0.gz": packed(deletes)}
+        dataset,
+        from_release,
+        release,
+        {"part-0.gz": packed(updates)},
+        {"part-0.gz": packed(deletes)},
     )
 
     async def work(service: DownloadDatasetService) -> None:
         command = DownloadDiff(
-            from_release=from_release, release=release, dataset=TLDRS, bucket=BUCKET
+            from_release=from_release, release=release, dataset=dataset, bucket=BUCKET
         )
         pinned = await service.pin_diff(command)
         await archive_part(service, pinned.updates)
