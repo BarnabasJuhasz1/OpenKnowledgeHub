@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_contracts.embeddings import (
@@ -16,10 +16,66 @@ from openknowledge_contracts.embeddings import (
     Evidence,
     ResolvedVectors,
 )
+from openknowledge_core.ingestion.archive_progress import (
+    ArchiveCompletion,
+    ArchiveReader,
+    HashedRef,
+)
+from openknowledge_core.ingestion.ports import ArtifactStore
 
 
 class ResolutionModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+
+class ConversionSelection(ResolutionModel):
+    """One explicit archive release and all nonempty converted parts.
+
+    ``conversions`` pins conversion complete.json documents, each pointing to its
+    ConversionManifest. Empty parts may be evidenced solely by the inventory or
+    additionally by an explicit empty-part ConversionManifest.
+    """
+
+    completion: HashedRef
+    conversions: tuple[HashedRef, ...]
+
+    @property
+    def identity(self) -> str:
+        return (
+            "sha256:"
+            + hashlib.sha256(
+                json.dumps(
+                    self.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
+                ).encode()
+            ).hexdigest()
+        )
+
+
+def conversion_completeness_evidence(
+    selections: tuple[ConversionSelection, ...],
+    scope: Literal["corpus", "bounded-sample"] = "bounded-sample",
+) -> str:
+    """Bind completion to every selected inventory in the declared scope."""
+    digest = hashlib.sha256(
+        json.dumps([s.identity for s in selections], separators=(",", ":")).encode()
+    ).hexdigest()
+    return f"{scope}-inventories:sha256:{digest}"
+
+
+class ResolveEmbeddings(ResolutionModel):
+    """Select an entire explicit completed archive chain; no operator-computed hashes."""
+
+    model_revision: str = Field(min_length=1, max_length=256)
+    space_evidence: Evidence
+    scope: Literal["corpus", "bounded-sample"]
+    selections: tuple[ConversionSelection, ...] = Field(min_length=1)
+
+    @field_validator("model_revision")
+    @classmethod
+    def evidenced_revision(cls, value: str) -> str:
+        if value.strip().lower() in ("", "unknown", "unverified"):
+            raise ValueError("resolution requires an evidenced model revision")
+        return value
 
 
 class ResolutionRelease(ResolutionModel):
@@ -139,3 +195,48 @@ def resolution_identity(
         space_evidence=space_evidence,
         scope=scope,
     ).identity
+
+
+async def build_resolution_plan(request: ResolveEmbeddings, store: ArtifactStore) -> ResolutionPlan:
+    """Derive sequence and snapshot identity from pinned, hash-verified completions.
+
+    The bridge subsequently validates all inventories, receipts and Parquet content.
+    Corpus scope means the full explicitly selected chain, not every paper worldwide.
+    """
+    reader = ArchiveReader(store)
+    releases: list[ResolutionRelease] = []
+    predecessor: HashedRef | None = None
+    for sequence, selection in enumerate(request.selections):
+        completion = await reader.read(selection.completion, ArchiveCompletion)
+        if (
+            completion.dataset != "embeddings-specter_v2"
+            or completion.predecessor != predecessor
+            or completion.kind != ("base" if predecessor is None else "diff")
+        ):
+            raise ValueError(
+                "selected completions must form one contiguous embedding archive chain"
+            )
+        releases.append(
+            ResolutionRelease(
+                release=completion.release,
+                from_release=completion.from_release,
+                sequence=sequence,
+                identity=selection.identity,
+            )
+        )
+        predecessor = selection.completion
+    source = EmbeddingSnapshot(
+        snapshot="sha256:" + "0" * 64,
+        release=releases[-1].release,
+        model_revision=request.model_revision,
+    )
+    lineage = tuple(releases)
+    evidence = conversion_completeness_evidence(request.selections, request.scope)
+    identity = resolution_identity(source, lineage, evidence, request.space_evidence, request.scope)
+    return ResolutionPlan(
+        source=EmbeddingSnapshot.model_validate({**source.model_dump(), "snapshot": identity}),
+        releases=lineage,
+        completeness_evidence=evidence,
+        space_evidence=request.space_evidence,
+        scope=request.scope,
+    )

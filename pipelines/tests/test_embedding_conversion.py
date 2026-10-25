@@ -22,6 +22,7 @@ from openknowledge_core.ingestion.errors import ArchiveConflict, BatchRejected, 
 from openknowledge_core.ingestion.models import JobOutcome
 from openknowledge_core.ingestion.service import DownloadDatasetService
 from openknowledge_pipelines.flows import embedding_conversion
+from openknowledge_pipelines.flows.s2_download import retry_transient
 from openknowledge_pipelines.settings import ConversionBatchSettings
 from tests.fakes.ports import PRODUCER, FakeSource, FakeStore, clock, gz
 from tests.test_embedding_conversion import rows
@@ -84,7 +85,7 @@ async def test_flow_submits_one_task_per_missing_shard_and_requires_receipts(
     def direct_task(**kwargs: Any) -> Callable[[Callable[..., Any]], Callable[..., Any]]:  # noqa: ANN401
         def unwrap(fn: Callable[..., Any]) -> Callable[..., Any]:
             configured = Task(fn, **kwargs)
-            assert configured.retry_condition_fn is embedding_conversion.retry_transient
+            assert configured.retry_condition_fn is retry_transient
             return configured.fn
 
         return unwrap
@@ -167,7 +168,7 @@ async def test_task_retry_policy_classifies_batch_errors(permanent: bool) -> Non
     from openknowledge_core.ingestion.errors import BatchUnavailable
 
     error = BatchRejected("denied") if permanent else BatchUnavailable("HTTP 503")
-    assert await embedding_conversion.retry_transient(
+    assert await retry_transient(
         Task(lambda: None),
         TaskRun.model_construct(),
         Failed(data=error),

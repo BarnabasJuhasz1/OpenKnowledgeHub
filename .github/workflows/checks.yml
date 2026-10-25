@@ -84,6 +84,10 @@ jobs:
             extra: opensearch
             module: openknowledge_adapters.opensearch
             tests: packages/adapters/tests/opensearch
+          - package: openknowledge-adapters
+            extra: resolved
+            module: openknowledge_adapters.resolved.store
+            tests: packages/adapters/tests/test_resolved_vectors.py
           - package: openknowledge-pipelines
             tests: pipelines/tests
     steps:

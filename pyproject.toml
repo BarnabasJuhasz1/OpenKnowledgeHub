@@ -120,6 +120,7 @@ forbidden_modules = [
     "openknowledge_adapters.clickhouse",
     "openknowledge_adapters.batch",
     "openknowledge_adapters.opensearch",
+    "openknowledge_adapters.resolved",
 ]
 
 [[tool.importlinter.contracts]]
@@ -133,6 +134,7 @@ forbidden_modules = [
     "openknowledge_adapters.clickhouse",
     "openknowledge_adapters.batch",
     "openknowledge_adapters.opensearch",
+    "openknowledge_adapters.resolved",
 ]
 
 [[tool.importlinter.contracts]]
@@ -147,6 +149,7 @@ forbidden_modules = [
     "openknowledge_adapters.semantic_scholar",
     "openknowledge_adapters.batch",
     "openknowledge_adapters.opensearch",
+    "openknowledge_adapters.resolved",
 ]
 
 [[tool.importlinter.contracts]]
@@ -160,6 +163,7 @@ forbidden_modules = [
     "openknowledge_adapters.semantic_scholar",
     "openknowledge_adapters.clickhouse",
     "openknowledge_adapters.opensearch",
+    "openknowledge_adapters.resolved",
 ]
 
 [[tool.importlinter.contracts]]
@@ -174,6 +178,7 @@ forbidden_modules = [
     "openknowledge_adapters.semantic_scholar",
     "openknowledge_adapters.clickhouse",
     "openknowledge_adapters.batch",
+    "openknowledge_adapters.resolved",
 ]
 
 [[tool.importlinter.contracts]]
@@ -196,4 +201,17 @@ forbidden_modules = [
     "openknowledge_adapters.gcs", "openknowledge_adapters.semantic_scholar",
     "openknowledge_adapters.clickhouse", "openknowledge_adapters.batch",
     "openknowledge_adapters.opensearch",
+    "openknowledge_adapters.resolved",
+]
+
+
+[[tool.importlinter.contracts]]
+name = "The resolved adapter imports only its own extra"
+type = "forbidden"
+source_modules = ["openknowledge_adapters.resolved"]
+forbidden_modules = [
+    "httpx", "google", "gcloud", "aiohttp", "opensearchpy",
+    "openknowledge_adapters.gcs", "openknowledge_adapters.semantic_scholar",
+    "openknowledge_adapters.clickhouse", "openknowledge_adapters.batch",
+    "openknowledge_adapters.opensearch", "openknowledge_adapters.parquet",
 ]

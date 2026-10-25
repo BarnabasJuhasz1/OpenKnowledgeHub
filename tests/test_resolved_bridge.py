@@ -11,15 +11,8 @@ from pathlib import Path
 from typing import Literal
 
 import pytest
-from openknowledge_adapters.parquet import StoredParquetArtifacts
-from openknowledge_contracts.embedding_artifacts import (
-    ConversionManifest,
-    ConvertedShard,
-    EmbeddingArtifactRow,
-)
-from openknowledge_core.embedding_conversion.models import ConvertEmbeddings
-from openknowledge_core.embedding_conversion.service import EmbeddingConversionService
 
+from openknowledge_adapters.parquet import StoredParquetArtifacts
 from openknowledge_adapters.resolved.parquet import (
     ConversionSelection,
     conversion_completeness_evidence,
@@ -29,11 +22,20 @@ from openknowledge_adapters.resolved.store import (
     iter_resolved_vectors,
     reuse_resolved_artifact,
 )
+from openknowledge_contracts.embedding_artifacts import (
+    ConversionManifest,
+    ConvertedShard,
+    EmbeddingArtifactRow,
+)
 from openknowledge_contracts.embeddings import EmbeddingSnapshot
 from openknowledge_contracts.manifests import ObjectPath
+from openknowledge_core.embedding_conversion.models import ConvertEmbeddings
+from openknowledge_core.embedding_conversion.service import EmbeddingConversionService
 from openknowledge_core.embeddings.resolution import (
     ResolutionPlan,
     ResolutionRelease,
+    ResolveEmbeddings,
+    build_resolution_plan,
     resolution_identity,
 )
 from openknowledge_core.ingestion.archive_progress import (
@@ -43,7 +45,7 @@ from openknowledge_core.ingestion.archive_progress import (
     HashedRef,
 )
 from openknowledge_core.ingestion.commands import DownloadDiff
-from openknowledge_core.ingestion.errors import ArchiveConflict
+from openknowledge_core.ingestion.errors import ArchiveConflict, ObjectChanged
 from openknowledge_core.ingestion.service import DownloadDatasetService
 from tests.fakes.ports import PRODUCER, FakeSource, FakeStore, clock, gz
 
@@ -201,7 +203,7 @@ async def test_pinned_input_corruption_fails_closed(tmp_path: Path, failure: str
         store.put(selected[-1].completion.ref.path, b"{}")
     else:
         selected = (*selected[:-1], selected[-1].model_copy(update={"conversions": ()}))
-    with pytest.raises((ValueError, ArchiveConflict)):
+    with pytest.raises((ValueError, ArchiveConflict, ObjectChanged)):
         await resolve_parquet_vectors(plan, selected, store, parquet, tmp_path / "resolved")
     assert not (tmp_path / "resolved").exists()
     assert_no_staging(tmp_path)
@@ -258,3 +260,22 @@ async def test_completion_at_wrong_path_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ArchiveConflict, match="archive completion identity mismatch"):
         await resolve_parquet_vectors(rebound, selected, store, parquet, tmp_path / "resolved")
     assert not (tmp_path / "resolved").exists()
+
+
+@pytest.mark.parametrize("scope", ["corpus", "bounded-sample"])
+async def test_request_derives_plan_from_verified_completions(
+    tmp_path: Path, scope: Literal["corpus", "bounded-sample"]
+) -> None:
+    store, expected, selected, _ = await fixture_archive(tmp_path, scope=scope)
+    request = ResolveEmbeddings(
+        model_revision=expected.source.model_revision,
+        space_evidence=expected.space_evidence,
+        scope=scope,
+        selections=selected,
+    )
+    assert await build_resolution_plan(request, store) == expected
+    reversed_request = ResolveEmbeddings.model_validate(
+        {**request.model_dump(), "selections": tuple(reversed(selected))}
+    )
+    with pytest.raises(ValueError, match="contiguous embedding archive chain"):
+        await build_resolution_plan(reversed_request, store)

@@ -3,17 +3,31 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator, Callable
-from contextlib import AbstractAsyncContextManager, asynccontextmanager
+from contextlib import AbstractAsyncContextManager, aclosing, asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from openknowledge_adapters import batch, clickhouse, gcs, opensearch, parquet, semantic_scholar
+from openknowledge_adapters.resolved.parquet import resolve_parquet_vectors
+from openknowledge_adapters.resolved.store import (
+    read_regular_document,
+    read_resolved_artifact,
+    stream_resolved_vectors,
+)
 from openknowledge_contracts.embedding_artifacts import ParquetReceipt
+from openknowledge_contracts.embeddings import EmbeddingLookupResult, LookupEmbeddings
 from openknowledge_contracts.manifests import TRANSFORM_VERSION, Producer
 from openknowledge_core.embedding_conversion.ports import ConversionJobs
 from openknowledge_core.embedding_conversion.service import EmbeddingConversionService
+from openknowledge_core.embeddings.models import EmbeddingPublication
+from openknowledge_core.embeddings.resolution import (
+    ResolvedArtifact,
+    ResolveEmbeddings,
+    build_resolution_plan,
+)
+from openknowledge_core.embeddings.service import publish_embeddings
 from openknowledge_core.ingestion import (
     DownloadDatasetService,
     LoadDatasetService,
@@ -327,3 +341,43 @@ async def open_conversion_batch(
 
 def convert_local_embeddings(source: Path, receipt: Path, destination: Path) -> ParquetReceipt:
     return parquet.convert(source, receipt, destination)
+
+
+async def resolve_embedding_archives(
+    settings: CommonSettings, request: ResolveEmbeddings, destination: Path
+) -> ResolvedArtifact:
+    """Read verified archive/conversion receipts and write a finalized local artifact."""
+    async with gcs.connect(_gcs(settings)) as store:
+        plan = await build_resolution_plan(request, store)
+        return await resolve_parquet_vectors(
+            plan, request.selections, store, parquet.StoredParquetArtifacts(store), destination
+        )
+
+
+def embedding_artifact(directory: Path) -> ResolvedArtifact:
+    """Read finalized receipt-backed metadata without scanning local Parquet parts."""
+    artifact = read_resolved_artifact(directory)
+    if artifact.input_verification != "receipt-backed":
+        raise ValueError("embedding artifact must be finalized from receipt-backed inputs")
+    return artifact
+
+
+async def load_embedding_artifact(
+    settings: LoadSettings, directory: Path, artifact: ResolvedArtifact
+) -> EmbeddingPublication:
+    """Own the verified source lifetime for exactly one immutable publication attempt."""
+    async with clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch:
+        async with aclosing(stream_resolved_vectors(directory, artifact)) as rows:
+            return await publish_embeddings(ch.embeddings, artifact.resolved, rows)
+
+
+async def lookup_embeddings(
+    settings: LoadSettings, command: LookupEmbeddings
+) -> EmbeddingLookupResult:
+    async with clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch:
+        return await ch.embeddings.lookup(command)
+
+
+def embedding_resolution_request(path: Path) -> ResolveEmbeddings:
+    """Read bounded regular JSON metadata before constructing any clients."""
+    return ResolveEmbeddings.model_validate_json(read_regular_document(path))
