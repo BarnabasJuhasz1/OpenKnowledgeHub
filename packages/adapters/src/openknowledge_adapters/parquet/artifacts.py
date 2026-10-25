@@ -14,7 +14,7 @@ from pydantic import ValidationError
 from openknowledge_adapters.parquet.local import convert, digest, parquet_schema
 from openknowledge_contracts.embedding_artifacts import ConvertedShard, EmbeddingArtifactRow
 from openknowledge_contracts.manifests import ObjectRef
-from openknowledge_core.embedding_conversion.models import ConversionPlan
+from openknowledge_core.embedding_conversion.models import ConversionPlan, ConversionSource
 from openknowledge_core.embedding_conversion.service import artifact_path
 from openknowledge_core.ingestion.archive_progress import ArchiveReader
 from openknowledge_core.ingestion.errors import ArchiveConflict
@@ -92,8 +92,9 @@ class StoredParquetArtifacts:
             except (pa.ArrowException, ValidationError):
                 raise ArchiveConflict("invalid raw embeddings Parquet") from None
 
-    async def convert(self, plan: ConversionPlan, shard: int) -> ConvertedShard:
-        source = plan.shards[shard]
+    async def convert(
+        self, plan: ConversionPlan, shard: int, source: ConversionSource
+    ) -> ConvertedShard:
         path = artifact_path(plan, f"{shard}.json")
         prior = await self.store.stat(path)
         if prior is not None:
