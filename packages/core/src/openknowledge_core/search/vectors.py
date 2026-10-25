@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import AsyncIterable
 
 from openknowledge_contracts.embeddings import EmbeddingMutation
+from openknowledge_core.embeddings.serialization import vector_record_bytes as vector_record_bytes
 from openknowledge_core.search.errors import SearchRejected
 from openknowledge_core.search.ports import VectorStore
 from openknowledge_core.search.ranking import reciprocal_rank_fusion
@@ -15,13 +15,6 @@ from openknowledge_core.search.vector_models import (
     VectorNeighbors,
     VectorPublication,
 )
-
-
-def vector_record_bytes(record: EmbeddingMutation) -> bytes:
-    """Canonical v1 JSONL: validated Float32 values, sorted keys, no optional whitespace."""
-    return (
-        json.dumps(record.model_dump(mode="json"), sort_keys=True, separators=(",", ":")) + "\n"
-    ).encode("utf-8")
 
 
 class VectorPublicationService:
