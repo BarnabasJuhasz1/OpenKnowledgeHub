@@ -2,7 +2,7 @@
 
 import math
 import struct
-from typing import Annotated, Literal
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, FiniteFloat, field_validator, model_validator
 
@@ -77,4 +77,39 @@ class EmbeddingLookupResult(BaseModel):
             raise ValueError("lookup results require at most 3000 unique, disjoint IDs")
         if any(row.source != self.source or row.is_deleted for row in self.found):
             raise ValueError("found embeddings must be live and match all snapshot metadata")
+        return self
+
+
+Digest = Annotated[str, Field(pattern=r"^sha256:[0-9a-f]{64}$")]
+Evidence = Annotated[str, Field(min_length=1, max_length=4096, pattern=r"\S")]
+Count = Annotated[int, Field(strict=True, ge=0, le=2**64 - 1)]
+
+
+class ResolvedVectors(BaseModel):
+    """Expected canonical content, approved by the upstream resolver, not raw base shards.
+
+    Digest is SHA256 over vector_record_bytes in strictly increasing corpusid order,
+    including tombstones. Evidence references must be reviewed by the caller; this
+    model does not itself verify an external manifest or establish encoder compatibility.
+    """
+
+    model_config = ConfigDict(frozen=True, extra="forbid", hide_input_in_errors=True)
+
+    source: EmbeddingSnapshot
+    records: Count
+    live_records: Count
+    sha256: Digest
+    resolution_evidence: Evidence
+    completeness_evidence: Evidence
+    space_evidence: Evidence
+    format: Literal["resolved-vectors-v1"] = "resolved-vectors-v1"
+
+    @model_validator(mode="after")
+    def _consistent(self) -> Self:
+        if len(self.source.model_revision) > 256:
+            raise ValueError("model revision must be a bounded reference")
+        if self.live_records > self.records:
+            raise ValueError("live count exceeds total count")
+        if self.source.model_revision.strip().lower() in ("", "unknown", "unverified"):
+            raise ValueError("publication requires an evidenced model revision")
         return self
