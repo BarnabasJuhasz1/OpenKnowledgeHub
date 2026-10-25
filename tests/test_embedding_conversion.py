@@ -281,3 +281,78 @@ async def test_empty_completed_diff_part_publishes_empty_manifest(
     result = await service.complete(empty)
     manifest_ref = await service.reader.read(result, HashedRef)
     assert (await service.reader.read(manifest_ref, ConversionManifest)).entries == ()
+
+
+async def test_thousand_shard_plan_fits_and_worker_reads_only_selected_receipt() -> None:
+    """Real archive metadata and conversion, using small synthetic shards and no source network."""
+    from openknowledge_core.embedding_conversion.service import PLAN_LIMIT
+
+    store = FakeStore()
+    source = FakeSource()
+    command = ConvertEmbeddings(release="2026-10-13", bucket="raw")
+    payload = gz(rows(7))
+    for index in range(1000):
+        source.add(command.dataset, f"part-{index:04}.gz", payload)
+    downloads = DownloadDatasetService(
+        catalog=source,
+        downloads=source,
+        store=store,
+        producer=PRODUCER,
+        clock=clock,
+    )
+    base = await downloads.pin_dataset(command)
+    for shard in base.shards:
+        await downloads.archive_shard(base, shard)
+    await ArchiveProgress(store, downloads, PRODUCER, clock).finalize(command)
+    service = EmbeddingConversionService(store, StoredParquetArtifacts(store))
+    store.reads.clear()
+    plan = await service.prepare(command)
+    assert len([path for path in store.reads if path.endswith(".receipt.json")]) == 1000
+    assert len(plan.to_json()) < 1024 * 1024 <= PLAN_LIMIT
+    reference = await service.publish_plan(plan)
+    persisted = await service.reader.read(reference, ConversionPlan)
+    assert persisted == plan
+    assert all(set(value) == {"ref", "sha256"} for value in plan.model_dump()["shards"])
+
+    store.reads.clear()
+    selected = 777
+    result = await service.convert_shard(persisted, selected)
+    assert result.source_receipt == plan.shards[selected].ref
+    assert [path for path in store.reads if path.endswith(".receipt.json")] == [
+        str(plan.shards[selected].ref.path),
+    ]
+    assert len(store.reads) <= 12  # bounded archive documents + selected receipt/raw/output
+    wrong_position = plan.model_copy(update={"shards": tuple(reversed(plan.shards))})
+    with pytest.raises(ArchiveConflict, match="position"):
+        await service.convert_shard(wrong_position, selected)
+    with pytest.raises(ArchiveConflict, match="shard count"):
+        await service.convert_shard(plan.model_copy(update={"shards": plan.shards[:-1]}), selected)
+    import hashlib
+
+    from openknowledge_contracts.manifests import ObjectRef, ShardReceipt
+
+    receipt_path = plan.shards[selected].ref.path
+    receipt = ShardReceipt.from_json(store.data(receipt_path))
+    changed = receipt.model_copy(update={"records": receipt.records + 1}).to_json()
+    generation = store.put(receipt_path, changed)
+    references = list(plan.shards)
+    references[selected] = HashedRef(
+        ref=ObjectRef(path=receipt_path, generation=generation),
+        sha256=hashlib.sha256(changed).hexdigest(),
+    )
+    with pytest.raises(ArchiveConflict, match="disagrees with completed manifest"):
+        await service.convert_shard(plan.model_copy(update={"shards": tuple(references)}), selected)
+    with pytest.raises((ArchiveConflict, ObjectChanged)):
+        await service.convert_shard(persisted, selected)
+
+
+async def test_oversized_plan_is_refused_before_upload(monkeypatch: pytest.MonkeyPatch) -> None:
+    from openknowledge_core.embedding_conversion import service as conversion_service
+
+    service, plan, store = await memory_plan()
+    monkeypatch.setattr(conversion_service, "PLAN_LIMIT", len(plan.to_json()) - 1)
+    oversized = plan
+    before = set(store.objects)
+    with pytest.raises(ArchiveConflict, match="plan exceeds"):
+        await service.publish_plan(oversized)
+    assert set(store.objects) == before

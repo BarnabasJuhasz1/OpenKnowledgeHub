@@ -779,6 +779,9 @@ def convert_embeddings(
         batch_rows=batch_rows,
         max_record_bytes=max_record_bytes,
     )
+    from openknowledge_pipelines import admission
+
+    _require_managed_server(())
     settings = _settings(ConversionBatchSettings)
 
     async def run() -> BaseModel:
@@ -790,9 +793,10 @@ def convert_embeddings(
                 jobs,
                 task_retries=settings.task_retries,
                 retry_delay_seconds=settings.task_retry_delay_seconds,
+                execution=admission.execution,
             )(command)
 
-    _run(run)
+    _run_managed(run)
 
 
 @embeddings.command("convert-shard")
@@ -811,12 +815,9 @@ def convert_embedding_shard(plan: str, shard: int) -> None:
     async def run() -> BaseModel:
         async with bootstrap.open_embedding_conversion(settings) as service:
             pinned = await service.reader.read(reference, ConversionPlan)
-            # Revalidate archive lineage instead of trusting an arbitrary plan document.
-            if await service.prepare(pinned.command) != pinned:
-                raise IngestionError("conversion plan no longer matches completed archive")
             return await service.convert_shard(pinned, shard)
 
-    _run(run)
+    _run(run, admission_required=not _batch_worker(shard))
 
 
 @embeddings.command("convert-local")

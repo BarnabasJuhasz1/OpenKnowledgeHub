@@ -37,9 +37,10 @@ class ConversionSource(ArchiveDocument):
 
 
 class ConversionPlan(ArchiveDocument):
+    format_version: Literal[2] = 2
     command: ConvertEmbeddings
     source: EmbeddingInput
-    shards: tuple[ConversionSource, ...]
+    shards: tuple[HashedRef, ...]
 
 
 class ConversionJob(ShardJob):

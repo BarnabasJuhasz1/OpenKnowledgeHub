@@ -94,6 +94,8 @@ The Prefect deployment `s2-sync/control-vm` (or `okp s2 sync` on the shared serv
 seven core datasets in ClickHouse, then archives full text and SPECTER2 in GCS.
 It selects per-dataset releases and resumes contiguous diffs from verified progress.
 Core failures, including a missing base, block both archives; initial bases require manual setup.
+When citations holds a release the citation edge tables were not built from, the sync rebuilds
+them before the archives; a failed rebuild blocks the archives like a core failure.
 Core diffs above 30% of the configured full-base size are not loaded. This reference stays fixed
 as diffs advance; refresh `core_baselines` after installing a replacement base.
 
@@ -135,16 +137,18 @@ A citations load refuses until 00014 is applied, and 00014 refuses while `citati
 To get past it, stop citation loads, run `RENAME TABLE citations TO citations_legacy`, run the Up statement of 00007 to create an empty table with a new UUID, apply the migrations and load the base release again from all its raw objects.
 The old checkpoints no longer count and stay in place. Drop `citations_legacy` once that load passes its checks.
 Migration 00015 adds `citation_edges_out` and `citation_edges_in`, slim tables ordered for
-outgoing and incoming neighbourhood lookups. Rebuild them manually with
-`okp s2 build-citation-edges` or the unscheduled Prefect deployment
-`s2-build-citation-edges/control-vm`; both take the shared `clickhouse` limit.
+outgoing and incoming neighbourhood lookups. The sync rebuilds them after citations takes a new
+release; rebuild them manually with `okp s2 build-citation-edges` or the unscheduled Prefect
+deployment `s2-build-citation-edges/control-vm`. All three take the shared `clickhouse` limit.
 They retain duplicate citing/cited pairs, so readers use `DISTINCT`, and they are plain
 MergeTree, so a query with `FINAL` on them fails. `intents` is a mask of background (1),
 methodology (2) and result (4); a null and an empty list both give 0, and other values are dropped.
 A rebuild refuses unless `citations` holds a completed release, which it records in `applied`
 for each edge table. It needs about 12 bytes of free disk per `citations` row and refuses to swap
-in fewer than 90% of the live edges. A cancelled rebuild's insert keeps running in ClickHouse;
-the next rebuild kills it before staging again.
+in fewer than 90% of the live edges. An edge-count refusal leaves the live tables unchanged;
+each sync repeats the rebuild until an operator resolves the refusal. A cancelled rebuild's
+insert keeps running in ClickHouse; the next rebuild stops it and removes stale staging tables
+before checking disk capacity.
 
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.
