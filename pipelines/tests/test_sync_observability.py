@@ -1,17 +1,30 @@
 import asyncio
 import logging
+import signal
 from unittest.mock import AsyncMock
 
 import pytest
 from prefect import flow
 from prefect.artifacts import MarkdownArtifact
+from prefect.exceptions import TerminationSignal
 
 from openknowledge_pipelines.flows import sync_observability as diagnostics
 
 
-@pytest.mark.parametrize("failure", [None, RuntimeError("secret"), asyncio.CancelledError()])
+@pytest.mark.parametrize(
+    ("failure", "expected_status"),
+    [
+        (None, "completed"),
+        (RuntimeError("secret"), "failed"),
+        (asyncio.CancelledError(), "cancelled"),
+        (TerminationSignal(signal.SIGTERM), "interrupted"),
+    ],
+)
 async def test_stage_heartbeat_is_sparse_and_stops_on_every_exit(
-    failure: BaseException | None, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    failure: BaseException | None,
+    expected_status: str,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     beat = asyncio.Event()
     resume = asyncio.Event()
@@ -46,13 +59,7 @@ async def test_stage_heartbeat_is_sparse_and_stops_on_every_exit(
     messages = [record.getMessage() for record in caplog.records]
     assert len(messages) == 3  # start, one heartbeat, end
     assert "elapsed time only; progress unverified" in messages[1]
-    assert observation.stages[0].status == (
-        "cancelled"
-        if isinstance(failure, asyncio.CancelledError)
-        else "failed"
-        if failure is not None
-        else "completed"
-    )
+    assert observation.stages[0].status == expected_status
     resume.set()
     assert not any(
         "SyncObservation.stage.<locals>.heartbeat" in getattr(task.get_coro(), "__qualname__", "")

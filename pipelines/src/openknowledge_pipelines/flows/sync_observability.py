@@ -11,7 +11,7 @@ from typing import Literal
 from prefect import get_run_logger
 from prefect.artifacts import MarkdownArtifact
 from prefect.context import FlowRunContext
-from prefect.exceptions import MissingContextError
+from prefect.exceptions import MissingContextError, TerminationSignal
 from pydantic import BaseModel, Field
 
 from openknowledge_contracts.manifests import Producer
@@ -19,7 +19,17 @@ from openknowledge_core.ingestion.coordinator import SyncResult
 
 HEARTBEAT_SECONDS = 300
 ARTIFACT_TIMEOUT_SECONDS = 10
-Status = Literal["completed", "failed", "cancelled"]
+Status = Literal["completed", "failed", "cancelled", "interrupted"]
+
+
+def _status(error: BaseException | None) -> Status:
+    if isinstance(error, asyncio.CancelledError):
+        return "cancelled"
+    if isinstance(error, TerminationSignal):
+        # SIGTERM can mean cancellation, rescheduling or an external crash. Prefect
+        # owns the final orchestration state; the public exception does not say which.
+        return "interrupted"
+    return "failed" if error is not None else "completed"
 
 
 def logger() -> Logger | LoggerAdapter[Logger]:
@@ -60,11 +70,8 @@ class SyncObservation(BaseModel):
         status: Status = "completed"
         try:
             yield
-        except asyncio.CancelledError:
-            status = "cancelled"
-            raise
-        except BaseException:
-            status = "failed"
+        except BaseException as exc:
+            status = _status(exc)
             raise
         finally:
             task.cancel()
@@ -89,17 +96,12 @@ class SyncObservation(BaseModel):
         if context is None or context.flow_run is None:
             return
         finished = datetime.now(UTC)
-        status = (
-            "cancelled"
-            if isinstance(error, asyncio.CancelledError)
-            else "failed"
-            if error is not None
-            else "completed"
-        )
+        status = _status(error)
         lines = [
             "# S2 sync results",
             "",
             f"- Status: {status}",
+            "- Status describes observed execution; Prefect owns the final orchestration state.",
             f"- Run: {context.flow_run.id}",
             f"- Deployment: {context.flow_run.deployment_id or 'local'}",
             f"- Started (UTC): {self.started_at.isoformat()}",
@@ -119,7 +121,14 @@ class SyncObservation(BaseModel):
         for item in self.result.datasets:
             outcome = item.outcome
             if outcome == "failed" and item.reason is None:
-                stage = next((s for s in self.stages if s.name == f"sync {item.dataset}"), None)
+                stage = next(
+                    (
+                        s
+                        for s in reversed(self.stages)
+                        if s.name in (f"sync {item.dataset}", f"archive {item.dataset}")
+                    ),
+                    None,
+                )
                 outcome = "unstarted" if stage is None else stage.status
             lines.append(
                 f"| {item.dataset} | {item.start or '—'} | {item.target or '—'} | "

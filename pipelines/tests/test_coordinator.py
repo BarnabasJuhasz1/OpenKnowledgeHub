@@ -2,16 +2,19 @@
 
 import asyncio
 import logging
+import signal
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import pytest
 from prefect import flow
 from prefect.client.schemas.objects import ConcurrencyLimitStrategy
 from prefect.client.schemas.schedules import CronSchedule
+from prefect.exceptions import TerminationSignal
 
 from openknowledge_contracts.datasets import ReleaseMetadata
 from openknowledge_contracts.manifests import ObjectPath
@@ -28,7 +31,7 @@ from openknowledge_core.ingestion import (
     LoadDiff,
     LoadDiffResult,
 )
-from openknowledge_core.ingestion.archive_progress import ArchiveProgress
+from openknowledge_core.ingestion.archive_progress import ArchiveProgress, HashedRef
 from openknowledge_core.ingestion.citation_edges import (
     EDGE_TABLES,
     BuildCitationEdgesResult,
@@ -42,6 +45,7 @@ from openknowledge_core.ingestion.coordinator import (
     SyncIncomplete,
 )
 from openknowledge_core.ingestion.errors import (
+    BatchTimedOut,
     CredentialRejected,
     IngestionError,
     SharedCapacityError,
@@ -817,3 +821,67 @@ async def test_sync_artifact_is_persisted_on_its_real_run_with_partial_outcomes(
         assert "| citation_edges_out | 1 |" in markdown
         assert "| citation_edges_in | 1 |" in markdown
     assert FlowRunContext.get() is None
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_status"),
+    [
+        (asyncio.CancelledError(), "cancelled"),
+        (BatchTimedOut("external work may remain"), "failed"),
+        (SharedCapacityError("foreign job"), "failed"),
+        (TerminationSignal(signal.SIGTERM), "interrupted"),
+    ],
+)
+async def test_interrupted_archive_artifact_keeps_real_partial_progress(
+    managed_cycle: Cycle,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+    expected_status: str,
+) -> None:
+    from prefect.client.orchestration import get_client
+    from prefect.client.schemas.filters import (
+        ArtifactFilter,
+        ArtifactFilterFlowRunId,
+        ArtifactFilterKey,
+    )
+    from prefect.context import FlowRunContext
+
+    managed_cycle.command = managed_cycle.command.model_copy(
+        update={"enabled_archives": frozenset({"s2orc_v2"})}
+    )
+    original = managed_cycle.progress.finalize
+
+    async def finalize(
+        command: DownloadDataset | DownloadDiff, predecessor: HashedRef | None = None
+    ) -> HashedRef:
+        if command.dataset == "s2orc_v2" and command.release == TARGET:
+            raise failure
+        return await original(command, predecessor)
+
+    monkeypatch.setattr(managed_cycle.progress, "finalize", finalize)
+
+    @flow(persist_result=False)
+    async def parent() -> UUID:
+        # Exercise the production body and real artifacts while leaving the signal
+        # uncaught by a second Prefect engine, which would own a separate final state.
+        context = FlowRunContext.get()
+        assert context is not None and context.flow_run is not None
+        with pytest.raises(type(failure)) as raised:
+            await deployments.s2_sync.fn()
+        assert raised.value is failure
+        return context.flow_run.id
+
+    run_id = await parent()
+    async with get_client() as client:
+        [artifact] = await client.read_artifacts(
+            artifact_filter=ArtifactFilter(
+                flow_run_id=ArtifactFilterFlowRunId(any_=[run_id]),
+                key=ArtifactFilterKey(any_=["s2-sync-results"]),
+            )
+        )
+    markdown = str(artifact.data)
+    assert f"Status: {expected_status}" in markdown
+    assert f"| s2orc_v2 | {RELEASE} | {TARGET} | {NEXT} | {expected_status} | 1 | 0 |" in markdown
+    assert "| archive s2orc_v2 |" in markdown
+    assert "| unstarted |" not in markdown
+    assert "Prefect owns the final orchestration state" in markdown
