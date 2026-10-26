@@ -1,6 +1,8 @@
 """Freshness and rebuild recovery through the HTTP client, without sockets."""
 
 import json
+from collections.abc import AsyncGenerator
+from contextlib import asynccontextmanager
 from datetime import timedelta
 from uuid import UUID
 
@@ -68,6 +70,18 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
     failed = False
     retry = False
     next_uuid = 20
+    stages: list[tuple[str, str]] = []
+
+    @asynccontextmanager
+    async def stage(name: str) -> AsyncGenerator[None]:
+        stages.append((name, "started"))
+        try:
+            yield
+        except BaseException:
+            stages.append((name, "failed"))
+            raise
+        else:
+            stages.append((name, "completed"))
 
     def respond(request: httpx.Request) -> httpx.Response:
         nonlocal failed, next_uuid
@@ -128,7 +142,10 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
     ) as http:
         client = ClickHouseClient(http, database="test")
         edges = ClickHouseCitationEdges(
-            client, ClickHouseTables(client, raw_bucket="raw"), ClickHouseAppliedReleases(client)
+            client,
+            ClickHouseTables(client, raw_bucket="raw"),
+            ClickHouseAppliedReleases(client),
+            stage,
         )
         with pytest.raises(TableRejected if failure == "disk" else TableUnavailable):
             await edges.build(PRODUCER, clock)
@@ -139,9 +156,22 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             assert live[EDGE_TABLES[0]] != initial[EDGE_TABLES[0]]
             assert live[EDGE_TABLES[1]] == initial[EDGE_TABLES[1]]
             assert staging[f"{EDGE_TABLES[0]}_new"] == initial[EDGE_TABLES[0]]
+        assert stages[-1] == (
+            "citation edges: preflight and recovery"
+            if failure == "disk"
+            else f"citation edges: publish {EDGE_TABLES[0]}",
+            "failed",
+        )
+        stages.clear()
         retry = True
         result = await edges.build(PRODUCER, clock)
         assert result.source_release == NEXT
+        assert [name for name, state in stages if state == "completed"] == [
+            "citation edges: preflight and recovery",
+            *(f"citation edges: build {name}" for name in EDGE_TABLES),
+            "citation edges: validate counts",
+            *(f"citation edges: publish {name}" for name in EDGE_TABLES),
+        ]
         assert staging == {}
         for name, marker in zip(EDGE_TABLES, markers[-2:], strict=True):
             recorded = json.loads(marker)

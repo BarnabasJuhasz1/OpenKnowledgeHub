@@ -219,6 +219,8 @@ async def open_sync(
     settings: SyncSettings,
     s2_lease: Callable[[], AbstractAsyncContextManager[None]],
     load_lease: Callable[[], AbstractAsyncContextManager[None]],
+    *,
+    edge_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
 ) -> AsyncGenerator[SyncServices, None]:
     from openknowledge_core.ingestion.families import archive_family
     from openknowledge_pipelines.flows.s2_sync import SyncServices
@@ -227,7 +229,7 @@ async def open_sync(
         open_batch_download(settings) as (service, jobs),
         gcs.connect(_gcs(settings)) as store,
         clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
-        open_citation_edges(settings) as edges,
+        open_citation_edges(settings, stage=edge_stage) as edges,
     ):
         progress = ArchiveProgress(store, service, producer(settings), lambda: datetime.now(UTC))
         loader = LoadDatasetService(
@@ -285,7 +287,16 @@ async def open_measured_load(
 
 
 @asynccontextmanager
-async def open_citation_edges(settings: LoadSettings) -> AsyncGenerator[CitationEdges, None]:
+async def open_citation_edges(
+    settings: LoadSettings,
+    *,
+    stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
+) -> AsyncGenerator[CitationEdges, None]:
+    from openknowledge_pipelines.flows.sync_observability import SyncObservation
+
+    observer = SyncObservation()
     # A full rebuild can outlast the per-object load timeout. Keep the connect timeout.
-    async with clickhouse.connect(_clickhouse(settings, None)) as ch:
+    async with clickhouse.connect(
+        _clickhouse(settings, None), edge_stage=stage or observer.stage
+    ) as ch:
         yield ch.edges

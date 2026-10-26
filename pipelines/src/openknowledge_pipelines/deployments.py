@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime
@@ -34,6 +35,7 @@ from openknowledge_core.ingestion.errors import IngestionError
 from openknowledge_core.ingestion.families import ArchiveFamily, require_family
 from openknowledge_pipelines import admission, bootstrap
 from openknowledge_pipelines.flows.s2_sync import run_sync
+from openknowledge_pipelines.flows.sync_observability import SyncObservation
 from openknowledge_pipelines.settings import (
     BatchSettings,
     LoadSettings,
@@ -198,8 +200,14 @@ async def s2_sync() -> SyncResult:
         async with one_s2_user(), admission.execution():
             yield
 
-    async with bootstrap.open_sync(settings, admitted_source, one_clickhouse_loader) as services:
-        return await run_sync(settings.sync, services)
+    observation = SyncObservation(producer=bootstrap.producer(settings))
+    try:
+        async with bootstrap.open_sync(
+            settings, admitted_source, one_clickhouse_loader, edge_stage=observation.stage
+        ) as services:
+            return await run_sync(settings.sync, services, observation=observation)
+    finally:
+        await observation.publish(sys.exception())
 
 
 def sync_deployment() -> RunnerDeployment:
