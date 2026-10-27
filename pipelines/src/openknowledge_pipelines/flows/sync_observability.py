@@ -19,15 +19,13 @@ from openknowledge_core.ingestion.coordinator import SyncResult
 
 HEARTBEAT_SECONDS = 300
 ARTIFACT_TIMEOUT_SECONDS = 10
-Status = Literal["completed", "failed", "cancelled", "interrupted"]
+Status = Literal["completed", "failed", "interrupted"]
 
 
 def _status(error: BaseException | None) -> Status:
-    if isinstance(error, asyncio.CancelledError):
-        return "cancelled"
-    if isinstance(error, TerminationSignal):
-        # SIGTERM can mean cancellation, rescheduling or an external crash. Prefect
-        # owns the final orchestration state; the public exception does not say which.
+    if isinstance(error, (asyncio.CancelledError, TerminationSignal)):
+        # In async flows Prefect delivers SIGTERM to user code as a cancellation, so the
+        # two cannot be told apart here. Prefect owns the final orchestration state.
         return "interrupted"
     return "failed" if error is not None else "completed"
 

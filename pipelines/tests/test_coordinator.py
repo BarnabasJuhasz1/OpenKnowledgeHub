@@ -826,7 +826,7 @@ async def test_sync_artifact_is_persisted_on_its_real_run_with_partial_outcomes(
 @pytest.mark.parametrize(
     ("failure", "expected_status"),
     [
-        (asyncio.CancelledError(), "cancelled"),
+        (asyncio.CancelledError(), "interrupted"),
         (BatchTimedOut("external work may remain"), "failed"),
         (SharedCapacityError("foreign job"), "failed"),
         (TerminationSignal(signal.SIGTERM), "interrupted"),

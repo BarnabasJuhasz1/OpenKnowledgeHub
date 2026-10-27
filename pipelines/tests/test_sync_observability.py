@@ -16,7 +16,7 @@ from openknowledge_pipelines.flows import sync_observability as diagnostics
     [
         (None, "completed"),
         (RuntimeError("secret"), "failed"),
-        (asyncio.CancelledError(), "cancelled"),
+        (asyncio.CancelledError(), "interrupted"),
         (TerminationSignal(signal.SIGTERM), "interrupted"),
     ],
 )

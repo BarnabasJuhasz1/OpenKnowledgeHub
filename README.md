@@ -106,8 +106,9 @@ standalone `okp s2 build-citation-edges` runs. No additional ClickHouse grants a
 
 Each executed sync run publishes an `s2-sync-results` Markdown artifact in Prefect's run
 Artifacts tab, with dataset releases/outcomes, edge counts, stage durations and image/version
-metadata. SIGTERM is reported as `interrupted`; Prefect owns whether the final run is cancelled,
-rescheduled or crashed. Failed or gracefully interrupted runs retain observed partial results;
+metadata. Cancellation and SIGTERM are both reported as `interrupted`, since async flows receive
+SIGTERM as a cancellation; Prefect owns whether the final run is cancelled, rescheduled or crashed.
+Failed or gracefully interrupted runs retain observed partial results;
 abrupt process termination cannot guarantee a final artifact. A failed or timed-out artifact upload warns without
 changing the sync outcome. Artifacts exclude settings, source records and exception messages.
 
