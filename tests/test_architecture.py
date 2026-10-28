@@ -23,11 +23,12 @@ ALLOWED_PROJECTS = {"packages/contracts", "packages/core", "packages/adapters", 
 ALLOWED_FEATURES = {
     "ingestion": FEATURE_FILES,
     "search": FEATURE_FILES,
+    "embedding_conversion": FEATURE_FILES,
     # Pure shared wire encoding has no service or I/O ports.
     "embeddings": {"serialization.py"},
 }
-ALLOWED_ADAPTERS = {"semantic_scholar", "gcs", "clickhouse", "batch", "opensearch"}
-ALLOWED_EXTRAS = {"semantic-scholar", "gcs", "clickhouse", "batch", "opensearch"}
+ALLOWED_ADAPTERS = {"semantic_scholar", "gcs", "clickhouse", "batch", "opensearch", "parquet"}
+ALLOWED_EXTRAS = {"semantic-scholar", "gcs", "clickhouse", "batch", "opensearch", "parquet"}
 
 
 def source(package: str) -> Path:
@@ -146,6 +147,7 @@ def providers(name: str, modules: dict[str, set[str]]) -> set[str]:
         ("openknowledge_adapters", "clickhouse", "clickhouse"),
         ("openknowledge_adapters", "batch", "batch"),
         ("openknowledge_adapters", "opensearch", "opensearch"),
+        ("openknowledge_adapters", "parquet", "parquet"),
         ("openknowledge_pipelines", None, None),
     ],
 )

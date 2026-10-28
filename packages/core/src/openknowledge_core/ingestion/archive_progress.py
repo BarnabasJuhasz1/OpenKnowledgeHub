@@ -163,7 +163,7 @@ class ArchiveReader:
             raise ArchiveConflict("base inventory identity mismatch")
         return (seed.model_copy(update={"shards": base.shards}),)
 
-    async def _validate(
+    async def validate(
         self,
         command: DownloadDataset | DownloadDiff,
         reference: HashedRef,
@@ -189,7 +189,7 @@ class ArchiveReader:
     ) -> tuple[HashedRef, HashedRef, DatasetManifest]:
         reference = await self.reference(completion_path(command))
         record = await self.read(reference, ArchiveCompletion)
-        await self._validate(command, reference, record)
+        await self.validate(command, reference, record)
         manifest_ref = record.manifests[0]
         return reference, manifest_ref, await self.read(manifest_ref, DatasetManifest)
 
@@ -296,7 +296,7 @@ class ArchiveProgress(ArchiveReader):
         root = await self.read(anchor, ArchiveCompletion)
         if root.kind != "base":
             raise ArchiveConflict("configured anchor is not a base")
-        await self._validate(base, anchor, root)
+        await self.validate(base, anchor, root)
         prefix = ObjectPath.under(
             base.bucket, base.prefix, "archive-progress", base.dataset, "diffs"
         )
@@ -317,7 +317,7 @@ class ArchiveProgress(ArchiveReader):
                 continue
             if record.from_release < base.release:
                 raise ArchiveConflict("archive transition crosses the selected base boundary")
-            await self._validate(command, reference, record)
+            await self.validate(command, reference, record)
             if record.from_release in records:
                 raise ArchiveConflict("conflicting archive progress branches")
             records[record.from_release] = (reference, record)

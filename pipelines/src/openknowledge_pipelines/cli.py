@@ -732,3 +732,101 @@ def read_base(
         asyncio.run(run())
     except IngestionError as exc:
         raise click.ClickException(str(exc)) from None
+
+
+@main.group()
+def embeddings() -> None:
+    """Convert archived raw embeddings to receipt-verified Parquet."""
+
+
+@embeddings.command("convert")
+@click.option("--release", required=True)
+@click.option("--bucket", required=True)
+@click.option("--prefix", default="semantic-scholar", show_default=True)
+@click.option("--from-release")
+@click.option("--part", type=click.Choice(["updates", "deletes"]))
+@click.option("--completion", help="Pinned HashedRef JSON; required for a diff part.")
+@click.option("--batch-rows", type=click.IntRange(1, 1024), default=128)
+@click.option("--max-record-bytes", type=click.IntRange(1, 8388608), default=1048576)
+def convert_embeddings(
+    release: str,
+    bucket: str,
+    prefix: str,
+    from_release: str | None,
+    part: str | None,
+    completion: str | None,
+    batch_rows: int,
+    max_record_bytes: int,
+) -> None:
+    from openknowledge_core.embedding_conversion.models import ConvertEmbeddings
+    from openknowledge_core.ingestion.archive_progress import HashedRef
+    from openknowledge_pipelines.settings import ConversionBatchSettings
+
+    try:
+        pinned = None if completion is None else HashedRef.from_json(completion.encode())
+    except ValueError:
+        raise click.UsageError("--completion must be a HashedRef JSON document") from None
+    command = _command(
+        ConvertEmbeddings,
+        OPTION_RULES,
+        release=release,
+        bucket=bucket,
+        prefix=prefix,
+        from_release=from_release,
+        part=part,
+        completion=pinned,
+        batch_rows=batch_rows,
+        max_record_bytes=max_record_bytes,
+    )
+    from openknowledge_pipelines import admission
+
+    _require_managed_server(())
+    settings = _settings(ConversionBatchSettings)
+
+    async def run() -> BaseModel:
+        from openknowledge_pipelines.flows.embedding_conversion import conversion_flow
+
+        async with bootstrap.open_conversion_batch(settings) as (service, jobs):
+            return await conversion_flow(
+                service,
+                jobs,
+                task_retries=settings.task_retries,
+                retry_delay_seconds=settings.task_retry_delay_seconds,
+                execution=admission.execution,
+            )(command)
+
+    _run_managed(run)
+
+
+@embeddings.command("convert-shard")
+@click.option("--plan", required=True, help="Generation and SHA256 pinned conversion plan JSON.")
+@click.option("--shard", type=click.IntRange(min=0), envvar="OKP_SHARD", required=True)
+def convert_embedding_shard(plan: str, shard: int) -> None:
+    from openknowledge_core.embedding_conversion.models import ConversionPlan
+    from openknowledge_core.ingestion.archive_progress import HashedRef
+
+    try:
+        reference = HashedRef.from_json(plan.encode())
+    except ValueError:
+        raise click.UsageError("--plan must be a HashedRef JSON document") from None
+    settings = _settings(CommonSettings)
+
+    async def run() -> BaseModel:
+        async with bootstrap.open_embedding_conversion(settings) as service:
+            pinned = await service.reader.read(reference, ConversionPlan)
+            return await service.convert_shard(pinned, shard)
+
+    _run(run, admission_required=not _batch_worker(shard))
+
+
+@embeddings.command("convert-local")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("receipt", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.argument("destination", type=click.Path(path_type=Path))
+def convert_embeddings_local(source: Path, receipt: Path, destination: Path) -> None:
+    """Convert one local base shard. This does not certify completed archive lineage."""
+    try:
+        result = bootstrap.convert_local_embeddings(source, receipt, destination)
+    except (ValueError, OSError, IngestionError) as exc:
+        raise click.ClickException(str(exc)) from None
+    click.echo(result.model_dump_json())

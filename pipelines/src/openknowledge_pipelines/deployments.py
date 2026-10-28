@@ -18,6 +18,7 @@ from prefect.deployments.runner import RunnerDeployment
 from prefect.exceptions import ObjectNotFound
 from prefect.types.entrypoint import EntrypointType
 
+from openknowledge_core.embedding_conversion.models import ConvertEmbeddings
 from openknowledge_core.ingestion import (
     BatchDiffDownloadResult,
     BatchDownloadResult,
@@ -29,6 +30,7 @@ from openknowledge_core.ingestion import (
     LoadDiffResult,
     WatchdogResult,
 )
+from openknowledge_core.ingestion.archive_progress import HashedRef
 from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.coordinator import SyncResult
 from openknowledge_core.ingestion.errors import IngestionError
@@ -38,6 +40,7 @@ from openknowledge_pipelines.flows.s2_sync import run_sync
 from openknowledge_pipelines.flows.sync_observability import SyncObservation
 from openknowledge_pipelines.settings import (
     BatchSettings,
+    ConversionBatchSettings,
     LoadSettings,
     ScheduleSettings,
     SyncSettings,
@@ -249,11 +252,32 @@ def ensure_limits() -> None:
                 )
 
 
+@flow(name="embedding-conversion", persist_result=False)
+async def embedding_conversion(command: ConvertEmbeddings) -> HashedRef:
+    from openknowledge_pipelines.flows.embedding_conversion import conversion_flow
+
+    settings = ConversionBatchSettings()  # pyright: ignore[reportCallIssue]
+    async with bootstrap.open_conversion_batch(settings) as (service, jobs):
+        return await conversion_flow(
+            service,
+            jobs,
+            task_retries=settings.task_retries,
+            retry_delay_seconds=settings.task_retry_delay_seconds,
+            execution=admission.execution,
+        ).fn(command)
+
+
 def serve() -> None:
     admission.ensure_closed()
     ensure_limits()
     prefect_serve(
         sync_deployment(),
+        RunnerDeployment.from_flow(
+            embedding_conversion,
+            DEPLOYMENT,
+            entrypoint_type=EntrypointType.MODULE_PATH,
+            concurrency_limit=1,
+        ),
         # One run of each load at a time, held in Prefect's queue, so a second run of the same load
         # holds no serve slot. LOAD_LIMIT keeps both loads and the edge rebuild apart, so no two
         # served runs hit ClickHouse at once. Standalone runs refuse busy capacity; sync waits.
