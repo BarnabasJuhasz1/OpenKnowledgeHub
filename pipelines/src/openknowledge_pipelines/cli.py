@@ -14,6 +14,7 @@ from uuid import UUID
 import click
 from pydantic import BaseModel, ValidationError
 
+from openknowledge_core.embeddings.resolution import ResolvedArtifact
 from openknowledge_core.ingestion import (
     DownloadDataset,
     DownloadDiff,
@@ -736,7 +737,7 @@ def read_base(
 
 @main.group()
 def embeddings() -> None:
-    """Convert archived raw embeddings to receipt-verified Parquet."""
+    """Convert, resolve, publish and look up pinned embeddings."""
 
 
 @embeddings.command("convert")
@@ -830,3 +831,84 @@ def convert_embeddings_local(source: Path, receipt: Path, destination: Path) -> 
     except (ValueError, OSError, IngestionError) as exc:
         raise click.ClickException(str(exc)) from None
     click.echo(result.model_dump_json())
+
+
+@embeddings.command("resolve")
+@click.option(
+    "--request",
+    "request_file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+)
+@click.option("--destination", required=True, type=click.Path(file_okay=False, path_type=Path))
+def resolve_embeddings(request_file: Path, destination: Path) -> None:
+    """Resolve a pinned completed conversion chain into a new local Parquet artifact."""
+    try:
+        request = bootstrap.embedding_resolution_request(request_file)
+    except (OSError, ValueError):
+        raise click.UsageError(
+            "--request must be a regular nonsymlink JSON file (at most 16 MiB) with evidenced "
+            "model_revision, space_evidence, scope and pinned selections"
+        ) from None
+    if destination.exists():
+        raise click.UsageError("--destination must be a new directory")
+    settings = _settings(CommonSettings)
+
+    async def run() -> BaseModel:
+        try:
+            return await bootstrap.resolve_embedding_archives(settings, request, destination)
+        except (OSError, ValueError) as exc:
+            raise click.ClickException(f"Embedding resolution failed: {exc}") from None
+
+    _run(run)
+
+
+def _embedding_artifact(directory: Path) -> ResolvedArtifact:
+    try:
+        return bootstrap.embedding_artifact(directory)
+    except (OSError, ValueError):
+        raise click.UsageError(
+            "--artifact requires a regular nonsymlink receipt-backed manifest.json (at most 16 MiB)"
+        ) from None
+
+
+@embeddings.command("load")
+@click.option(
+    "--artifact", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path)
+)
+def load_embeddings(artifact: Path) -> None:
+    """Publish a finalized resolved artifact under its explicit immutable snapshot."""
+    manifest = _embedding_artifact(artifact)
+    settings = _settings(LoadSettings)
+
+    async def run() -> BaseModel:
+        try:
+            return await bootstrap.load_embedding_artifact(settings, artifact, manifest)
+        except (OSError, ValueError) as exc:
+            raise click.ClickException(f"Embedding artifact verification failed: {exc}") from None
+
+    _run_load(run)
+
+
+@embeddings.command("lookup")
+@click.option(
+    "--artifact", required=True, type=click.Path(exists=True, file_okay=False, path_type=Path)
+)
+@click.option("--id", "corpusids", required=True, multiple=True, type=click.IntRange(0, 2**64 - 1))
+def lookup_embeddings(artifact: Path, corpusids: tuple[int, ...]) -> None:
+    """Read published embeddings using only the artifact's pinned source metadata."""
+    from openknowledge_contracts.embeddings import LookupEmbeddings
+
+    manifest = _embedding_artifact(artifact)
+    command = _command(
+        LookupEmbeddings,
+        {"corpusids": "--id allows at most 3000 UInt64 IDs"},
+        source=manifest.resolved.source,
+        corpusids=corpusids,
+    )
+    settings = _settings(LoadSettings)
+
+    async def run() -> BaseModel:
+        return await bootstrap.lookup_embeddings(settings, command)
+
+    _run(run, admission_required=False)

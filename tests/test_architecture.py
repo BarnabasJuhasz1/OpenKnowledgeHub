@@ -24,11 +24,33 @@ ALLOWED_FEATURES = {
     "ingestion": FEATURE_FILES,
     "search": FEATURE_FILES,
     "embedding_conversion": FEATURE_FILES,
-    # Pure shared wire encoding has no service or I/O ports.
-    "embeddings": {"serialization.py"},
+    "embeddings": {
+        "ports.py",
+        "resolve.py",
+        "models.py",
+        "service.py",
+        "serialization.py",
+        "resolution.py",
+    },
 }
-ALLOWED_ADAPTERS = {"semantic_scholar", "gcs", "clickhouse", "batch", "opensearch", "parquet"}
-ALLOWED_EXTRAS = {"semantic-scholar", "gcs", "clickhouse", "batch", "opensearch", "parquet"}
+ALLOWED_ADAPTERS = {
+    "semantic_scholar",
+    "gcs",
+    "clickhouse",
+    "batch",
+    "opensearch",
+    "parquet",
+    "resolved",
+}
+ALLOWED_EXTRAS = {
+    "semantic-scholar",
+    "gcs",
+    "clickhouse",
+    "batch",
+    "opensearch",
+    "parquet",
+    "resolved",
+}
 
 
 def source(package: str) -> Path:
@@ -148,6 +170,7 @@ def providers(name: str, modules: dict[str, set[str]]) -> set[str]:
         ("openknowledge_adapters", "batch", "batch"),
         ("openknowledge_adapters", "opensearch", "opensearch"),
         ("openknowledge_adapters", "parquet", "parquet"),
+        ("openknowledge_adapters", "resolved", "resolved"),
         ("openknowledge_pipelines", None, None),
     ],
 )
@@ -177,7 +200,7 @@ def test_nothing_exists_outside_the_allowed_sets() -> None:
         for path in [*ROOT.glob("*/pyproject.toml"), *ROOT.glob("packages/*/pyproject.toml")]
     }
     assert projects == ALLOWED_PROJECTS
-    assert subpackages(source("openknowledge_core")) <= set(ALLOWED_FEATURES)
+    assert subpackages(source("openknowledge_core")) <= ALLOWED_FEATURES.keys()
     assert subpackages(source("openknowledge_adapters")) <= ALLOWED_ADAPTERS
     adapters = tomllib.loads((PROJECTS["openknowledge_adapters"] / "pyproject.toml").read_text())
     assert set(adapters["project"]["optional-dependencies"]) <= ALLOWED_EXTRAS

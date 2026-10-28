@@ -14,6 +14,7 @@ semantic-scholar = ["httpx>=0.28,<1"]
 clickhouse = ["httpx>=0.28,<1", "pyarrow>=26,<27"]
 batch = ["gcloud-aio-auth>=5.4.4,<6", "aiohttp>=3.12,<4"]
 parquet = ["pyarrow>=26,<27"]
+resolved = ["pyarrow>=26,<27"]
 opensearch = ["opensearch-py[async]>=3,<4"]
 
 [dependency-groups]
