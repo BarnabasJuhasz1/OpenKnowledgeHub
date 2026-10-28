@@ -43,6 +43,7 @@ from openknowledge_core.ingestion.ports import (
 )
 from openknowledge_pipelines.flows.s2_batch_download import S2BatchDownloadFlows, recover_jobs
 from openknowledge_pipelines.flows.s2_load import S2LoadFlows
+from openknowledge_pipelines.flows.sync_observability import SyncObservation
 
 
 @dataclass(frozen=True)
@@ -69,16 +70,21 @@ async def _source_operation(
     yield
 
 
-async def run_sync(command: SyncCommand, services: SyncServices) -> SyncResult:
+async def run_sync(
+    command: SyncCommand, services: SyncServices, *, observation: SyncObservation | None = None
+) -> SyncResult:
+    observation = observation or SyncObservation()
     # Keep manual source work out even while this sync is loading ClickHouse.
     async with services.s2_lease():
-        return await _run_sync(command, services)
+        return await _run_sync(command, services, observation)
 
 
-async def _run_sync(command: SyncCommand, services: SyncServices) -> SyncResult:
-    async with _source_operation(services):
+async def _run_sync(
+    command: SyncCommand, services: SyncServices, observation: SyncObservation
+) -> SyncResult:
+    async with observation.stage("release discovery"), _source_operation(services):
         discovery = ReleaseDiscovery(services.catalog, await services.catalog.list_releases())
-    result = SyncResult()
+    result = observation.result
     # Freeze every core target before any archive work. Ordinary failures remain per-dataset.
     for dataset in CORE_ORDER:
         item = DatasetSyncResult(dataset=dataset)
@@ -101,7 +107,8 @@ async def _run_sync(command: SyncCommand, services: SyncServices) -> SyncResult:
         if item.reason is not None or item.outcome == "current":
             continue
         try:
-            await _core(command, services, item)
+            async with observation.stage(f"sync {item.dataset}"):
+                await _core(command, services, item)
             item.outcome = "synced"
         except (SharedCapacityError, BatchTimedOut):
             raise
@@ -119,42 +126,45 @@ async def _run_sync(command: SyncCommand, services: SyncServices) -> SyncResult:
             item.outcome = "disabled"
             continue
         try:
-            baseline = command.archives.get(dataset)
-            if baseline is None:
-                raise IngestionError(
-                    "enabled archive requires an explicit verified base completion"
+            async with observation.stage(f"archive {dataset}"):
+                baseline = command.archives.get(dataset)
+                if baseline is None:
+                    raise IngestionError(
+                        "enabled archive requires an explicit verified base completion"
+                    )
+                if (baseline.base.dataset, baseline.base.bucket, baseline.base.prefix) != (
+                    dataset,
+                    command.bucket,
+                    command.prefix,
+                ):
+                    raise IngestionError(
+                        "archive baseline configuration identifies another location/dataset"
+                    )
+                item.start, predecessor = await services.progress.head(
+                    baseline.base, baseline.completion
                 )
-            if (baseline.base.dataset, baseline.base.bucket, baseline.base.prefix) != (
-                dataset,
-                command.bucket,
-                command.prefix,
-            ):
-                raise IngestionError(
-                    "archive baseline configuration identifies another location/dataset"
-                )
-            item.start, predecessor = await services.progress.head(
-                baseline.base, baseline.completion
-            )
-            item.final = item.start
-            async with _source_operation(services, archive_family(dataset)):
-                item.target = await discovery.target(dataset, item.start)
-            if item.target == item.start:
-                item.outcome = "current"
-                continue
-            for old, new in await _transitions(services, dataset, item.start, item.target):
-                download = DownloadDiff(
-                    bucket=command.bucket,
-                    prefix=command.prefix,
-                    dataset=dataset,
-                    from_release=old,
-                    release=new,
-                )
+                item.final = item.start
                 async with _source_operation(services, archive_family(dataset)):
-                    await services.downloads[dataset].diff.fn(download)
-                    predecessor = await services.progress.finalize(download, predecessor)
-                item.archived.append(SyncTransition(start=old, release=new, objects=(predecessor,)))
-                item.final = new
-            item.outcome = "synced"
+                    item.target = await discovery.target(dataset, item.start)
+                if item.target == item.start:
+                    item.outcome = "current"
+                    continue
+                for old, new in await _transitions(services, dataset, item.start, item.target):
+                    download = DownloadDiff(
+                        bucket=command.bucket,
+                        prefix=command.prefix,
+                        dataset=dataset,
+                        from_release=old,
+                        release=new,
+                    )
+                    async with _source_operation(services, archive_family(dataset)):
+                        await services.downloads[dataset].diff.fn(download)
+                        predecessor = await services.progress.finalize(download, predecessor)
+                    item.archived.append(
+                        SyncTransition(start=old, release=new, objects=(predecessor,))
+                    )
+                    item.final = new
+                item.outcome = "synced"
         except (SharedCapacityError, BatchTimedOut):
             raise
         except IngestionError as exc:

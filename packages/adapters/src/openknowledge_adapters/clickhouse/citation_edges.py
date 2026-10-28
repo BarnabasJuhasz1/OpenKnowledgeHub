@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager, nullcontext
 from datetime import datetime
 from time import monotonic
 from uuid import UUID
@@ -39,16 +40,22 @@ MIN_KEPT = 0.9
 """A rebuild with fewer edges than this share of the live table is refused."""
 
 
+def _no_stage(name: str) -> AbstractAsyncContextManager[None]:
+    return nullcontext()
+
+
 class ClickHouseCitationEdges:
     def __init__(
         self,
         client: ClickHouseClient,
         tables: ClickHouseTables,
         applied: ClickHouseAppliedReleases,
+        stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
     ) -> None:
         self._client = client
         self._tables = tables
         self._applied = applied
+        self._stage: Callable[[str], AbstractAsyncContextManager[None]] = stage or _no_stage
 
     async def is_current(self, release: ReleaseId) -> bool:
         rows = await self._client.rows(
@@ -75,51 +82,57 @@ class ClickHouseCitationEdges:
             raise TableRejected(
                 "citations holds no completed release; finish its load before building edges"
             )
-        # A cancelled run's insert keeps running on the server. Replacing its query ID stops it,
-        # unlike KILL QUERY, without a grant.
-        await self._client.post("SELECT 1 SETTINGS replace_running_query = 1", query_id=QUERY_ID)
-        # Reclaim abandoned copies, including an old live table after a partial swap.
-        # Stop the old insert first; never drop the published names.
-        for table in TABLES:
-            await self._client.post(f"DROP TABLE IF EXISTS {table}_new SYNC")
-        live = await self._preflight()
+        async with self._stage("citation edges: preflight and recovery"):
+            # A cancelled run's insert keeps running on the server. Replacing its query ID stops it,
+            # unlike KILL QUERY, without a grant.
+            await self._client.post(
+                "SELECT 1 SETTINGS replace_running_query = 1", query_id=QUERY_ID
+            )
+            # Reclaim abandoned copies, including an old live table after a partial swap.
+            # Stop the old insert first; never drop the published names.
+            for table in TABLES:
+                await self._client.post(f"DROP TABLE IF EXISTS {table}_new SYNC")
+            live = await self._preflight()
         results: dict[str, CitationEdgeTableResult] = {}
         for table in TABLES:
             started = monotonic()
-            await self._client.post(f"CREATE TABLE {table}_new AS {table}")
-            rows = await self._client.written(
-                f"INSERT INTO {table}_new (citing, cited, isinfluential, intents) "
-                f"{SOURCES[table]} {SETTINGS}",
-                query_id=QUERY_ID,
-            )
-            results[table] = CitationEdgeTableResult(rows=rows, seconds=monotonic() - started)
-        built = results[OUT].rows
-        if results[IN].rows != built:
-            raise TableRejected("citation edge counts differ; no edge tables were swapped")
-        if built < live * MIN_KEPT:
-            raise TableRejected(
-                f"the rebuild holds {built} edges where {OUT} has {live}; no edge tables were "
-                "swapped. If the drop is expected, truncate both edge tables and rerun"
-            )
+            async with self._stage(f"citation edges: build {table}"):
+                await self._client.post(f"CREATE TABLE {table}_new AS {table}")
+                rows = await self._client.written(
+                    f"INSERT INTO {table}_new (citing, cited, isinfluential, intents) "
+                    f"{SOURCES[table]} {SETTINGS}",
+                    query_id=QUERY_ID,
+                )
+                results[table] = CitationEdgeTableResult(rows=rows, seconds=monotonic() - started)
+        async with self._stage("citation edges: validate counts"):
+            built = results[OUT].rows
+            if results[IN].rows != built:
+                raise TableRejected("citation edge counts differ; no edge tables were swapped")
+            if built < live * MIN_KEPT:
+                raise TableRejected(
+                    f"the rebuild holds {built} edges where {OUT} has {live}; no edge tables were "
+                    "swapped. If the drop is expected, truncate both edge tables and rerun"
+                )
         # Validate both directions before publishing either; a failed build can be rerun.
         for table in TABLES:
             started = monotonic()
-            await self._client.post(f"EXCHANGE TABLES {table}_new AND {table}")
-            await self._client.post(f"DROP TABLE {table}_new SYNC")
-            await self._applied.record(
-                AppliedRelease(
-                    target=table,
-                    target_uuid=await self._uuid(table),
-                    release=release,
-                    from_release=None,
-                    software_version=producer.software_version,
-                    image_digest=producer.image_digest,
-                    applied_at=clock(),
+            async with self._stage(f"citation edges: publish {table}"):
+                await self._client.post(f"EXCHANGE TABLES {table}_new AND {table}")
+                await self._client.post(f"DROP TABLE {table}_new SYNC")
+                await self._applied.record(
+                    AppliedRelease(
+                        target=table,
+                        target_uuid=await self._uuid(table),
+                        release=release,
+                        from_release=None,
+                        software_version=producer.software_version,
+                        image_digest=producer.image_digest,
+                        applied_at=clock(),
+                    )
                 )
-            )
-            results[table] = results[table].model_copy(
-                update={"seconds": results[table].seconds + monotonic() - started}
-            )
+                results[table] = results[table].model_copy(
+                    update={"seconds": results[table].seconds + monotonic() - started}
+                )
         return BuildCitationEdgesResult(source_release=release, **results)
 
     async def _uuid(self, table: str) -> UUID:

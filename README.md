@@ -99,6 +99,19 @@ them before the archives; a failed rebuild blocks the archives like a core failu
 Core diffs above 30% of the configured full-base size are not loaded. This reference stays fixed
 as diffs advance; refresh `core_baselines` after installing a replacement base.
 
+Sync stages log start/end and one elapsed-time heartbeat every five minutes while waiting;
+heartbeats indicate the runner is alive, not verified server progress. Citation rebuild logs
+separate recovery, outgoing/incoming builds, count validation, and publication stages, including
+standalone `okp s2 build-citation-edges` runs. No additional ClickHouse grants are needed.
+
+Each executed sync run publishes an `s2-sync-results` Markdown artifact in Prefect's run
+Artifacts tab, with dataset releases/outcomes, edge counts, stage durations and image/version
+metadata. Cancellation and SIGTERM are both reported as `interrupted`, since async flows receive
+SIGTERM as a cancellation; Prefect owns whether the final run is cancelled, rescheduled or crashed.
+Failed or gracefully interrupted runs retain observed partial results;
+abrupt process termination cannot guarantee a final artifact. A failed or timed-out artifact upload warns without
+changing the sync outcome. Artifacts exclude settings, source records and exception messages.
+
 `OKP_SYNC` is JSON with `bucket`, optional `prefix` (default `semantic-scholar`), and three
 initially empty fields: `core_baselines`, `archives`, and `enabled_archives`.
 `core_baselines` maps datasets to manifest references returned by `okp s2 verify-base-manifest`.

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import socket
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from typing import NamedTuple
 
 import httpx
@@ -41,7 +41,10 @@ class ClickHouse(NamedTuple):
 
 @asynccontextmanager
 async def connect(
-    config: ClickHouseConfig, *, transport: httpx.AsyncBaseTransport | None = None
+    config: ClickHouseConfig,
+    *,
+    transport: httpx.AsyncBaseTransport | None = None,
+    edge_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
 ) -> AsyncGenerator[ClickHouse, None]:
     http = httpx.AsyncClient(
         base_url=str(config.url),
@@ -58,7 +61,7 @@ async def connect(
         tables = ClickHouseTables(client, raw_bucket=config.raw_bucket)
         applied = ClickHouseAppliedReleases(client)
         yield ClickHouse(
-            edges=ClickHouseCitationEdges(client, tables, applied),
+            edges=ClickHouseCitationEdges(client, tables, applied, edge_stage),
             tables=tables,
             applied=applied,
             telemetry=ClickHouseLoadTelemetry(client),
