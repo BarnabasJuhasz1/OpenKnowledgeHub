@@ -15,6 +15,7 @@ from openknowledge_core.search.models import (
     PaperRow,
     SearchDocument,
     SourceRows,
+    TldrRow,
 )
 from openknowledge_core.search.ports import SearchSink, SearchSource
 from openknowledge_core.search.service import SearchIndexService, document_operation
@@ -37,5 +38,6 @@ __all__ = [
     "SettleIndex",
     "SettleIndexResult",
     "SourceRows",
+    "TldrRow",
     "document_operation",
 ]

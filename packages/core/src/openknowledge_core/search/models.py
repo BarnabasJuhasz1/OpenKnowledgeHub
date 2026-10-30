@@ -79,6 +79,8 @@ class PaperRow(BaseModel):
     publicationtypes: tuple[str, ...] = ()
     publicationdate: str | None = None
     journal_name: str | None = None
+    journal_volume: str | None = None
+    journal_pages: str | None = None
 
 
 class AbstractRow(BaseModel):
@@ -93,20 +95,35 @@ class AbstractRow(BaseModel):
     abstract: str = ""
 
 
+class TldrRow(BaseModel):
+    """One current TLDR row, including tombstones."""
+
+    model_config = ConfigDict(frozen=True)
+
+    corpusid: NonNegativeInt
+    version: NonNegativeInt
+    source_release: ReleaseId
+    is_deleted: bool
+    text: str | None = None
+
+
 class SourceRows(BaseModel):
-    """The rows of one corpus ID in both tables, each absent where the table has none."""
+    """The rows of one corpus ID in all three tables, each absent where the table has none."""
 
     model_config = ConfigDict(frozen=True)
 
     corpusid: NonNegativeInt
     paper: PaperRow | None = None
     abstract: AbstractRow | None = None
+    tldr: TldrRow | None = None
 
 
 class Journal(BaseModel):
     model_config = ConfigDict(frozen=True)
 
-    name: str
+    name: str | None = None
+    volume: str | None = None
+    pages: str | None = None
 
 
 class FieldOfStudy(BaseModel):
@@ -137,6 +154,7 @@ class SearchDocument(BaseModel):
     corpusid: str
     title: str | None = None
     abstract: str | None = None
+    tldr: str | None = None
     authors: tuple[Author, ...] = ()
     venue: str | None = None
     publicationvenueid: str | None = None

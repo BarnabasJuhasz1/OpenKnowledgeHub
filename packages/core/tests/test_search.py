@@ -9,6 +9,7 @@ from openknowledge_core.search import (
     SearchIndexService,
     SearchRejected,
     SourceRows,
+    TldrRow,
 )
 from tests.fakes.ports import (
     NEXT,
@@ -20,7 +21,7 @@ from tests.fakes.ports import (
 )
 
 V1, V2 = 41464, 41478  # the versions of a live row at RELEASE and at NEXT
-INDEX = "papers-v1"
+INDEX = "papers-v2"
 
 
 def service(
@@ -34,7 +35,13 @@ def tombstone(corpusid: int, version: int) -> SourceRows:
     return SourceRows(corpusid=corpusid, paper=paper)
 
 
-async def test_a_base_pass_writes_every_document_with_the_larger_version() -> None:
+@pytest.mark.parametrize(
+    ("abstract_version", "tldr_version", "expected_version"),
+    [(V1 - 2, V1 - 1, V1), (V2, V1, V2), (V2, V2 + 2, V2 + 2)],
+)
+async def test_a_base_pass_writes_every_document_with_the_largest_version(
+    abstract_version: int, tldr_version: int, expected_version: int
+) -> None:
     source, sink = FakeSearchSource(), FakeSearchSink()
     paper = paper_row(
         101,
@@ -43,9 +50,22 @@ async def test_a_base_pass_writes_every_document_with_the_larger_version() -> No
         externalids={"DOI": "10.1000/EXAMPLE.1", "CorpusId": "101", "ACL": None},
         s2fieldsofstudy=["Computer Science", "Computer Science"],
         journal_name="Example Journal",
+        journal_volume="IV",
+        journal_pages="1-9",
     )
     source.base_rows = [
-        SourceRows(corpusid=101, paper=paper, abstract=abstract_row(101, V2)),
+        SourceRows(
+            corpusid=101,
+            paper=paper,
+            abstract=abstract_row(101, abstract_version),
+            tldr=TldrRow(
+                corpusid=101,
+                version=tldr_version,
+                source_release=NEXT,
+                is_deleted=False,
+                text="Summary",
+            ),
+        ),
         SourceRows(corpusid=102, paper=paper_row(102, V1)),
     ]
     command = IndexPapers(index=INDEX, release=NEXT, part=1, parts=1)
@@ -56,12 +76,13 @@ async def test_a_base_pass_writes_every_document_with_the_larger_version() -> No
     assert set(mapping["properties"]) == PAPERS.names
     assert settings["index"]["number_of_shards"] == 2
     version, source_101 = sink.indices[INDEX]["101"]
-    assert version == V2 and source_101 is not None
-    assert set(source_101) <= PAPERS.names and source_101["contract_version"] == 1
+    assert version == expected_version and source_101 is not None
+    assert set(source_101) <= PAPERS.names and source_101["contract_version"] == 2
     assert source_101["abstract"] == "A synthetic abstract."
     assert source_101["externalids"] == {"DOI": "10.1000/EXAMPLE.1"}
     assert source_101["s2fieldsofstudy"] == [{"category": "Computer Science"}]
-    assert source_101["journal"] == {"name": "Example Journal"}
+    assert source_101["journal"] == {"name": "Example Journal", "volume": "IV", "pages": "1-9"}
+    assert source_101["tldr"] == "Summary"
     version, source_102 = sink.indices[INDEX]["102"]
     assert version == V1 and source_102 is not None and "abstract" not in source_102
     assert source.asked == [(None, NEXT, 101, 102)]
@@ -74,9 +95,20 @@ async def test_a_diff_pass_deletes_a_papers_tombstone_and_drops_a_tombstoned_abs
     gone = AbstractRow(corpusid=102, version=V2 + 1, source_release=NEXT, is_deleted=True)
     newer = tombstone(105, V2 + 1).model_copy(update={"abstract": abstract_row(105, V2 + 2)})
     source.diff_rows = [
-        SourceRows(corpusid=102, paper=paper_row(102, V1), abstract=gone),
+        SourceRows(
+            corpusid=102,
+            paper=paper_row(102, V1),
+            abstract=gone,
+            tldr=TldrRow(corpusid=102, version=V2 + 3, source_release=NEXT, is_deleted=True),
+        ),
         tombstone(103, V2 + 1),
-        SourceRows(corpusid=104, abstract=abstract_row(104, V2)),
+        SourceRows(
+            corpusid=104,
+            abstract=abstract_row(104, V2),
+            tldr=TldrRow(
+                corpusid=104, version=V2, source_release=NEXT, is_deleted=False, text="orphan"
+            ),
+        ),
         newer,
     ]
     command = IndexPapers(index=INDEX, release=NEXT, from_release=RELEASE, part=2, parts=3)
@@ -85,7 +117,8 @@ async def test_a_diff_pass_deletes_a_papers_tombstone_and_drops_a_tombstoned_abs
     assert sink.indices[INDEX]["103"] == (V2 + 1, None)
     assert sink.indices[INDEX]["105"] == (V2 + 2, None)
     version, source_102 = sink.indices[INDEX]["102"]
-    assert version == V2 + 1 and source_102 is not None and "abstract" not in source_102
+    assert version == V2 + 3 and source_102 is not None and "abstract" not in source_102
+    assert "tldr" not in source_102
     assert "104" not in sink.indices[INDEX]
     assert source.asked == [(RELEASE, NEXT, *CorpusSlice(part=2, parts=3).bounds(102, 105))]
     # Over an index that does not exist, a diff pass refuses before it asks for anything.
