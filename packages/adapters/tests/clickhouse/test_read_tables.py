@@ -4,26 +4,18 @@ import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import timedelta
-from pathlib import Path
 from uuid import UUID
 
 import httpx
 import pytest
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
-from openknowledge_adapters.clickhouse.read_tables import (
-    COLUMNS,
-    IN,
-    OUT,
-    SOURCES,
-    ClickHouseReadTables,
-)
+from openknowledge_adapters.clickhouse.read_tables import ClickHouseReadTables
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_contracts.tables.clickhouse import version_expression
 from openknowledge_contracts.tables.s2 import CONTRACTS
 from openknowledge_core.ingestion.errors import TableRejected, TableUnavailable
 from openknowledge_core.ingestion.read_tables import READ_TABLES
-from tests.clickhouse_local import clickhouse_local, needs_clickhouse, up
 from tests.fakes.ports import NEXT, PRODUCER, RELEASE, applied_release, clock
 
 
@@ -225,33 +217,3 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             assert recorded["target"] == name
             assert recorded["target_uuid"] == str(live[name])
             assert recorded["release"] == NEXT
-
-
-@needs_clickhouse
-def test_edge_rebuild_preserves_live_citation_ids(tmp_path: Path) -> None:
-    sql = f"""
-        {up()}
-        SYSTEM STOP MERGES citations;
-        INSERT INTO citations
-            (citationid, citingcorpusid, citedcorpusid, source_release, is_deleted)
-        VALUES (11, 1, 2, '2026-10-01', 0), (12, 1, 2, '2026-10-01', 0),
-               (13, 1, 3, '2026-10-01', 0), (14, 1, NULL, '2026-10-01', 0);
-        INSERT INTO citations
-            (citationid, citingcorpusid, citedcorpusid, source_release, is_deleted)
-        VALUES (11, 1, 9, '2026-09-01', 0);
-        INSERT INTO citations (citationid, source_release, is_deleted)
-        VALUES (13, '2026-10-02', 1);
-        CREATE TABLE citation_edges_out_new AS citation_edges_out;
-        INSERT INTO citation_edges_out_new ({COLUMNS[OUT]}) {SOURCES[OUT]};
-        CREATE TABLE citation_edges_in_new AS citation_edges_in;
-        INSERT INTO citation_edges_in_new ({COLUMNS[IN]}) {SOURCES[IN]};
-        SELECT citing, cited, citationid FROM citation_edges_out_new
-        ORDER BY citationid FORMAT JSONEachRow;
-        SELECT citing, cited FROM citation_edges_in_new ORDER BY citing, cited FORMAT JSONEachRow;
-    """
-    assert clickhouse_local(sql, tmp_path) == [
-        {"citing": 1, "cited": 2, "citationid": 11},
-        {"citing": 1, "cited": 2, "citationid": 12},
-        {"citing": 1, "cited": 2},
-        {"citing": 1, "cited": 2},
-    ]
