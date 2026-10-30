@@ -4,6 +4,8 @@ from datetime import datetime
 from time import monotonic
 from uuid import UUID
 
+from pydantic import TypeAdapter
+
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_contracts.datasets import ReleaseId
@@ -25,6 +27,7 @@ COLUMNS = {
     OUT: "citing, cited, isinfluential, intents, citationid",
     IN: "citing, cited, isinfluential, intents, citationid",
 }
+EDGES_IN = f"SELECT {COLUMNS[IN]} FROM {OUT}"
 SOURCES = {
     PAPERS: f"SELECT {COLUMNS[PAPERS]} FROM papers FINAL WHERE is_deleted = 0",
     OUT: "SELECT citingcorpusid, assumeNotNull(citedcorpusid), isinfluential, "
@@ -34,7 +37,7 @@ SOURCES = {
     "if(has(arrayFlatten(intents), 'result'), 4, 0))), citationid "
     "FROM citations FINAL WHERE citedcorpusid IS NOT NULL",
     # One scan of citations: the incoming table is the outgoing one, sorted the other way.
-    IN: f"SELECT {COLUMNS[IN]} FROM {OUT}_new",
+    IN: f"{EDGES_IN}_new",
 }
 SETTINGS = (
     "SETTINGS max_memory_usage = 8000000000, max_execution_time = 14400, max_insert_threads = 1, "
@@ -52,6 +55,52 @@ BYTES_PER_PAPER = 100
 """Provisional free disk per papers row, pending a measured build."""
 MIN_KEPT = 0.9
 """A rebuild below this share of any live table is refused."""
+DELTA = {"papers": "read_delta_papers", "citations": "read_delta_citations"}
+"""Scratch tables holding the keys a source took in since the read tables' release."""
+KEY = {"papers": "corpusid", "citations": "citationid"}
+_RELEASE = TypeAdapter(ReleaseId)
+
+
+def delta_sql(source: str, start: ReleaseId, end: ReleaseId) -> list[str]:
+    """Collect the keys ``source`` wrote in ``(start, end]``, tombstones and superseded rows too."""
+    start, end = _RELEASE.validate_python(start), _RELEASE.validate_python(end)
+    return [
+        f"DROP TABLE IF EXISTS {DELTA[source]}",
+        f"CREATE TABLE {DELTA[source]} (key UInt64) ENGINE = MergeTree ORDER BY key",
+        f"INSERT INTO {DELTA[source]} SELECT DISTINCT {KEY[source]} FROM {source} "
+        f"WHERE source_release > '{start}' AND source_release <= '{end}'",
+    ]
+
+
+def apply_sql(source: str) -> list[str]:
+    """Replace the rows of the delta keys in ``source``'s read tables with their current rows.
+
+    Deleting every delta key first makes a rerun after a partial run reach the same state.
+    """
+    touched = f"{KEY[source]} IN (SELECT key FROM {DELTA[source]})"
+    tables = [table for table in TABLES if SOURCE_OF[table] == source]
+    # Waited on: until a delete finishes, the old rows still show next to the new ones.
+    deletes = [
+        f"DELETE FROM {table} WHERE {touched} SETTINGS lightweight_deletes_sync = 2"
+        for table in tables
+    ]
+    # The incoming edges come from the outgoing ones, which TABLES updates first.
+    selects = {
+        table: f"{EDGES_IN} WHERE" if table == IN else f"{SOURCES[table]} AND" for table in tables
+    }
+    return deletes + [
+        f"INSERT INTO {table} ({COLUMNS[table]}) {selects[table]} {touched} "
+        f"{SETTINGS}{BLOCKS[table]}"
+        for table in tables
+    ]
+
+
+def in_only_sql() -> list[str]:
+    """Rebuild only the incoming edges into ``_new``, from the live outgoing ones."""
+    return [
+        f"CREATE TABLE {IN}_new AS {IN}",
+        f"INSERT INTO {IN}_new ({COLUMNS[IN]}) {EDGES_IN} {SETTINGS}{BLOCKS[IN]}",
+    ]
 
 
 def _no_stage(name: str) -> AbstractAsyncContextManager[None]:
