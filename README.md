@@ -201,6 +201,7 @@ A base pass creates the index with the mapping of `packages/contracts/src/openkn
 `title.exact` uses the `standard` analyzer without stemming.
 The `lowercase` keyword normalizer makes filters on `venue`, `journal.name`, `s2fieldsofstudy.category`, `publicationtypes` and every mapped `externalids.*` ignore case; `_source` retains the original case.
 `journal.volume` and `journal.pages` are keywords with their original case.
+A keyword value longer than 8191 characters stays in `_source` but is not indexed, since OpenSearch refuses a term over 32766 bytes.
 Changing the mapping means building a new index.
 A diff pass needs the index to exist and stops with exit 1 otherwise.
 Without `--from-release`, every live paper at the release is written.

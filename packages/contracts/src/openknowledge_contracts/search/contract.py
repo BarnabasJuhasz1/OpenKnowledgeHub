@@ -20,6 +20,9 @@ type Json = dict[str, Any]
 CONTRACT_VERSION = "contract_version"
 # The types whose mapping is more than their name.
 _MAPPINGS: dict[str, Json] = {
+    # Lucene refuses a term over 32766 bytes and fails the whole bulk item. 8191 characters of
+    # up to 4 bytes each stay below it; a longer value stays in _source but is not indexed.
+    "keyword": {"type": "keyword", "ignore_above": 8191},
     "text": {"type": "text", "analyzer": "standard"},
     "english": {"type": "text", "analyzer": "english"},
     "date": {"type": "date", "format": "strict_date", "ignore_malformed": True},

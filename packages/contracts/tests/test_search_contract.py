@@ -6,6 +6,7 @@ from openknowledge_contracts.search import PAPERS, SearchField, index_body
 
 # The mapping of each type that is not mapped as its own name.
 MAPPED = {
+    "keyword": {"type": "keyword", "ignore_above": 8191},
     "text": {"type": "text", "analyzer": "standard"},
     "english": {"type": "text", "analyzer": "english"},
     "date": {"type": "date", "format": "strict_date", "ignore_malformed": True},
@@ -38,9 +39,9 @@ def test_every_field_is_mapped_and_the_contract_is_at_version_2() -> None:
     assert properties["tldr"] == {"type": "text", "analyzer": "english"}
     assert properties["venue"]["normalizer"] == "lowercase"
     assert properties["journal"]["properties"] == {
-        "name": {"type": "keyword", "normalizer": "lowercase"},
-        "volume": {"type": "keyword"},
-        "pages": {"type": "keyword"},
+        "name": {"type": "keyword", "ignore_above": 8191, "normalizer": "lowercase"},
+        "volume": {"type": "keyword", "ignore_above": 8191},
+        "pages": {"type": "keyword", "ignore_above": 8191},
     }
     assert all(
         field["normalizer"] == "lowercase"
@@ -49,11 +50,11 @@ def test_every_field_is_mapped_and_the_contract_is_at_version_2() -> None:
     assert properties["s2fieldsofstudy"]["properties"]["category"]["normalizer"] == "lowercase"
     assert properties["publicationtypes"]["normalizer"] == "lowercase"
     assert all(
-        properties[name] == {"type": "keyword"}
+        properties[name] == {"type": "keyword", "ignore_above": 8191}
         for name in ("url", "publicationvenueid", "corpusid")
     )
-    assert properties["authors"]["properties"]["authorId"] == {"type": "keyword"}
-    assert properties[PAPERS.id_field] == {"type": "keyword"}
+    assert properties["authors"]["properties"]["authorId"] == MAPPED["keyword"]
+    assert properties[PAPERS.id_field] == MAPPED["keyword"]
     assert properties["contract_version"] == {"type": "integer"}
     assert body.settings == {
         "index": {
