@@ -135,8 +135,9 @@ class ClickHouseReadTables:
                     )
         # EXCHANGE is not atomic across tables, even in one statement. Undo a partial swap so a
         # failure leaves the old generation live, and record nothing until all three are live.
-        # A failed marker insert leaves the new generation live but not current, so the next
-        # sync rebuilds it; swapping back here could strand the edge tables a generation apart.
+        # An uncommitted marker insert leaves the new generation live but not current, so the next
+        # sync rebuilds it; one whose answer was lost may have committed, and then it is current.
+        # Swapping back here could strand the edge tables a generation apart.
         async with self._stage("read tables: publish"):
             swapped: list[str] = []
             try:
