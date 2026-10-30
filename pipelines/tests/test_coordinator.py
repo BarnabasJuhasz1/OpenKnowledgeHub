@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import signal
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
@@ -32,11 +32,6 @@ from openknowledge_core.ingestion import (
     LoadDiffResult,
 )
 from openknowledge_core.ingestion.archive_progress import ArchiveProgress, HashedRef
-from openknowledge_core.ingestion.citation_edges import (
-    EDGE_TABLES,
-    BuildCitationEdgesResult,
-    CitationEdgeTableResult,
-)
 from openknowledge_core.ingestion.coordinator import (
     CORE_ORDER,
     LARGE_ORDER,
@@ -52,6 +47,12 @@ from openknowledge_core.ingestion.errors import (
     TableRejected,
 )
 from openknowledge_core.ingestion.models import PreparedDiff, TableState
+from openknowledge_core.ingestion.read_tables import (
+    READ_TABLES,
+    SOURCE_OF,
+    BuildReadTablesResult,
+    ReadTableResult,
+)
 from openknowledge_pipelines import admission, bootstrap, deployments
 from openknowledge_pipelines.flows import s2_batch_download, s2_sync
 from openknowledge_pipelines.flows.s2_batch_download import S2BatchDownloadFlows
@@ -118,6 +119,7 @@ class Cycle:
             clock=clock,
         )
         self.events: list[tuple[str, str, str]] = []
+        self.reclaimed = 0
         self.active = 0
         self.leases = 0
         self.loading = False
@@ -230,26 +232,39 @@ class Cycle:
             ]
             return await self.loader.finish_diff(prepared, outcomes)
 
-        async def edges_current(release: str) -> bool:
+        async def edges_current(releases: Mapping[str, str]) -> bool:
             assert self.loading, "freshness must be checked under the shared lease"
-            built = [await self.applied.latest(table) for table in EDGE_TABLES]
+            built = [await self.applied.latest(table) for table in READ_TABLES]
             return all(
-                row is not None and row.release == release and row.target_uuid == self.tables.uuid
-                for row in built
+                row is not None
+                and row.release == releases[SOURCE_OF[table]]
+                and row.target_uuid == self.tables.uuid
+                for table, row in zip(READ_TABLES, built, strict=True)
             )
 
-        async def build_edges() -> BuildCitationEdgesResult:
+        async def reclaim() -> None:
+            assert self.loading
+            self.reclaimed += 1
+
+        async def build_read_tables() -> BuildReadTablesResult:
             assert self.loading
             if self.fail == "edges":
                 raise TableRejected("not enough disk")
             citations = await self.applied.latest("citations")
             assert citations is not None
             self.events.append(("edges", "citations", citations.release))
-            for table in EDGE_TABLES:
-                await self.applied.record(applied_release(table, citations.release, timedelta()))
-            built = CitationEdgeTableResult(rows=1, seconds=0)
-            return BuildCitationEdgesResult(
-                source_release=citations.release, citation_edges_out=built, citation_edges_in=built
+            releases: dict[str, str] = {}
+            for name in ("papers", "citations"):
+                marker = await self.applied.latest(name)
+                assert marker is not None
+                releases[name] = marker.release
+            for table in READ_TABLES:
+                await self.applied.record(
+                    applied_release(table, releases[SOURCE_OF[table]], timedelta())
+                )
+            return BuildReadTablesResult(
+                source_releases=releases,
+                tables={table: ReadTableResult(rows=1, seconds=0) for table in READ_TABLES},
             )
 
         return s2_sync.SyncServices(
@@ -264,8 +279,8 @@ class Cycle:
             loads=S2LoadFlows(load_base, load_diff),
             s2_lease=self.lease,
             load_lease=self.load_lease,
-            edges=AsyncMock(is_current=edges_current),
-            build_edges=build_edges,
+            read_tables=AsyncMock(is_current=edges_current, reclaim=reclaim),
+            build_read_tables=build_read_tables,
         )
 
 
@@ -337,18 +352,21 @@ async def test_core_failure_preserves_checkpoints_and_blocks_archives(
     assert not any(dataset in LARGE_ORDER for _, dataset, _ in cycle.events)
 
 
-async def test_old_citation_edges_rebuild_at_final_release_before_archives(cycle: Cycle) -> None:
-    for table in EDGE_TABLES:
+async def test_old_read_tables_rebuild_at_final_release_before_archives(cycle: Cycle) -> None:
+    for table in READ_TABLES:
         await cycle.applied.record(applied_release(table, RELEASE, timedelta()))
     command = cycle.command.model_copy(update={"enabled_archives": frozenset(LARGE_ORDER)})
     services = cycle.services()
     async with cycle.lease(), cycle.load_lease():
-        assert await services.edges.is_current(RELEASE)
-        assert not await services.edges.is_current(NEXT)
+        assert await services.read_tables.is_current({"papers": RELEASE, "citations": RELEASE})
+        assert not await services.read_tables.is_current({"papers": NEXT, "citations": NEXT})
     result = await s2_sync.run_sync(command, services)
     citations = next(item for item in result.datasets if item.dataset == "citations")
     assert (citations.start, citations.final) == (RELEASE, NEXT)
-    assert result.citation_edges is not None and result.citation_edges.source_release == NEXT
+    assert result.read_tables is not None and result.read_tables.source_releases == {
+        "papers": NEXT,
+        "citations": NEXT,
+    }
     assert [event for event in cycle.events if event[0] == "edges"] == [
         ("edges", "citations", NEXT)
     ]
@@ -358,29 +376,54 @@ async def test_old_citation_edges_rebuild_at_final_release_before_archives(cycle
         index for index, (_, dataset, _) in enumerate(cycle.events) if dataset in LARGE_ORDER
     ]
     assert archives and min(archives) > built
-    for table in EDGE_TABLES:
+    for table in READ_TABLES:
         marker = await cycle.applied.latest(table)
         assert marker is not None and marker.release == NEXT
 
 
-async def test_citation_edges_rebuild_once_per_citations_release(
+async def test_read_tables_rebuild_once_per_citations_release(
     cycle: Cycle,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(s2_sync, "get_run_logger", lambda: logging.getLogger(__name__))
     command = cycle.command.model_copy(update={"enabled_archives": frozenset(LARGE_ORDER)})
     cycle.fail = "edges"
-    with pytest.raises(SyncIncomplete, match="citation edges: not enough disk"):
+    with pytest.raises(SyncIncomplete, match="read tables: not enough disk"):
         await s2_sync.run_sync(command, cycle.services())
     assert not any(dataset in LARGE_ORDER for _, dataset, _ in cycle.events)
     cycle.fail, cycle.events = None, []
-    await cycle.applied.record(applied_release(EDGE_TABLES[0], NEXT, timedelta()))
-    assert await cycle.applied.latest(EDGE_TABLES[1]) is None
+    await cycle.applied.record(applied_release(READ_TABLES[0], NEXT, timedelta()))
+    assert await cycle.applied.latest(READ_TABLES[1]) is None
     result = await s2_sync.run_sync(command, cycle.services())
-    assert result.citation_edges is not None and result.citation_edges.source_release == NEXT
+    assert result.read_tables is not None and result.read_tables.source_releases == {
+        "papers": NEXT,
+        "citations": NEXT,
+    }
     assert cycle.events[0] == ("edges", "citations", NEXT)
     cycle.events.clear()
     await s2_sync.run_sync(command, cycle.services())
+    assert cycle.events == [] and cycle.reclaimed == 1
+
+
+async def test_read_tables_rebuild_when_only_papers_moved(cycle: Cycle) -> None:
+    for dataset in CORE_ORDER:
+        await cycle.applied.record(
+            applied_release(dataset, RELEASE if dataset == "papers" else NEXT, timedelta())
+        )
+    for table in READ_TABLES:
+        await cycle.applied.record(
+            applied_release(table, RELEASE if SOURCE_OF[table] == "papers" else NEXT, timedelta())
+        )
+    services = cycle.services()
+    result = await s2_sync.run_sync(cycle.command, services)
+    papers = next(item for item in result.datasets if item.dataset == "papers")
+    citations = next(item for item in result.datasets if item.dataset == "citations")
+    assert papers.outcome == "synced" and citations.outcome == "current"
+    assert result.read_tables is not None
+    assert result.read_tables.source_releases == {"papers": NEXT, "citations": NEXT}
+    assert sum(event[0] == "edges" for event in cycle.events) == 1
+    cycle.events.clear()
+    await s2_sync.run_sync(cycle.command, services)
     assert cycle.events == []
 
 
@@ -529,20 +572,20 @@ async def test_orphan_recovery_precedes_source_calls(
 async def test_competing_edge_builder_finishes_during_lease_acquisition(cycle: Cycle) -> None:
     # Settle core loads, then invalidate one marker to require an edge rebuild.
     await s2_sync.run_sync(cycle.command, cycle.services())
-    cycle.applied.records = [row for row in cycle.applied.records if row.target != EDGE_TABLES[1]]
+    cycle.applied.records = [row for row in cycle.applied.records if row.target != READ_TABLES[1]]
     cycle.events.clear()
 
     @asynccontextmanager
     async def competing_lease() -> AsyncGenerator[None]:
         assert not cycle.loading
         # The competing builder publishes before handing over the shared slot.
-        await cycle.applied.record(applied_release(EDGE_TABLES[1], NEXT, timedelta()))
+        await cycle.applied.record(applied_release(READ_TABLES[1], NEXT, timedelta()))
         async with cycle.load_lease():
             yield
 
     services = replace(cycle.services(), load_lease=competing_lease)
     result = await s2_sync.run_sync(cycle.command, services)
-    assert result.citation_edges is None
+    assert result.read_tables is None
     assert cycle.events == []
 
 
@@ -555,13 +598,13 @@ async def test_edge_freshness_failure_blocks_archives(
     check = AsyncMock(
         side_effect=asyncio.CancelledError() if cancel else TableRejected("read denied")
     )
-    monkeypatch.setattr(services.edges, "is_current", check)
+    monkeypatch.setattr(services.read_tables, "is_current", check)
     command = cycle.command.model_copy(update={"enabled_archives": frozenset(LARGE_ORDER)})
     if cancel:
         with pytest.raises(asyncio.CancelledError):
             await s2_sync.run_sync(command, services)
     else:
-        with pytest.raises(SyncIncomplete, match="citation edges: read denied"):
+        with pytest.raises(SyncIncomplete, match="read tables: read denied"):
             await s2_sync.run_sync(command, services)
     assert not cycle.loading
     assert not any(
@@ -602,7 +645,7 @@ async def test_managed_sync_holds_one_lease_and_retains_admission_on_failure(
         s2_lease: Callable[[], AbstractAsyncContextManager[None]],
         load_lease: Callable[[], AbstractAsyncContextManager[None]],
         *,
-        edge_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
+        read_table_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
     ) -> AsyncGenerator[s2_sync.SyncServices]:
         yield replace(cycle.services(), s2_lease=s2_lease, load_lease=load_lease)
 
@@ -651,7 +694,7 @@ async def managed_cycle(
         s2_lease: Callable[[], AbstractAsyncContextManager[None]],
         load_lease: Callable[[], AbstractAsyncContextManager[None]],
         *,
-        edge_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
+        read_table_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
     ) -> AsyncGenerator[s2_sync.SyncServices]:
         @asynccontextmanager
         async def tracked() -> AsyncGenerator[None]:

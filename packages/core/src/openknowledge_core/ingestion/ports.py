@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Literal, Protocol
 
 from openknowledge_contracts.datasets import DatasetName, ReleaseId, ReleaseMetadata
 from openknowledge_contracts.manifests import ManifestEntry, ObjectPath, ObjectRef, Producer
-from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.families import ArchiveFamily
 from openknowledge_core.ingestion.measurement import LoadSnapshot
 from openknowledge_core.ingestion.models import (
@@ -27,6 +26,7 @@ from openknowledge_core.ingestion.models import (
     StoredObject,
     TableState,
 )
+from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 
 
 class ReleaseCatalog(Protocol):
@@ -139,11 +139,15 @@ class LoadTelemetry(Protocol):
     async def snapshot(self, dataset: DatasetName) -> LoadSnapshot: ...
 
 
-class CitationEdges(Protocol):
-    async def is_current(self, release: ReleaseId) -> bool:
-        """Both live tables have publication markers for this release and their UUIDs."""
+class ReadTables(Protocol):
+    async def is_current(self, releases: Mapping[str, ReleaseId]) -> bool:
+        """All live read tables have markers for their source releases and UUIDs."""
+        ...
+
+    async def reclaim(self) -> None:
+        """Drop the staging copies a failed or interrupted build left behind."""
         ...
 
     async def build(
         self, producer: Producer, clock: Callable[[], datetime]
-    ) -> BuildCitationEdgesResult: ...
+    ) -> BuildReadTablesResult: ...

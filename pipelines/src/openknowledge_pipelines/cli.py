@@ -321,13 +321,13 @@ def verify_base_manifest(dataset: str, release: str, bucket: str, prefix: str) -
     _run(run, admission_required=False)
 
 
-@s2.command("build-citation-edges", help="Rebuild both ClickHouse citation edge tables.")
-def build_citation_edges() -> None:
+@s2.command("build-read-tables", help="Rebuild the ClickHouse read tables.")
+def build_read_tables() -> None:
     from openknowledge_pipelines import deployments
 
     _require_managed_server((deployments.LOAD_LIMIT,))
     _settings(LoadSettings)
-    _run_managed(deployments.s2_build_citation_edges)
+    _run_managed(deployments.s2_build_read_tables)
 
 
 @s2.command("sync", help="Run one coordinator cycle using OKP_SYNC configuration.")

@@ -149,7 +149,7 @@ async def _standalone(operation: str) -> None:
             )
         )
     else:
-        await deployments.s2_build_citation_edges.fn()
+        await deployments.s2_build_read_tables.fn()
 
 
 def _local_loads(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -163,7 +163,7 @@ def _local_loads(monkeypatch: pytest.MonkeyPatch) -> None:
         pytest.fail("refusal before work must not open external clients")
 
     monkeypatch.setattr(bootstrap, "open_load_service", forbidden)
-    monkeypatch.setattr(bootstrap, "open_citation_edges", forbidden)
+    monkeypatch.setattr(bootstrap, "open_read_tables", forbidden)
 
 
 @pytest.mark.parametrize("operation", ["load", "diff", "edges"])

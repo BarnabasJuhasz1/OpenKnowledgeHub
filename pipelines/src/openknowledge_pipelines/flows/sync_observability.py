@@ -133,25 +133,25 @@ class SyncObservation(BaseModel):
                 f"{item.final or '—'} | {outcome} | "
                 f"{len(item.archived)} | {len(item.loaded)} |"
             )
-        lines.extend(["", "## Citation edges", ""])
-        edges = self.result.citation_edges
+        lines.extend(["", "## Read tables", ""])
+        edges = self.result.read_tables
         if edges is not None:
             lines.extend(
                 [
-                    f"Source release: {edges.source_release}",
+                    f"Source releases: {edges.source_releases}",
                     "",
                     "| Table | Rows | Build and publication seconds |",
                     "| --- | --- | --- |",
-                    f"| citation_edges_out | {edges.citation_edges_out.rows} | "
-                    f"{edges.citation_edges_out.seconds:.1f} |",
-                    f"| citation_edges_in | {edges.citation_edges_in.rows} | "
-                    f"{edges.citation_edges_in.seconds:.1f} |",
+                    *(
+                        f"| {table} | {built.rows} | {built.seconds:.1f} |"
+                        for table, built in edges.tables.items()
+                    ),
                 ]
             )
         else:
             lines.append(
                 "Rebuild failed; publication may be partial. Check logs and applied releases."
-                if self.result.citation_edges_failure is not None
+                if self.result.read_tables_failure is not None
                 else "No completed rebuild recorded (already current, skipped, or interrupted)."
             )
         lines.extend(

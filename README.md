@@ -102,7 +102,7 @@ as diffs advance; refresh `core_baselines` after installing a replacement base.
 Sync stages log start/end and one elapsed-time heartbeat every five minutes while waiting;
 heartbeats indicate the runner is alive, not verified server progress. Citation rebuild logs
 separate recovery, outgoing/incoming builds, count validation, and publication stages, including
-standalone `okp s2 build-citation-edges` runs. No additional ClickHouse grants are needed.
+standalone `okp s2 build-read-tables` runs. No additional ClickHouse grants are needed.
 
 Each executed sync run publishes an `s2-sync-results` Markdown artifact in Prefect's run
 Artifacts tab, with dataset releases/outcomes, edge counts, stage durations and image/version
@@ -150,18 +150,22 @@ A citations load refuses until 00014 is applied, and 00014 refuses while `citati
 To get past it, stop citation loads, run `RENAME TABLE citations TO citations_legacy`, run the Up statement of 00007 to create an empty table with a new UUID, apply the migrations and load the base release again from all its raw objects.
 The old checkpoints no longer count and stay in place. Drop `citations_legacy` once that load passes its checks.
 Migration 00015 adds `citation_edges_out` and `citation_edges_in`, slim tables ordered for
-outgoing and incoming neighbourhood lookups. The sync rebuilds them after citations takes a new
-release; rebuild them manually with `okp s2 build-citation-edges` or the unscheduled Prefect
-deployment `s2-build-citation-edges/control-vm`. All three take the shared `clickhouse` limit.
-They retain duplicate citing/cited pairs, so readers use `DISTINCT`, and they are plain
+outgoing and incoming neighbourhood lookups. Migration 00017 adds papers_slim, narrow paper
+metadata ordered by corpusid. The sync rebuilds all three when papers or citations changes;
+rebuild them manually with `okp s2 build-read-tables` or the unscheduled Prefect
+deployment `s2-build-read-tables/control-vm`. All three take the shared `clickhouse` limit.
+The edge tables retain duplicate citing/cited pairs, so readers use `DISTINCT`, and they are plain
 MergeTree, so a query with `FINAL` on them fails. `intents` is a mask of background (1),
 methodology (2) and result (4); a null and an empty list both give 0, and other values are dropped.
-A rebuild refuses unless `citations` holds a completed release, which it records in `applied`
-for each edge table. It needs about 12 bytes of free disk per `citations` row and refuses to swap
-in fewer than 90% of the live edges. An edge-count refusal leaves the live tables unchanged;
-each sync repeats the rebuild until an operator resolves the refusal. A cancelled rebuild's
+A rebuild requires completed papers and citations releases and records each table’s source
+release and live UUID in applied. It needs about 12 bytes of free disk per citations row plus
+a provisional 100 bytes per papers row. All three counts are validated before any swap; each
+must retain at least 90% of its live table (an empty live table passes). A refusal leaves the
+live tables unchanged; each sync repeats the rebuild until an operator resolves the refusal. A cancelled rebuild's
 insert keeps running in ClickHouse; the next rebuild stops it and removes stale staging tables
-before checking disk capacity.
+before checking disk capacity. Apply migration 00017 before the first rebuild. After deploying,
+run s2-build-read-tables once, verify all three applied markers at their source releases, and
+delete the old s2-build-citation-edges deployment from Prefect.
 
 `tests/test_load_e2e.py` runs it against ClickHouse and a fake GCS in Docker.
 On the control VM, `okp serve` serves the same flow as the deployment `s2-load/control-vm`, so a run can start from the Prefect UI.

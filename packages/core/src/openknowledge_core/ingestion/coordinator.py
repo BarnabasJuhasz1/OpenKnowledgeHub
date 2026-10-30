@@ -8,9 +8,9 @@ from openknowledge_contracts.datasets import DatasetName, ReleaseId
 from openknowledge_contracts.manifests import BucketName, DatasetManifest, ObjectPrefix
 from openknowledge_contracts.tables.s2 import CONTRACTS
 from openknowledge_core.ingestion.archive_progress import HashedRef
-from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.commands import DownloadDataset
 from openknowledge_core.ingestion.errors import IngestionError
+from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 
 CORE_ORDER = (
     "papers",
@@ -62,8 +62,8 @@ class DatasetSyncResult(BaseModel):
 
 class SyncResult(BaseModel):
     datasets: list[DatasetSyncResult] = Field(default_factory=lambda: [])
-    citation_edges: BuildCitationEdgesResult | None = None
-    citation_edges_failure: str | None = None
+    read_tables: BuildReadTablesResult | None = None
+    read_tables_failure: str | None = None
 
 
 class SyncIncomplete(IngestionError):
@@ -74,8 +74,8 @@ class SyncIncomplete(IngestionError):
             for item in result.datasets
             if item.outcome in ("failed", "needs_base")
         ]
-        if result.citation_edges_failure is not None:
-            failures.append(f"citation edges: {result.citation_edges_failure}")
+        if result.read_tables_failure is not None:
+            failures.append(f"read tables: {result.read_tables_failure}")
         super().__init__("S2 sync incomplete: " + "; ".join(failures))
 
 

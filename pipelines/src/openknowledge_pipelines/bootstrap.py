@@ -21,7 +21,7 @@ from openknowledge_core.ingestion.consumers import ArchiveConsumer
 from openknowledge_core.ingestion.coordinator import CORE_ORDER, LARGE_ORDER
 from openknowledge_core.ingestion.families import ArchiveFamily
 from openknowledge_core.ingestion.measurement import LoadObservation
-from openknowledge_core.ingestion.ports import CitationEdges, LoadTelemetry
+from openknowledge_core.ingestion.ports import LoadTelemetry, ReadTables
 from openknowledge_core.search import SearchIndexService
 from openknowledge_pipelines.settings import (
     BatchSettings,
@@ -220,7 +220,7 @@ async def open_sync(
     s2_lease: Callable[[], AbstractAsyncContextManager[None]],
     load_lease: Callable[[], AbstractAsyncContextManager[None]],
     *,
-    edge_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
+    read_table_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
 ) -> AsyncGenerator[SyncServices, None]:
     from openknowledge_core.ingestion.families import archive_family
     from openknowledge_pipelines.flows.s2_sync import SyncServices
@@ -229,7 +229,7 @@ async def open_sync(
         open_batch_download(settings) as (service, jobs),
         gcs.connect(_gcs(settings)) as store,
         clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
-        open_citation_edges(settings, stage=edge_stage) as edges,
+        open_read_tables(settings, stage=read_table_stage) as edges,
     ):
         progress = ArchiveProgress(store, service, producer(settings), lambda: datetime.now(UTC))
         loader = LoadDatasetService(
@@ -252,8 +252,8 @@ async def open_sync(
             loads=load_flows(loader, settings),
             s2_lease=s2_lease,
             load_lease=load_lease,
-            edges=edges,
-            build_edges=lambda: edges.build(producer(settings), lambda: datetime.now(UTC)),
+            read_tables=edges,
+            build_read_tables=lambda: edges.build(producer(settings), lambda: datetime.now(UTC)),
         )
 
 
@@ -287,16 +287,16 @@ async def open_measured_load(
 
 
 @asynccontextmanager
-async def open_citation_edges(
+async def open_read_tables(
     settings: LoadSettings,
     *,
     stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
-) -> AsyncGenerator[CitationEdges, None]:
+) -> AsyncGenerator[ReadTables, None]:
     from openknowledge_pipelines.flows.sync_observability import SyncObservation
 
     observer = SyncObservation()
     # A full rebuild can outlast the per-object load timeout. Keep the connect timeout.
     async with clickhouse.connect(
-        _clickhouse(settings, None), edge_stage=stage or observer.stage
+        _clickhouse(settings, None), read_table_stage=stage or observer.stage
     ) as ch:
-        yield ch.edges
+        yield ch.read_tables
