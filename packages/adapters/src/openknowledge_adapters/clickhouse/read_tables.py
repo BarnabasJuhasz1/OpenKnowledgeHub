@@ -87,6 +87,15 @@ class ClickHouseReadTables:
                 return False
         return True
 
+    async def reclaim(self) -> None:
+        # A cancelled run's insert keeps running on the server. Replacing its query ID stops it,
+        # unlike KILL QUERY, without a grant.
+        await self._client.post("SELECT 1 SETTINGS replace_running_query = 1", query_id=QUERY_ID)
+        # Reclaim abandoned copies, including an old live table after a partial swap or a lost
+        # marker answer. Stop the old insert first; never drop the published names.
+        for table in TABLES:
+            await self._client.post(f"DROP TABLE IF EXISTS {table}_new SYNC")
+
     async def build(
         self, producer: Producer, clock: Callable[[], datetime]
     ) -> BuildReadTablesResult:
@@ -101,15 +110,7 @@ class ClickHouseReadTables:
                 )
             releases[name] = release
         async with self._stage("read tables: preflight and recovery"):
-            # A cancelled run's insert keeps running on the server. Replacing its query ID stops it,
-            # unlike KILL QUERY, without a grant.
-            await self._client.post(
-                "SELECT 1 SETTINGS replace_running_query = 1", query_id=QUERY_ID
-            )
-            # Reclaim abandoned copies, including an old live table after a partial swap.
-            # Stop the old insert first; never drop the published names.
-            for table in TABLES:
-                await self._client.post(f"DROP TABLE IF EXISTS {table}_new SYNC")
+            await self.reclaim()
             live = await self._preflight()
         results: dict[str, ReadTableResult] = {}
         for table in TABLES:
@@ -136,7 +137,8 @@ class ClickHouseReadTables:
         # EXCHANGE is not atomic across tables, even in one statement. Undo a partial swap so a
         # failure leaves the old generation live, and record nothing until all three are live.
         # An uncommitted marker insert leaves the new generation live but not current, so the next
-        # sync rebuilds it; one whose answer was lost may have committed, and then it is current.
+        # sync rebuilds it; one whose answer was lost may have committed, and then it is current
+        # and the next sync only reclaims the old tables.
         # Swapping back here could strand the edge tables a generation apart.
         async with self._stage("read tables: publish"):
             swapped: list[str] = []

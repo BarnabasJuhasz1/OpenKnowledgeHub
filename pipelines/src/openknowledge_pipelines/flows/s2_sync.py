@@ -235,6 +235,7 @@ async def _read_tables(services: SyncServices, result: SyncResult) -> None:
     try:
         async with services.load_lease():
             if len(releases) == 2 and await services.read_tables.is_current(releases):
+                await services.read_tables.reclaim()
                 return
             result.read_tables = await services.build_read_tables()
     except IngestionError as exc:

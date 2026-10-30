@@ -63,7 +63,7 @@ async def test_read_tables_current_only_for_all_sources(table: str, state: str) 
         ) is (state == "current_empty")
 
 
-@pytest.mark.parametrize("failure", ["disk", "partial_swap", "markers"])
+@pytest.mark.parametrize("failure", ["disk", "partial_swap", "markers", "lost_answer"])
 async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: str) -> None:
     live = {name: UUID(int=index + 1) for index, name in enumerate(READ_TABLES)}
     initial = live.copy()
@@ -147,8 +147,10 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             live[name], staging[new] = staging[new], live[name]
             rows = []
         elif query.startswith("INSERT INTO applied"):
-            if failure == "markers" and not failed:
+            if failure in ("markers", "lost_answer") and not failed:
                 failed = True
+                if failure == "lost_answer":
+                    markers.append(request.content.decode())
                 return httpx.Response(500, text="synthetic marker failure")
             markers.append(request.content.decode())
             rows = []
@@ -172,6 +174,13 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             # The new generation stays live but not current: swapping back is the riskier move.
             assert all(live[name] != initial[name] for name in READ_TABLES) and not markers
             assert not await edges.is_current({"papers": NEXT, "citations": NEXT})
+        elif failure == "lost_answer":
+            # The markers committed, so the next sync skips the build and only reclaims.
+            assert await edges.is_current({"papers": NEXT, "citations": NEXT})
+            assert set(staging.values()) == set(initial.values())
+            await edges.reclaim()
+            assert staging == {}
+            return
         else:
             assert live == initial and not markers
         if failure == "disk":

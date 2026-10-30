@@ -144,6 +144,10 @@ class ReadTables(Protocol):
         """All live read tables have markers for their source releases and UUIDs."""
         ...
 
+    async def reclaim(self) -> None:
+        """Drop the staging copies a failed or interrupted build left behind."""
+        ...
+
     async def build(
         self, producer: Producer, clock: Callable[[], datetime]
     ) -> BuildReadTablesResult: ...

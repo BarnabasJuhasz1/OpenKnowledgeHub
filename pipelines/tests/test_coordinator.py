@@ -119,6 +119,7 @@ class Cycle:
             clock=clock,
         )
         self.events: list[tuple[str, str, str]] = []
+        self.reclaimed = 0
         self.active = 0
         self.leases = 0
         self.loading = False
@@ -241,6 +242,10 @@ class Cycle:
                 for table, row in zip(READ_TABLES, built, strict=True)
             )
 
+        async def reclaim() -> None:
+            assert self.loading
+            self.reclaimed += 1
+
         async def build_read_tables() -> BuildReadTablesResult:
             assert self.loading
             if self.fail == "edges":
@@ -274,7 +279,7 @@ class Cycle:
             loads=S2LoadFlows(load_base, load_diff),
             s2_lease=self.lease,
             load_lease=self.load_lease,
-            read_tables=AsyncMock(is_current=edges_current),
+            read_tables=AsyncMock(is_current=edges_current, reclaim=reclaim),
             build_read_tables=build_read_tables,
         )
 
@@ -397,7 +402,7 @@ async def test_read_tables_rebuild_once_per_citations_release(
     assert cycle.events[0] == ("edges", "citations", NEXT)
     cycle.events.clear()
     await s2_sync.run_sync(command, cycle.services())
-    assert cycle.events == []
+    assert cycle.events == [] and cycle.reclaimed == 1
 
 
 async def test_read_tables_rebuild_when_only_papers_moved(cycle: Cycle) -> None:
