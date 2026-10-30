@@ -43,7 +43,9 @@ TAKEN = {"errors": False, "items": [item("101", 201)]}
 ECHO = "<html>Bad gateway; the request said Authorization: Basic hunter2 and more</html>"
 
 
-def answering(status: int, answer: object) -> type[AsyncConnection]:
+def answering(
+    status: int, answer: object, requests: list[tuple[str, str, bytes | None]] | None = None
+) -> type[AsyncConnection]:
     """A connection class whose every request gets ``status`` with ``answer``, or no connection.
 
     A list answers each request with its next item, taken out of the list, and bytes are a body
@@ -64,6 +66,8 @@ def answering(status: int, answer: object) -> type[AsyncConnection]:
             ignore: Collection[int] = (),
             headers: Mapping[str, str] | None = None,
         ) -> tuple[int, dict[str, str], str]:
+            if requests is not None:
+                requests.append((method, url, body))
             assert "hunter2" not in url
             assert self.headers["authorization"] == AUTHORIZATION
             if status == 0:
@@ -141,3 +145,32 @@ async def test_bulk_failures_are_mapped_and_a_refused_item_is_named(
     assert str(raised.value).startswith(message), str(raised.value)
     assert "hunter2" not in str(raised.value)
     assert raised.value.__context__ is None
+
+
+async def test_alias_switch_is_one_atomic_request_and_requires_acknowledgement() -> None:
+    requests: list[tuple[str, str, bytes | None]] = []
+    answers: list[object] = [{"papers-v2-old": {}}, {"acknowledged": True}]
+    connection = answering(200, answers, requests)
+    async with opensearch.connect(CONFIG, connection_class=connection) as sink:
+        await sink.switch_alias("papers", "papers-v2-new")
+    assert [method for method, _, _ in requests] == ["GET", "POST"]
+    assert requests[1][1] == "/_aliases"
+    assert requests[1][2] is not None
+    assert json.loads(requests[1][2]) == {
+        "actions": [
+            {"remove": {"index": "papers-v2-old", "alias": "papers"}},
+            {"add": {"index": "papers-v2-new", "alias": "papers"}},
+        ]
+    }
+    connection = answering(200, [{}, {"acknowledged": False}])
+    async with opensearch.connect(CONFIG, connection_class=connection) as sink:
+        with pytest.raises(SearchRejected, match="did not acknowledge"):
+            await sink.switch_alias("papers", "papers-v2-new")
+
+
+async def test_missing_alias_is_distinct_from_unreachable_opensearch() -> None:
+    async with opensearch.connect(CONFIG, connection_class=answering(404, {})) as sink:
+        assert await sink.alias_target("papers") is None
+    async with opensearch.connect(CONFIG, connection_class=answering(0, {})) as sink:
+        with pytest.raises(SearchUnavailable, match="read alias"):
+            await sink.alias_target("papers")

@@ -70,7 +70,7 @@ async def test_a_base_pass_writes_every_document_with_the_largest_version(
     ]
     command = IndexPapers(index=INDEX, release=NEXT, part=1, parts=1)
     result = await service(source, sink, bulk_bytes=1).index(command)
-    assert (result.created, result.written, result.deleted, result.documents) == (True, 2, 0, 2)
+    assert (result.created, result.written, result.deleted) == (True, 2, 0)
     assert result.requests == 2 and sink.requests == [(INDEX, 1), (INDEX, 1)]
     mapping, settings = sink.created[INDEX]
     assert set(mapping["properties"]) == PAPERS.names
@@ -113,7 +113,7 @@ async def test_a_diff_pass_deletes_a_papers_tombstone_and_drops_a_tombstoned_abs
     ]
     command = IndexPapers(index=INDEX, release=NEXT, from_release=RELEASE, part=2, parts=3)
     result = await service(source, sink).index(command)
-    assert (result.created, result.written, result.deleted, result.documents) == (False, 1, 2, 1)
+    assert (result.created, result.written, result.deleted) == (False, 1, 2)
     assert sink.indices[INDEX]["103"] == (V2 + 1, None)
     assert sink.indices[INDEX]["105"] == (V2 + 2, None)
     version, source_102 = sink.indices[INDEX]["102"]
@@ -143,8 +143,8 @@ async def test_a_slice_with_no_rows_writes_nothing() -> None:
     source, sink = FakeSearchSource(), FakeSearchSink()
     command = IndexPapers(index=INDEX, release=RELEASE, part=3, parts=4)
     result = await service(source, sink).index(command)
-    assert (result.written, result.deleted, result.requests, result.documents) == (0, 0, 0, 0)
-    assert (sink.requests, sink.refreshed, result.created) == ([], [INDEX], True)
+    assert (result.written, result.deleted, result.requests) == (0, 0, 0)
+    assert (sink.requests, sink.refreshed, result.created) == ([], [], True)
     # The parts tile the keys once, and a part with no key of its own has no range at all.
     top = 2**64 - 1
     assert [CorpusSlice(part=p, parts=3).bounds(101, top) for p in (1, 2, 3)] == [

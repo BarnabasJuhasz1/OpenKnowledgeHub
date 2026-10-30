@@ -484,6 +484,14 @@ class FakeSearchSource:
 class FakeSearchSink:
     """An index per name, keeping each id's latest version and its source, or None once deleted."""
 
+    target: str | None = None
+
+    async def alias_target(self, alias: str) -> str | None:
+        return self.target
+
+    async def switch_alias(self, alias: str, index: str) -> None:
+        self.target = index
+
     def __init__(self) -> None:
         self.indices: dict[str, dict[str, tuple[int, dict[str, Any] | None]]] = {}
         self.created: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
@@ -521,9 +529,6 @@ class FakeSearchSink:
 
     async def refresh(self, index: str) -> None:
         self.refreshed.append(index)
-
-    async def count(self, index: str) -> int:
-        return sum(1 for _, source in self.indices[index].values() if source is not None)
 
 
 def paper_row(corpusid: int, version: int, **values: Any) -> PaperRow:  # noqa: ANN401

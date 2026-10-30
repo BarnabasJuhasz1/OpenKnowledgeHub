@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_core.search.models import BulkOperation, IndexName, SourceRows
+from openknowledge_core.search.progress import Indexed, SearchState
 
 
 class SearchSource(Protocol):
@@ -34,7 +35,19 @@ class SearchSource(Protocol):
         ...
 
 
+class IndexedProgress(Protocol):
+    async def state(self) -> SearchState: ...
+
+    async def receipts(self) -> list[Indexed]: ...
+
+    async def record(self, receipt: Indexed) -> None: ...
+
+
 class SearchSink(Protocol):
+    async def alias_target(self, alias: IndexName) -> IndexName | None: ...
+
+    async def switch_alias(self, alias: IndexName, index: IndexName) -> None: ...
+
     async def exists(self, index: IndexName) -> bool: ...
 
     async def create_index(
@@ -50,5 +63,3 @@ class SearchSink(Protocol):
         ...
 
     async def refresh(self, index: IndexName) -> None: ...
-
-    async def count(self, index: IndexName) -> int: ...

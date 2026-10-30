@@ -110,7 +110,9 @@ class SearchIndexService:
         so it refuses a missing index before it asks for anything. Either reads the bounds once.
         """
         if command.from_release is None:
-            low, high = command.corpus_slice.bounds(*await self._source.bounds(command.release))
+            low, high = command.corpus_slice.bounds(
+                *(command.bounds or await self._source.bounds(command.release))
+            )
             rows = await self._source.base(command.release, low, high)
             created = await self._ensure(command.index)
         else:
@@ -119,7 +121,9 @@ class SearchIndexService:
                     f"{command.index} does not exist; a base pass must create it before a diff "
                     "pass writes into it"
                 )
-            low, high = command.corpus_slice.bounds(*await self._source.bounds(command.release))
+            low, high = command.corpus_slice.bounds(
+                *(command.bounds or await self._source.bounds(command.release))
+            )
             rows = await self._source.diff(command.from_release, command.release, low, high)
             created = False
         written = deleted = requests = 0
@@ -139,7 +143,6 @@ class SearchIndexService:
         if batch:
             sent = await self._flush(command.index, batch)
             written, deleted, requests = written + sent[0], deleted + sent[1], requests + 1
-        await self._sink.refresh(command.index)
         return IndexPapersResult(
             index=command.index,
             release=command.release,
@@ -150,7 +153,6 @@ class SearchIndexService:
             written=written,
             deleted=deleted,
             requests=requests,
-            documents=await self._sink.count(command.index),
         )
 
     async def settle(self, command: SettleIndex) -> SettleIndexResult:
@@ -162,6 +164,9 @@ class SearchIndexService:
         await self._sink.set_refresh_interval(command.index, None)
         await self._sink.refresh(command.index)
         return SettleIndexResult(index=command.index, refresh_interval="default")
+
+    async def prepare(self, index: IndexName) -> None:
+        await self._ensure(index)
 
     async def _ensure(self, index: IndexName) -> bool:
         """Create the index with the contract's mapping unless it exists; True when created.
