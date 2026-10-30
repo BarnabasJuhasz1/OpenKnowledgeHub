@@ -1,15 +1,9 @@
-"""The search source's side of ClickHouse: the latest ``papers`` and ``abstracts`` row per key.
+"""Read the latest paper, abstract and TLDR rows for each search document.
 
-The base query reads ``papers`` with ``FINAL``, which keeps one row per key and hides the
-tombstones, since a deleted paper has no document. It reads ``abstracts`` as the diff query reads
-both tables: the latest row per key by ``version``, tombstones included, because an abstract
-tombstone's version is part of its document's version, and the base and diff passes must give
-one table state one version. The diff query takes the keys that a release after ``from_release``
-touched in either table. Both read ``version``, ``source_release`` and ``is_deleted`` next to the
-fields a document needs, and pair the rows of the two tables by corpus ID in the query, whose
-rows stream in rather than load whole. A part's range is cut, as ``CorpusSlice`` says, from the
-smallest and largest key at the release, which ``bounds`` reads, so parts computed days apart
-tile the same keys whatever was loaded in between.
+Base papers use FINAL to hide tombstones. Text joins and diff papers retain the latest
+row including tombstones, whose versions contribute to the document version. A diff
+reads keys touched in any of the three tables. Joins stay within the part's corpus ID
+range and stream without a final sort; bounds tile the keys at the requested release.
 """
 
 from __future__ import annotations
@@ -23,7 +17,7 @@ from pydantic import ValidationError
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_core.ingestion.errors import TableRejected
-from openknowledge_core.search.models import AbstractRow, PaperRow, SourceRows
+from openknowledge_core.search.models import AbstractRow, PaperRow, SourceRows, TldrRow
 
 PAPER_FIELDS = (
     "externalids",
@@ -41,14 +35,18 @@ PAPER_FIELDS = (
     "publicationtypes",
     "publicationdate",
     "journal_name",
+    "journal_volume",
+    "journal_pages",
 )
 _PAPER_COLUMNS = (
     "corpusid, version, source_release, is_deleted, externalids, url, title, authors, venue, "
     "publicationvenueid, year, referencecount, citationcount, influentialcitationcount, "
     "isopenaccess, arrayMap(f -> f.category, s2fieldsofstudy) AS s2fieldsofstudy, "
-    "publicationtypes, publicationdate, journal.name AS journal_name"
+    "publicationtypes, publicationdate, journal.name AS journal_name, "
+    "journal.volume AS journal_volume, journal.pages AS journal_pages"
 )
 _ABSTRACT_COLUMNS = "corpusid, version, source_release, is_deleted, abstract"
+_TLDR_COLUMNS = "corpusid, version, source_release, is_deleted, text"
 _RANGE = "corpusid BETWEEN {low:UInt64} AND {high:UInt64}"
 _AT = "source_release <= {release:Date}"
 _AFTER = "source_release > {from_release:Date}"
@@ -62,6 +60,10 @@ _PROJECTION = ", ".join(
         "a.source_release AS abstract_release",
         "a.is_deleted AS abstract_deleted",
         "a.abstract AS abstract",
+        "t.version AS tldr_version",
+        "t.source_release AS tldr_release",
+        "t.is_deleted AS tldr_deleted",
+        "t.text AS tldr",
     ]
 )
 # Unmatched abstracts come back null, and named tuples as objects, whatever the server's defaults.
@@ -81,25 +83,37 @@ LEFT JOIN (
     WHERE {_RANGE} AND {_AT}
     {_LATEST}
 ) AS a ON a.corpusid = p.corpusid
+LEFT JOIN (
+    SELECT {_TLDR_COLUMNS} FROM tldrs
+    WHERE {_RANGE} AND {_AT}
+    {_LATEST}
+) AS t ON t.corpusid = p.corpusid
 {_SETTINGS}"""
 DIFF_QUERY = f"""
 WITH touched AS (
     SELECT corpusid FROM papers WHERE {_RANGE} AND {_AFTER} AND {_AT}
     UNION DISTINCT
     SELECT corpusid FROM abstracts WHERE {_RANGE} AND {_AFTER} AND {_AT}
+    UNION DISTINCT
+    SELECT corpusid FROM tldrs WHERE {_RANGE} AND {_AFTER} AND {_AT}
 )
-SELECT t.corpusid AS corpusid, {_PROJECTION}
-FROM touched AS t
+SELECT touched.corpusid AS corpusid, {_PROJECTION}
+FROM touched
 LEFT JOIN (
     SELECT {_PAPER_COLUMNS} FROM papers
     WHERE {_RANGE} AND {_AT} AND corpusid IN (SELECT corpusid FROM touched)
     {_LATEST}
-) AS p ON p.corpusid = t.corpusid
+) AS p ON p.corpusid = touched.corpusid
 LEFT JOIN (
     SELECT {_ABSTRACT_COLUMNS} FROM abstracts
     WHERE {_RANGE} AND {_AT} AND corpusid IN (SELECT corpusid FROM touched)
     {_LATEST}
-) AS a ON a.corpusid = t.corpusid
+) AS a ON a.corpusid = touched.corpusid
+LEFT JOIN (
+    SELECT {_TLDR_COLUMNS} FROM tldrs
+    WHERE {_RANGE} AND {_AT} AND corpusid IN (SELECT corpusid FROM touched)
+    {_LATEST}
+) AS t ON t.corpusid = touched.corpusid
 {_SETTINGS}"""
 
 
@@ -162,4 +176,13 @@ def source_rows(row: dict[str, Any]) -> SourceRows:
             is_deleted=row["abstract_deleted"],
             abstract=row["abstract"],
         )
-    return SourceRows(corpusid=row["corpusid"], paper=paper, abstract=abstract)
+    tldr = None
+    if row["tldr_version"] is not None:
+        tldr = TldrRow(
+            corpusid=row["corpusid"],
+            version=row["tldr_version"],
+            source_release=row["tldr_release"],
+            is_deleted=row["tldr_deleted"],
+            text=row["tldr"],
+        )
+    return SourceRows(corpusid=row["corpusid"], paper=paper, abstract=abstract, tldr=tldr)

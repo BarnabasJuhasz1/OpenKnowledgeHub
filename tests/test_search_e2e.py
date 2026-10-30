@@ -91,7 +91,7 @@ def test_a_base_pass_then_a_diff_pass_keep_the_index_current(ports: dict[str, st
         found = document(ports, corpusid)
         assert found is not None, corpusid
         assert found["_source"].get("abstract") == expected.get(corpusid), corpusid
-        assert (found["_version"], found["_source"]["contract_version"]) == (version_of(BASE), 1)
+        assert (found["_version"], found["_source"]["contract_version"]) == (version_of(BASE), 2)
     code, output = okp_search(ports, command="settle")
     assert code == 0, output
     index_settings = httpx.get(f"http://127.0.0.1:{ports['OPENSEARCH_PORT']}/{INDEX}/_settings")

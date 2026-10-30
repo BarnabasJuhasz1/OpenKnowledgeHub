@@ -717,3 +717,57 @@ def test_a_snapshot_flags_the_keys_a_newer_release_no_longer_lists(tmp_path: Pat
     assert table() == (1, {"a": (third, False), "b": (second, True)})
     at(fourth, ["b"], upsert)
     assert table()[1]["b"] == (fourth, False)
+
+
+@needs_clickhouse
+def test_search_joins_current_text_and_tldr_only_changes(tmp_path: Path) -> None:
+    from openknowledge_adapters.clickhouse.search import BASE_QUERY, DIFF_QUERY, source_rows
+    from openknowledge_core.search import IndexDocument, document_operation
+
+    setup = (
+        up()
+        + """
+    INSERT INTO papers (corpusid, journal, source_release, source_object, is_deleted)
+    VALUES (1, ('Nature', '1-9', 'IV'), '2026-10-06', 'test', 0);
+    INSERT INTO papers (corpusid, source_release, source_object, is_deleted)
+    VALUES (2, '2026-10-06', 'test', 0),
+           (3, '2026-10-06', 'test', 0), (5, '2026-10-06', 'test', 1);
+    INSERT INTO abstracts (corpusid, abstract, source_release, source_object, is_deleted)
+    VALUES (1, 'abstract', '2026-10-13', 'test', 0);
+    INSERT INTO tldrs (corpusid, text, source_release, source_object, is_deleted)
+    VALUES (1, 'old', '2026-10-06', 'test', 0),
+           (1, 'summary', '2026-10-20', 'test', 0),
+           (2, 'old', '2026-10-06', 'test', 0),
+           (2, NULL, '2026-10-20', 'test', 1),
+           (4, 'orphan', '2026-10-20', 'test', 0),
+           (5, 'deleted paper', '2026-10-20', 'test', 0);
+    """
+    )
+    parameters = dict(low="1", high="5", release="2026-10-20", from_release="2026-10-13")
+    base = clickhouse_local(
+        setup + BASE_QUERY.replace("SETTINGS", "FORMAT JSONEachRow SETTINGS"),
+        tmp_path / "base",
+        **parameters,
+    )
+    diff = clickhouse_local(
+        setup + DIFF_QUERY.replace("SETTINGS", "FORMAT JSONEachRow SETTINGS"),
+        tmp_path / "diff",
+        **parameters,
+    )
+    assert {row["corpusid"] for row in base} == {1, 2, 3}
+    assert {row["corpusid"] for row in diff} == {1, 2, 4, 5}
+    for rows in (base, diff):
+        operations = {row["corpusid"]: document_operation(source_rows(row), 2) for row in rows}
+        live, gone = operations[1], operations[2]
+        assert isinstance(live, IndexDocument) and isinstance(gone, IndexDocument)
+        assert live.document.tldr == "summary"
+        assert live.document.journal is not None
+        assert live.document.journal.model_dump() == {
+            "name": "Nature",
+            "volume": "IV",
+            "pages": "1-9",
+        }
+        assert gone.document.tldr is None
+        assert live.version == 41492 and gone.version == 41493
+    assert operations[4] is None
+    assert operations[5] is not None and operations[5].version == 41492

@@ -1,6 +1,6 @@
 """Write one corpus ID slice of the paper search documents, as a base pass or a diff pass.
 
-A document's version is the larger ``version`` of the rows it was built from, a delete carries
+A document's version is the largest ``version`` of the rows it was built from, a delete carries
 the same, and every write uses OpenSearch's ``external_gte`` versioning. So a slice can be run
 again at the same or a newer release: an equal version is accepted again, and a pass over an
 older release is refused rather than applied, as long as OpenSearch still remembers a deleted
@@ -36,17 +36,18 @@ BULK_BYTES = 5 * 1024 * 1024
 
 
 def document_operation(rows: SourceRows, contract_version: int) -> BulkOperation | None:
-    """The write one corpus ID needs, or None for an abstract whose paper the table never had.
+    """The write one corpus ID needs, or None for text whose paper the table never had.
 
-    A papers tombstone becomes a delete at the larger version of the two rows, which is the
-    tombstone's unless an abstracts row is newer, so the delete is never below the document it
-    removes. An abstracts tombstone leaves the document without an abstract, at that version.
+    A papers tombstone becomes a delete at the largest version of the three rows, which is the
+    tombstone's unless an abstract or TLDR row is newer, so the delete is never below the
+    document it removes. An abstract or TLDR tombstone removes that text at its version.
     """
     paper = rows.paper
     if paper is None:
         return None
     abstract = rows.abstract
-    version = paper.version if abstract is None else max(paper.version, abstract.version)
+    tldr = rows.tldr
+    version = max(row.version for row in (paper, abstract, tldr) if row is not None)
     if paper.is_deleted:
         return DeleteDocument(id=str(paper.corpusid), version=version)
     known = ExternalIds.model_fields
@@ -54,12 +55,20 @@ def document_operation(rows: SourceRows, contract_version: int) -> BulkOperation
         corpusid=str(paper.corpusid),
         title=paper.title,
         abstract=None if abstract is None or abstract.is_deleted else abstract.abstract,
+        tldr=None if tldr is None or tldr.is_deleted else tldr.text,
         authors=paper.authors,
         venue=paper.venue,
         publicationvenueid=paper.publicationvenueid,
         year=paper.year,
         publicationdate=paper.publicationdate,
-        journal=None if paper.journal_name is None else Journal(name=paper.journal_name),
+        journal=(
+            Journal(name=paper.journal_name, volume=paper.journal_volume, pages=paper.journal_pages)
+            if any(
+                value is not None
+                for value in (paper.journal_name, paper.journal_volume, paper.journal_pages)
+            )
+            else None
+        ),
         externalids=ExternalIds.model_validate(
             {kind: value for kind, value in paper.externalids.items() if kind in known}
         ),

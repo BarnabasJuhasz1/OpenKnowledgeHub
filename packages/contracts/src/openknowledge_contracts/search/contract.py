@@ -20,6 +20,10 @@ type Json = dict[str, Any]
 CONTRACT_VERSION = "contract_version"
 # The types whose mapping is more than their name.
 _MAPPINGS: dict[str, Json] = {
+    # Lucene refuses a term over 32766 bytes and fails the whole bulk item. 8191 characters of
+    # up to 4 bytes each stay below it; a longer value stays in _source but is not indexed.
+    "keyword": {"type": "keyword", "ignore_above": 8191},
+    "text": {"type": "text", "analyzer": "standard"},
     "english": {"type": "text", "analyzer": "english"},
     "date": {"type": "date", "format": "strict_date", "ignore_malformed": True},
 }
@@ -33,6 +37,8 @@ class SearchField:
         name: The key in the document.
         type: The mapping type. An ``object`` field maps its ``fields`` and nothing else.
         fields: The fields of an object, in order.
+        normalizer: The keyword normalizer for case-insensitive filters.
+        subfields: Alternate scalar mappings of the same source value.
         dynamic: ``False`` for an object whose unlisted keys stay out of the index, as set on
             the object itself; ``None`` inherits the mapping's own setting.
     """
@@ -41,12 +47,21 @@ class SearchField:
     type: FieldType
     fields: tuple[SearchField, ...] = ()
     dynamic: bool | None = None
+    normalizer: Literal["lowercase"] | None = None
+    subfields: tuple[SearchField, ...] = ()
 
     def __post_init__(self) -> None:
         if (self.type == "object") != bool(self.fields):
             raise ValueError(f"{self.name}: only an object field has fields, and it needs some")
         if self.dynamic is not None and self.type != "object":
             raise ValueError(f"{self.name}: only an object field sets dynamic")
+        if self.normalizer is not None and self.type != "keyword":
+            raise ValueError(f"{self.name}: only a keyword field sets a normalizer")
+        if self.subfields and self.type not in ("text", "english", "keyword"):
+            raise ValueError(f"{self.name}: only text or keyword fields have subfields")
+        if any(field.type == "object" or field.subfields for field in self.subfields):
+            raise ValueError(f"{self.name}: subfields must be scalar without subfields")
+        _distinct(self.name, self.subfields)
         _distinct(self.name, self.fields)
 
 
@@ -114,6 +129,9 @@ def index_body(contract: SearchContract, *, shards: int) -> IndexBody:
                 "number_of_replicas": 0,
                 "codec": "zstd",
                 "refresh_interval": "-1",
+                "analysis": {
+                    "normalizer": {"lowercase": {"type": "custom", "filter": ["lowercase"]}}
+                },
             },
         },
     )
@@ -124,6 +142,10 @@ def _properties(fields: tuple[SearchField, ...]) -> Json:
     for field in fields:
         if field.type != "object":
             properties[field.name] = dict(_MAPPINGS.get(field.type, {"type": field.type}))
+            if field.normalizer is not None:
+                properties[field.name]["normalizer"] = field.normalizer
+            if field.subfields:
+                properties[field.name]["fields"] = _properties(field.subfields)
             continue
         mapped: Json = {"type": "object"}
         if field.dynamic is not None:
