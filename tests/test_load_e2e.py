@@ -551,8 +551,14 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
                 ).splitlines()
             ]
             assert found == [
-                {"citing": 101, "cited": 102, "isinfluential": True, "intents": mask}
-                for mask in (0, 2, 7)
+                {
+                    "citing": 101,
+                    "cited": 102,
+                    "isinfluential": True,
+                    "intents": mask,
+                    **({"citationid": citationid} if table == "citation_edges_out" else {}),
+                }
+                for mask, citationid in ((0, 6270000005), (2, 6270000001), (7, 6270000004))
             ]
     edges = "SELECT count() FROM applied WHERE target LIKE 'citation_edges_%' AND release = "
     assert query(ports, edges + "'2026-10-20'") == "4\n"
