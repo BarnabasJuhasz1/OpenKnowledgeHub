@@ -102,7 +102,7 @@ as diffs advance; refresh `core_baselines` after installing a replacement base.
 Sync stages log start/end and one elapsed-time heartbeat every five minutes while waiting;
 heartbeats indicate the runner is alive, not verified server progress. Citation rebuild logs
 separate recovery, outgoing/incoming builds, count validation, and publication stages, including
-standalone `okp s2 build-citation-edges` runs. No additional ClickHouse grants are needed.
+standalone `okp s2 build-read-tables` runs. No additional ClickHouse grants are needed.
 
 Each executed sync run publishes an `s2-sync-results` Markdown artifact in Prefect's run
 Artifacts tab, with dataset releases/outcomes, edge counts, stage durations and image/version
@@ -151,8 +151,8 @@ To get past it, stop citation loads, run `RENAME TABLE citations TO citations_le
 The old checkpoints no longer count and stay in place. Drop `citations_legacy` once that load passes its checks.
 Migration 00015 adds `citation_edges_out` and `citation_edges_in`, slim tables ordered for
 outgoing and incoming neighbourhood lookups. The sync rebuilds them after citations takes a new
-release; rebuild them manually with `okp s2 build-citation-edges` or the unscheduled Prefect
-deployment `s2-build-citation-edges/control-vm`. All three take the shared `clickhouse` limit.
+release; rebuild them manually with `okp s2 build-read-tables` or the unscheduled Prefect
+deployment `s2-build-read-tables/control-vm`. All three take the shared `clickhouse` limit.
 They retain duplicate citing/cited pairs, so readers use `DISTINCT`, and they are plain
 MergeTree, so a query with `FINAL` on them fails. `intents` is a mask of background (1),
 methodology (2) and result (4); a null and an empty list both give 0, and other values are dropped.

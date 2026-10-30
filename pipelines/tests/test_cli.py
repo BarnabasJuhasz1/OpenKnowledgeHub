@@ -209,7 +209,7 @@ def test_serve_offers_the_load_flow_by_module_path(monkeypatch: pytest.MonkeyPat
         deployments.s2_sync,
         deployments.s2_load,
         deployments.s2_load_diff,
-        deployments.s2_build_citation_edges,
+        deployments.s2_build_read_tables,
         deployments.s2_batch_download,
         deployments.s2_batch_download_diff,
         deployments.s2_batch_download_fulltext,
@@ -425,7 +425,7 @@ def test_archive_cli_routes_explicit_commands(
 
 @pytest.mark.parametrize(
     "arguments",
-    [["archive-fulltext", "--release", "2026-10-13", *TARGET], ["sync"], ["build-citation-edges"]],
+    [["archive-fulltext", "--release", "2026-10-13", *TARGET], ["sync"], ["build-read-tables"]],
 )
 def test_managed_requires_effective_server_before_flow(
     monkeypatch: pytest.MonkeyPatch, arguments: list[str]
@@ -435,7 +435,7 @@ def test_managed_requires_effective_server_before_flow(
 
     monkeypatch.setattr(deployments, "s2_batch_download_fulltext", forbidden)
     monkeypatch.setattr(deployments, "s2_sync", forbidden)
-    monkeypatch.setattr(deployments, "s2_build_citation_edges", forbidden)
+    monkeypatch.setattr(deployments, "s2_build_read_tables", forbidden)
     with temporary_settings({PREFECT_API_URL: None}):
         code, output = okp(*arguments)
     assert code == 1

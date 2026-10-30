@@ -9,17 +9,17 @@ from uuid import UUID
 import httpx
 import pytest
 
-from openknowledge_adapters.clickhouse.citation_edges import ClickHouseCitationEdges
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
+from openknowledge_adapters.clickhouse.read_tables import ClickHouseReadTables
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_contracts.tables.clickhouse import version_expression
 from openknowledge_contracts.tables.s2 import CONTRACTS
-from openknowledge_core.ingestion.citation_edges import EDGE_TABLES
 from openknowledge_core.ingestion.errors import TableRejected, TableUnavailable
+from openknowledge_core.ingestion.read_tables import READ_TABLES
 from tests.fakes.ports import NEXT, PRODUCER, RELEASE, applied_release, clock
 
 
-@pytest.mark.parametrize("table", EDGE_TABLES)
+@pytest.mark.parametrize("table", READ_TABLES)
 @pytest.mark.parametrize(
     "state", ["current_empty", "missing_table", "replaced", "missing_marker", "stale"]
 )
@@ -28,7 +28,7 @@ async def test_edge_freshness_checks_live_identity(table: str, state: str) -> No
         query = request.content.decode()
         if "FROM system.tables" in query:
             assert "database = currentDatabase()" in query
-            assert all(name in query for name in EDGE_TABLES)
+            assert all(name in query for name in READ_TABLES)
             # Empty tables still have identities. No row-count heuristic is needed.
             rows = [
                 json.dumps(
@@ -37,7 +37,7 @@ async def test_edge_freshness_checks_live_identity(table: str, state: str) -> No
                         "uuid": str(UUID(int=2 if name == table and state == "replaced" else 1)),
                     }
                 )
-                for name in EDGE_TABLES
+                for name in READ_TABLES
                 if not (name == table and state == "missing_table")
             ]
             return httpx.Response(200, text="\n".join(rows))
@@ -54,7 +54,7 @@ async def test_edge_freshness_checks_live_identity(table: str, state: str) -> No
         base_url="http://clickhouse", transport=httpx.MockTransport(respond)
     ) as http:
         client = ClickHouseClient(http, database="test")
-        edges = ClickHouseCitationEdges(
+        edges = ClickHouseReadTables(
             client, ClickHouseTables(client, raw_bucket="raw"), ClickHouseAppliedReleases(client)
         )
         assert await edges.is_current(NEXT) is (state == "current_empty")
@@ -62,9 +62,9 @@ async def test_edge_freshness_checks_live_identity(table: str, state: str) -> No
 
 @pytest.mark.parametrize("failure", ["disk", "partial_swap"])
 async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: str) -> None:
-    live = {name: UUID(int=index + 1) for index, name in enumerate(EDGE_TABLES)}
+    live = {name: UUID(int=index + 1) for index, name in enumerate(READ_TABLES)}
     initial = live.copy()
-    staging = {f"{name}_new": UUID(int=index + 3) for index, name in enumerate(EDGE_TABLES)}
+    staging = {f"{name}_new": UUID(int=index + 3) for index, name in enumerate(READ_TABLES)}
     events: list[str] = []
     markers: list[str] = []
     failed = False
@@ -97,7 +97,7 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             assert staging == {}, "capacity must be measured after reclaiming both copies"
             rows = [{"free_space": 0 if failure == "disk" and not retry else 1200}]
         elif "SELECT name, total_rows" in query:
-            rows = [{"name": name, "total_rows": 100} for name in ("citations", *EDGE_TABLES)]
+            rows = [{"name": name, "total_rows": 100} for name in ("citations", *READ_TABLES)]
         elif "FROM system.tables" in query:
             name = request.url.params["param_table"]
             rows = [{"uuid": str(live.get(name, UUID(int=1))), "total_rows": 100}]
@@ -111,8 +111,8 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             assert name.endswith("_new")
             if (
                 failure == "partial_swap"
-                and name == f"{EDGE_TABLES[0]}_new"
-                and live[EDGE_TABLES[0]] != initial[EDGE_TABLES[0]]
+                and name == f"{READ_TABLES[0]}_new"
+                and live[READ_TABLES[0]] != initial[READ_TABLES[0]]
                 and not failed
             ):
                 failed = True
@@ -141,7 +141,7 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         base_url="http://clickhouse", transport=httpx.MockTransport(respond)
     ) as http:
         client = ClickHouseClient(http, database="test")
-        edges = ClickHouseCitationEdges(
+        edges = ClickHouseReadTables(
             client,
             ClickHouseTables(client, raw_bucket="raw"),
             ClickHouseAppliedReleases(client),
@@ -153,13 +153,13 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             assert live == initial and not markers
             assert not any(event.startswith("CREATE TABLE") for event in events)
         else:
-            assert live[EDGE_TABLES[0]] != initial[EDGE_TABLES[0]]
-            assert live[EDGE_TABLES[1]] == initial[EDGE_TABLES[1]]
-            assert staging[f"{EDGE_TABLES[0]}_new"] == initial[EDGE_TABLES[0]]
+            assert live[READ_TABLES[0]] != initial[READ_TABLES[0]]
+            assert live[READ_TABLES[1]] == initial[READ_TABLES[1]]
+            assert staging[f"{READ_TABLES[0]}_new"] == initial[READ_TABLES[0]]
         assert stages[-1] == (
-            "citation edges: preflight and recovery"
+            "read tables: preflight and recovery"
             if failure == "disk"
-            else f"citation edges: publish {EDGE_TABLES[0]}",
+            else f"read tables: publish {READ_TABLES[0]}",
             "failed",
         )
         stages.clear()
@@ -167,13 +167,13 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         result = await edges.build(PRODUCER, clock)
         assert result.source_release == NEXT
         assert [name for name, state in stages if state == "completed"] == [
-            "citation edges: preflight and recovery",
-            *(f"citation edges: build {name}" for name in EDGE_TABLES),
-            "citation edges: validate counts",
-            *(f"citation edges: publish {name}" for name in EDGE_TABLES),
+            "read tables: preflight and recovery",
+            *(f"read tables: build {name}" for name in READ_TABLES),
+            "read tables: validate counts",
+            *(f"read tables: publish {name}" for name in READ_TABLES),
         ]
         assert staging == {}
-        for name, marker in zip(EDGE_TABLES, markers[-2:], strict=True):
+        for name, marker in zip(READ_TABLES, markers[-2:], strict=True):
             recorded = json.loads(marker)
             assert recorded["target"] == name
             assert recorded["target_uuid"] == str(live[name])

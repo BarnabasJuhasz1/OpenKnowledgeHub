@@ -266,7 +266,7 @@ async def test_closed_admission_refuses_edge_build_before_clickhouse(
     monkeypatch.setattr(deployments, "LoadSettings", LoadSettings.model_construct)
     monkeypatch.setattr(admission, "execution", closed)
     monkeypatch.setattr(deployments, "one_clickhouse_loader", capacity)
-    monkeypatch.setattr(bootstrap, "open_citation_edges", forbidden)
+    monkeypatch.setattr(bootstrap, "open_read_tables", forbidden)
     with pytest.raises(admission.AdmissionError, match="closed"):
-        await deployments.s2_build_citation_edges.fn()
+        await deployments.s2_build_read_tables.fn()
     assert events == ["capacity", "released"]

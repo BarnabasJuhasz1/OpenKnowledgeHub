@@ -473,7 +473,7 @@ def test_measured_failure_retains_partial_writes_and_failure(
     assert query(ports, f"SELECT count() FROM applied WHERE release = '{release}'") == "0\n"
 
 
-def test_build_citation_edges(ports: dict[str, str]) -> None:
+def test_build_read_tables(ports: dict[str, str]) -> None:
     query(ports, "TRUNCATE TABLE citations")
     deployments.ensure_limits()
     env = {
@@ -483,7 +483,7 @@ def test_build_citation_edges(ports: dict[str, str]) -> None:
     }
 
     def build() -> Result:
-        return CliRunner().invoke(cli.main, ["s2", "build-citation-edges"], env=env)
+        return CliRunner().invoke(cli.main, ["s2", "build-read-tables"], env=env)
 
     refused = build()
     assert refused.exit_code != 0 and "no completed release" in refused.output

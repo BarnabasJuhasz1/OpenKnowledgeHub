@@ -29,10 +29,10 @@ from openknowledge_core.ingestion import (
     LoadDiffResult,
     WatchdogResult,
 )
-from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.coordinator import SyncResult
 from openknowledge_core.ingestion.errors import IngestionError
 from openknowledge_core.ingestion.families import ArchiveFamily, require_family
+from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 from openknowledge_pipelines import admission, bootstrap
 from openknowledge_pipelines.flows.s2_sync import run_sync
 from openknowledge_pipelines.flows.sync_observability import SyncObservation
@@ -99,13 +99,13 @@ async def s2_load_diff(command: LoadDiff) -> LoadDiffResult:
         return await bootstrap.load_flows(service, settings).diff.fn(command)
 
 
-@flow(name="s2-build-citation-edges", persist_result=False, retries=0)
-async def s2_build_citation_edges() -> BuildCitationEdgesResult:
+@flow(name="s2-build-read-tables", persist_result=False, retries=0)
+async def s2_build_read_tables() -> BuildReadTablesResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]
     async with (
         one_clickhouse_loader(wait=False),
         admission.execution(),
-        bootstrap.open_citation_edges(settings) as edges,
+        bootstrap.open_read_tables(settings) as edges,
     ):
         return await edges.build(bootstrap.producer(settings), lambda: datetime.now(UTC))
 
@@ -203,7 +203,7 @@ async def s2_sync() -> SyncResult:
     observation = SyncObservation(producer=bootstrap.producer(settings))
     try:
         async with bootstrap.open_sync(
-            settings, admitted_source, one_clickhouse_loader, edge_stage=observation.stage
+            settings, admitted_source, one_clickhouse_loader, read_table_stage=observation.stage
         ) as services:
             return await run_sync(settings.sync, services, observation=observation)
     finally:
@@ -270,7 +270,7 @@ def serve() -> None:
             concurrency_limit=1,
         ),
         RunnerDeployment.from_flow(
-            s2_build_citation_edges,
+            s2_build_read_tables,
             DEPLOYMENT,
             entrypoint_type=EntrypointType.MODULE_PATH,
             concurrency_limit=1,

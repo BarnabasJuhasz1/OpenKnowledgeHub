@@ -134,7 +134,7 @@ class SyncObservation(BaseModel):
                 f"{len(item.archived)} | {len(item.loaded)} |"
             )
         lines.extend(["", "## Citation edges", ""])
-        edges = self.result.citation_edges
+        edges = self.result.read_tables
         if edges is not None:
             lines.extend(
                 [
@@ -151,7 +151,7 @@ class SyncObservation(BaseModel):
         else:
             lines.append(
                 "Rebuild failed; publication may be partial. Check logs and applied releases."
-                if self.result.citation_edges_failure is not None
+                if self.result.read_tables_failure is not None
                 else "No completed rebuild recorded (already current, skipped, or interrupted)."
             )
         lines.extend(

@@ -9,9 +9,9 @@ from typing import NamedTuple
 
 import httpx
 
-from openknowledge_adapters.clickhouse.citation_edges import ClickHouseCitationEdges
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.config import ClickHouseConfig
+from openknowledge_adapters.clickhouse.read_tables import ClickHouseReadTables
 from openknowledge_adapters.clickhouse.search import ClickHouseSearchSource
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_adapters.clickhouse.telemetry import ClickHouseLoadTelemetry
@@ -32,7 +32,7 @@ def keepalive_options() -> list[tuple[int, int, int]]:
 
 
 class ClickHouse(NamedTuple):
-    edges: ClickHouseCitationEdges
+    read_tables: ClickHouseReadTables
     tables: ClickHouseTables
     applied: ClickHouseAppliedReleases
     telemetry: ClickHouseLoadTelemetry
@@ -44,7 +44,7 @@ async def connect(
     config: ClickHouseConfig,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
-    edge_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
+    read_table_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
 ) -> AsyncGenerator[ClickHouse, None]:
     http = httpx.AsyncClient(
         base_url=str(config.url),
@@ -61,7 +61,7 @@ async def connect(
         tables = ClickHouseTables(client, raw_bucket=config.raw_bucket)
         applied = ClickHouseAppliedReleases(client)
         yield ClickHouse(
-            edges=ClickHouseCitationEdges(client, tables, applied, edge_stage),
+            read_tables=ClickHouseReadTables(client, tables, applied, read_table_stage),
             tables=tables,
             applied=applied,
             telemetry=ClickHouseLoadTelemetry(client),

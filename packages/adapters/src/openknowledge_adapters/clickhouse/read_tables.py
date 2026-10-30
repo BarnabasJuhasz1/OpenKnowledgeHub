@@ -8,17 +8,17 @@ from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_contracts.manifests import Producer
-from openknowledge_core.ingestion.citation_edges import (
-    EDGE_TABLES,
-    BuildCitationEdgesResult,
-    CitationEdgeTableResult,
-)
 from openknowledge_core.ingestion.errors import TableAccessDenied, TableRejected
 from openknowledge_core.ingestion.models import AppliedRelease, held_release
+from openknowledge_core.ingestion.read_tables import (
+    READ_TABLES,
+    BuildReadTablesResult,
+    ReadTableResult,
+)
 
-OUT, IN = EDGE_TABLES
-TABLES = EDGE_TABLES
-QUERY_ID = "citation-edges"
+OUT, IN = READ_TABLES
+TABLES = READ_TABLES
+QUERY_ID = "citation-edges"  # Keep the recovery key stable across the rename.
 SOURCES = {
     OUT: "SELECT citingcorpusid, assumeNotNull(citedcorpusid), isinfluential, "
     "toUInt8(bitOr(bitOr("
@@ -44,7 +44,7 @@ def _no_stage(name: str) -> AbstractAsyncContextManager[None]:
     return nullcontext()
 
 
-class ClickHouseCitationEdges:
+class ClickHouseReadTables:
     def __init__(
         self,
         client: ClickHouseClient,
@@ -75,14 +75,14 @@ class ClickHouseCitationEdges:
 
     async def build(
         self, producer: Producer, clock: Callable[[], datetime]
-    ) -> BuildCitationEdgesResult:
+    ) -> BuildReadTablesResult:
         source = await self._tables.table("citations")
         release = held_release(source, await self._applied.latest(source.name))
         if release is None:
             raise TableRejected(
                 "citations holds no completed release; finish its load before building edges"
             )
-        async with self._stage("citation edges: preflight and recovery"):
+        async with self._stage("read tables: preflight and recovery"):
             # A cancelled run's insert keeps running on the server. Replacing its query ID stops it,
             # unlike KILL QUERY, without a grant.
             await self._client.post(
@@ -93,18 +93,18 @@ class ClickHouseCitationEdges:
             for table in TABLES:
                 await self._client.post(f"DROP TABLE IF EXISTS {table}_new SYNC")
             live = await self._preflight()
-        results: dict[str, CitationEdgeTableResult] = {}
+        results: dict[str, ReadTableResult] = {}
         for table in TABLES:
             started = monotonic()
-            async with self._stage(f"citation edges: build {table}"):
+            async with self._stage(f"read tables: build {table}"):
                 await self._client.post(f"CREATE TABLE {table}_new AS {table}")
                 rows = await self._client.written(
                     f"INSERT INTO {table}_new (citing, cited, isinfluential, intents) "
                     f"{SOURCES[table]} {SETTINGS}",
                     query_id=QUERY_ID,
                 )
-                results[table] = CitationEdgeTableResult(rows=rows, seconds=monotonic() - started)
-        async with self._stage("citation edges: validate counts"):
+                results[table] = ReadTableResult(rows=rows, seconds=monotonic() - started)
+        async with self._stage("read tables: validate counts"):
             built = results[OUT].rows
             if results[IN].rows != built:
                 raise TableRejected("citation edge counts differ; no edge tables were swapped")
@@ -116,7 +116,7 @@ class ClickHouseCitationEdges:
         # Validate both directions before publishing either; a failed build can be rerun.
         for table in TABLES:
             started = monotonic()
-            async with self._stage(f"citation edges: publish {table}"):
+            async with self._stage(f"read tables: publish {table}"):
                 await self._client.post(f"EXCHANGE TABLES {table}_new AND {table}")
                 await self._client.post(f"DROP TABLE {table}_new SYNC")
                 await self._applied.record(
@@ -133,7 +133,7 @@ class ClickHouseCitationEdges:
                 results[table] = results[table].model_copy(
                     update={"seconds": results[table].seconds + monotonic() - started}
                 )
-        return BuildCitationEdgesResult(source_release=release, **results)
+        return BuildReadTablesResult(source_release=release, **results)
 
     async def _uuid(self, table: str) -> UUID:
         rows = await self._client.rows(

@@ -44,7 +44,7 @@ async def test_stage_heartbeat_is_sparse_and_stops_on_every_exit(
     observation = diagnostics.SyncObservation()
 
     async def run() -> None:
-        async with observation.stage("citation edges: build citation_edges_out"):
+        async with observation.stage("read tables: build citation_edges_out"):
             await beat.wait()
             if failure is not None:
                 raise failure

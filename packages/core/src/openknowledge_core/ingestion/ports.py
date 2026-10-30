@@ -8,7 +8,6 @@ from typing import Literal, Protocol
 
 from openknowledge_contracts.datasets import DatasetName, ReleaseId, ReleaseMetadata
 from openknowledge_contracts.manifests import ManifestEntry, ObjectPath, ObjectRef, Producer
-from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.families import ArchiveFamily
 from openknowledge_core.ingestion.measurement import LoadSnapshot
 from openknowledge_core.ingestion.models import (
@@ -27,6 +26,7 @@ from openknowledge_core.ingestion.models import (
     StoredObject,
     TableState,
 )
+from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 
 
 class ReleaseCatalog(Protocol):
@@ -139,11 +139,11 @@ class LoadTelemetry(Protocol):
     async def snapshot(self, dataset: DatasetName) -> LoadSnapshot: ...
 
 
-class CitationEdges(Protocol):
+class ReadTables(Protocol):
     async def is_current(self, release: ReleaseId) -> bool:
         """Both live tables have publication markers for this release and their UUIDs."""
         ...
 
     async def build(
         self, producer: Producer, clock: Callable[[], datetime]
-    ) -> BuildCitationEdgesResult: ...
+    ) -> BuildReadTablesResult: ...

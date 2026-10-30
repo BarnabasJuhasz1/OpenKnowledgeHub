@@ -9,7 +9,6 @@ from prefect import get_run_logger
 from openknowledge_contracts.manifests import DatasetManifest
 from openknowledge_contracts.tables.s2 import CONTRACTS
 from openknowledge_core.ingestion.archive_progress import ArchiveProgress
-from openknowledge_core.ingestion.citation_edges import BuildCitationEdgesResult
 from openknowledge_core.ingestion.commands import (
     DownloadDataset,
     DownloadDiff,
@@ -36,11 +35,12 @@ from openknowledge_core.ingestion.families import ArchiveFamily, archive_family
 from openknowledge_core.ingestion.models import held_release
 from openknowledge_core.ingestion.ports import (
     AppliedReleases,
-    CitationEdges,
+    ReadTables,
     ReleaseCatalog,
     ShardJobs,
     TableLoader,
 )
+from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 from openknowledge_pipelines.flows.s2_batch_download import S2BatchDownloadFlows, recover_jobs
 from openknowledge_pipelines.flows.s2_load import S2LoadFlows
 from openknowledge_pipelines.flows.sync_observability import SyncObservation
@@ -57,8 +57,8 @@ class SyncServices:
     loads: S2LoadFlows
     s2_lease: Callable[[], AbstractAsyncContextManager[None]]
     load_lease: Callable[[], AbstractAsyncContextManager[None]]
-    edges: CitationEdges
-    build_edges: Callable[[], Awaitable[BuildCitationEdgesResult]]
+    read_tables: ReadTables
+    build_read_tables: Callable[[], Awaitable[BuildReadTablesResult]]
 
 
 @asynccontextmanager
@@ -114,8 +114,8 @@ async def _run_sync(
             raise
         except IngestionError as exc:
             item.outcome, item.reason = "failed", str(exc)
-    await _citation_edges(services, result)
-    if result.citation_edges_failure is not None or any(
+    await _read_tables(services, result)
+    if result.read_tables_failure is not None or any(
         item.outcome in ("failed", "needs_base") for item in result.datasets
     ):
         _incomplete(result)
@@ -226,18 +226,20 @@ async def _core(command: SyncCommand, services: SyncServices, item: DatasetSyncR
         item.final = new
 
 
-async def _citation_edges(services: SyncServices, result: SyncResult) -> None:
+async def _read_tables(services: SyncServices, result: SyncResult) -> None:
     """Rebuild the edge tables when citations holds a release they were not built from."""
     citations = next(item for item in result.datasets if item.dataset == "citations")
     if citations.outcome not in ("synced", "current"):
         return
     try:
         async with services.load_lease():
-            if citations.final is not None and await services.edges.is_current(citations.final):
+            if citations.final is not None and await services.read_tables.is_current(
+                citations.final
+            ):
                 return
-            result.citation_edges = await services.build_edges()
+            result.read_tables = await services.build_read_tables()
     except IngestionError as exc:
-        result.citation_edges_failure = str(exc)
+        result.read_tables_failure = str(exc)
 
 
 def _incomplete(result: SyncResult) -> None:
