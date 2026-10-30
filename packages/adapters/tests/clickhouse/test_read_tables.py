@@ -4,18 +4,26 @@ import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from pathlib import Path
 from uuid import UUID
 
 import httpx
 import pytest
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
-from openknowledge_adapters.clickhouse.read_tables import ClickHouseReadTables
+from openknowledge_adapters.clickhouse.read_tables import (
+    COLUMNS,
+    IN,
+    OUT,
+    SOURCES,
+    ClickHouseReadTables,
+)
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_contracts.tables.clickhouse import version_expression
 from openknowledge_contracts.tables.s2 import CONTRACTS
 from openknowledge_core.ingestion.errors import TableRejected, TableUnavailable
 from openknowledge_core.ingestion.read_tables import READ_TABLES
+from tests.clickhouse_local import clickhouse_local, needs_clickhouse, up
 from tests.fakes.ports import NEXT, PRODUCER, RELEASE, applied_release, clock
 
 
@@ -63,7 +71,9 @@ async def test_read_tables_current_only_for_all_sources(table: str, state: str) 
         ) is (state == "current_empty")
 
 
-@pytest.mark.parametrize("failure", ["disk", "partial_swap", "markers", "lost_answer"])
+@pytest.mark.parametrize(
+    "failure", ["disk", "missing_column", "partial_swap", "markers", "lost_answer"]
+)
 async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: str) -> None:
     live = {name: UUID(int=index + 1) for index, name in enumerate(READ_TABLES)}
     initial = live.copy()
@@ -90,7 +100,9 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         nonlocal failed, next_uuid
         query = request.url.params.get("query", request.content.decode())
         events.append(query)
-        if "FROM system.columns" in query:
+        if "FROM system.columns" in query and "citation_edges_out" in query:
+            rows = [] if failure == "missing_column" and not retry else [{"name": "citationid"}]
+        elif "FROM system.columns" in query:
             rows = [
                 {
                     "default_expression": version_expression(
@@ -112,7 +124,7 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             return httpx.Response(200, text=marker)
         elif "FROM system.disks" in query:
             assert staging == {}, "capacity must be measured after reclaiming both copies"
-            rows = [{"free_space": 0 if failure == "disk" and not retry else 11200}]
+            rows = [{"free_space": 0 if failure == "disk" and not retry else 12000}]
         elif "SELECT name, total_rows" in query:
             rows = [
                 {"name": name, "total_rows": 100} for name in ("papers", "citations", *READ_TABLES)
@@ -168,8 +180,12 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             ClickHouseAppliedReleases(client),
             stage,
         )
-        with pytest.raises(TableRejected if failure == "disk" else TableUnavailable):
+        with pytest.raises(
+            TableRejected if failure in ("disk", "missing_column") else TableUnavailable
+        ) as error:
             await edges.build(PRODUCER, clock)
+        if failure == "missing_column":
+            assert "run migration 00018 before rebuilding" in str(error.value)
         if failure == "markers":
             # The new generation stays live but not current: swapping back is the riskier move.
             assert all(live[name] != initial[name] for name in READ_TABLES) and not markers
@@ -183,10 +199,12 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             return
         else:
             assert live == initial and not markers
-        if failure == "disk":
+        if failure in ("disk", "missing_column"):
             assert not any(event.startswith("CREATE TABLE") for event in events)
         assert stages[-1] == (
-            "read tables: preflight and recovery" if failure == "disk" else "read tables: publish",
+            "read tables: preflight and recovery"
+            if failure in ("disk", "missing_column")
+            else "read tables: publish",
             "failed",
         )
         stages.clear()
@@ -207,3 +225,28 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             assert recorded["target"] == name
             assert recorded["target_uuid"] == str(live[name])
             assert recorded["release"] == NEXT
+
+
+@needs_clickhouse
+def test_edge_rebuild_preserves_live_citation_ids(tmp_path: Path) -> None:
+    sql = f"""
+        {up()}
+        INSERT INTO citations
+            (citationid, citingcorpusid, citedcorpusid, source_release, is_deleted)
+        VALUES (11, 1, 2, '2026-10-01', 0), (12, 1, 2, '2026-10-01', 0),
+               (13, 1, 3, '2026-10-01', 0), (13, 0, NULL, '2026-10-02', 1),
+               (14, 1, NULL, '2026-10-01', 0), (11, 1, 9, '2026-09-01', 0);
+        CREATE TABLE citation_edges_out_new AS citation_edges_out;
+        INSERT INTO citation_edges_out_new ({COLUMNS[OUT]}) {SOURCES[OUT]};
+        CREATE TABLE citation_edges_in_new AS citation_edges_in;
+        INSERT INTO citation_edges_in_new ({COLUMNS[IN]}) {SOURCES[IN]};
+        SELECT citing, cited, citationid FROM citation_edges_out_new
+        ORDER BY citationid FORMAT JSONEachRow;
+        SELECT citing, cited FROM citation_edges_in_new ORDER BY citing, cited FORMAT JSONEachRow;
+    """
+    assert clickhouse_local(sql, tmp_path) == [
+        {"citing": 1, "cited": 2, "citationid": 11},
+        {"citing": 1, "cited": 2, "citationid": 12},
+        {"citing": 1, "cited": 2},
+        {"citing": 1, "cited": 2},
+    ]

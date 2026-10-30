@@ -293,3 +293,23 @@ def test_replays_converge_whatever_order_batches_land_in(
         SELECT corpusid, text FROM tldrs FINAL ORDER BY corpusid FORMAT JSONEachRow;
     """
     assert clickhouse_local(sql, tmp_path) == [{"corpusid": 2, "text": f"r{second}"}]
+
+
+@needs_clickhouse
+def test_edge_citationid_upgrade_and_rollback_preserve_existing_edges(tmp_path: Path) -> None:
+    migration = MIGRATIONS / "00018_add_citation_edges_citationid.sql"
+    upgrade, downgrade = section(migration, "Up"), section(migration, "Down")
+    sql = f"""
+        {section(MIGRATIONS / "00015_create_citation_edges.sql", "Up")}
+        INSERT INTO citation_edges_out VALUES (1, 2, false, 0);
+        {upgrade}
+        {upgrade}
+        SELECT citationid FROM citation_edges_out FORMAT JSONEachRow;
+        {downgrade}
+        {downgrade}
+        SELECT * FROM citation_edges_out FORMAT JSONEachRow;
+    """
+    assert clickhouse_local(sql, tmp_path) == [
+        {"citationid": 0},
+        {"citing": 1, "cited": 2, "isinfluential": False, "intents": 0},
+    ]
