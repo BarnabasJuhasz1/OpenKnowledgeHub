@@ -38,6 +38,7 @@ if TYPE_CHECKING:
     from openknowledge_pipelines.flows.s2_download import S2DownloadFlow
     from openknowledge_pipelines.flows.s2_load import S2LoadFlows
     from openknowledge_pipelines.flows.s2_sync import SyncServices
+    from openknowledge_pipelines.flows.search_index import SearchIndexResult
     from openknowledge_pipelines.flows.watchdog import WatchdogFlow
 
 
@@ -83,15 +84,6 @@ async def open_watchdog(settings: WatchdogSettings) -> AsyncGenerator[WatchdogSe
     config = _clickhouse(settings, settings.watchdog_timeout_seconds)
     async with clickhouse.connect(config) as ch:
         yield WatchdogService(applied=ch.applied, clock=lambda: datetime.now(UTC))
-
-
-@asynccontextmanager
-async def open_search_service(settings: SearchSettings) -> AsyncGenerator[SearchIndexService]:
-    async with (
-        clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
-        opensearch.connect(_opensearch(settings)) as sink,
-    ):
-        yield SearchIndexService(source=ch.search, sink=sink, shards=settings.index_shards)
 
 
 def _gcs(settings: CommonSettings) -> gcs.GcsConfig:
@@ -300,3 +292,24 @@ async def open_read_tables(
         _clickhouse(settings, None), read_table_stage=stage or observer.stage
     ) as ch:
         yield ch.read_tables
+
+
+async def run_search_index(settings: SearchSettings) -> SearchIndexResult:
+    from openknowledge_pipelines import admission
+    from openknowledge_pipelines.flows.search_index import run_index
+
+    async with (
+        clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
+        opensearch.connect(_opensearch(settings)) as sink,
+    ):
+        service = SearchIndexService(source=ch.search, sink=sink, shards=settings.index_shards)
+        return await run_index(
+            service,
+            ch.search,
+            sink,
+            ch.indexed,
+            execution=lambda: admission.execution(release_on_exception=True),
+            base_parts=settings.index_base_parts,
+            diff_parts=settings.index_diff_parts,
+            parallelism=settings.index_parallelism,
+        )

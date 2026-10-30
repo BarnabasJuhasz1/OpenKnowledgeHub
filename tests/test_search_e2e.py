@@ -31,8 +31,11 @@ def okp_search(ports: dict[str, str], *args: str, command: str = "index") -> tup
         "OKP_OPENSEARCH_URL": f"http://127.0.0.1:{ports['OPENSEARCH_PORT']}",
         "OPENSEARCH_PASSWORD": "unused-without-the-security-plugin",
         "OKP_INDEX_SHARDS": "1",
+        "OKP_INDEX_BASE_PARTS": "2",
+        "OKP_INDEX_DIFF_PARTS": "2",
+        "OKP_INDEX_PARALLELISM": "2",
     }
-    result = CliRunner().invoke(cli.main, ["search", command, "--index", INDEX, *args], env=env)
+    result = CliRunner().invoke(cli.main, ["search", command, *args], env=env)
     return result.exit_code, result.output
 
 
@@ -72,9 +75,15 @@ def test_a_base_pass_then_a_diff_pass_keep_the_index_current(ports: dict[str, st
     ran(ports, "load", "--release", BASE, "--dataset", "papers")
     ran(ports, "load", "--release", BASE, "--dataset", "abstracts")
 
-    result = indexed(ports, "--release", BASE, "--range", "1/1")
-    assert (result["created"], result["written"], result["deleted"]) == (True, 5, 0)
-    assert (result["requests"], result["documents"]) == (1, 5)
+    archive(ports, BASE, FIXTURE.with_name("tldrs.jsonl").read_text().splitlines(), "tldrs")
+    ran(ports, "load", "--release", BASE, "--dataset", "tldrs")
+    result = indexed(ports)
+    assert result["outcome"] == "base"
+    physical = result["index"]
+    assert physical.startswith("papers-v2-") and physical != INDEX
+    assert httpx.get(
+        f"http://127.0.0.1:{ports['OPENSEARCH_PORT']}/_alias/papers"
+    ).json().keys() == {physical}
     hits = search(ports, {"match_phrase": {"title": "A Synthetic Paper"}})
     assert [hit["_source"]["corpusid"] for hit in hits] == ["101"]
     hits = search(ports, {"match": {"title": "papers"}})  # stemmed, so it finds each "Paper"
@@ -92,19 +101,20 @@ def test_a_base_pass_then_a_diff_pass_keep_the_index_current(ports: dict[str, st
         assert found is not None, corpusid
         assert found["_source"].get("abstract") == expected.get(corpusid), corpusid
         assert (found["_version"], found["_source"]["contract_version"]) == (version_of(BASE), 2)
-    code, output = okp_search(ports, command="settle")
-    assert code == 0, output
     index_settings = httpx.get(f"http://127.0.0.1:{ports['OPENSEARCH_PORT']}/{INDEX}/_settings")
-    assert "refresh_interval" not in index_settings.json()[INDEX]["settings"]["index"]
+    assert "refresh_interval" not in index_settings.json()[physical]["settings"]["index"]
 
     retitled = {**json.loads(papers[4]), "title": "A Retitled Paper"}
     assert retitled["corpusid"] == 104
     archive_diff(ports, BASE, NEXT, [json.dumps(retitled)], ['{"corpusid": 103}'], dataset="papers")
     ran(ports, "load-diff", "--from-release", BASE, "--release", NEXT, "--dataset", "papers")
-    for _ in range(2):  # the second pass repeats every write, which external_gte accepts
-        result = indexed(ports, "--release", NEXT, "--from-release", BASE, "--range", "1/1")
-        assert (result["created"], result["written"], result["deleted"]) == (False, 1, 1)
-        assert result["documents"] == 4
+    assert indexed(ports)["outcome"].startswith("papers, abstracts")
+    for dataset in ("abstracts", "tldrs"):
+        archive_diff(ports, BASE, NEXT, [], [], dataset=dataset)
+        ran(ports, "load-diff", "--from-release", BASE, "--release", NEXT, "--dataset", dataset)
+    result = indexed(ports)
+    assert result == {"outcome": "diff", "index": physical}
+    assert indexed(ports) == {"outcome": "current", "index": physical}
     assert document(ports, "103") is None
     found = document(ports, "104")
     assert found is not None

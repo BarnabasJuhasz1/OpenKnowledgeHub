@@ -19,6 +19,8 @@ from openknowledge_pipelines import admission
         "acquire",
         "release",
         "body",
+        "body-release",
+        "cancel-release",
         "inactive",
         "cancel",
         "acquire-maintenance",
@@ -66,7 +68,7 @@ async def test_uncertainty_never_replays_or_compensates_counter_mutations(
             slots -= 1
             if failure == "release-timeout":
                 raise httpx.ReadTimeout("response timed out after commit")
-            if failure in ("close-on-release", "read-busy"):
+            if failure in ("close-on-release", "read-busy", "body-release"):
                 return httpx.Response(
                     200, json=[{"id": identity, "name": admission.NAME, "limit": 0}]
                 )
@@ -107,10 +109,10 @@ async def test_uncertainty_never_replays_or_compensates_counter_mutations(
     monkeypatch.setattr(admission, "get_client", client)
 
     async def work() -> None:
-        async with admission.execution():
-            if failure == "body":
+        async with admission.execution(release_on_exception=failure.endswith("-release")):
+            if failure in ("body", "body-release"):
                 raise RuntimeError("external job may survive")
-            if failure == "cancel":
+            if failure in ("cancel", "cancel-release"):
                 raise asyncio.CancelledError
 
     success = failure in ("close-on-release", "read-busy")
@@ -118,10 +120,10 @@ async def test_uncertainty_never_replays_or_compensates_counter_mutations(
         if success:
             await work()
         else:
-            expected = asyncio.CancelledError if failure == "cancel" else RuntimeError
+            expected = asyncio.CancelledError if failure.startswith("cancel") else RuntimeError
             with pytest.raises(expected):
                 await work()
-    released = failure.startswith("release") or success
+    released = failure.startswith("release") or success or failure == "body-release"
     assert increments == 1
     assert decrements == int(released)
     assert slots == (0 if released else 1)

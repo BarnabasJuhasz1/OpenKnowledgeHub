@@ -115,10 +115,12 @@ def _retried[T](call: Callable[[], T]) -> T:
 
 
 @asynccontextmanager
-async def execution() -> AsyncGenerator[None]:
+async def execution(*, release_on_exception: bool = False) -> AsyncGenerator[None]:
     """Hold one admission slot for the work inside.
 
     A failure retains the slot, since it may leave Batch, native or database work alive.
+    Search may release on Exception: it awaits its requests and its writes are idempotent.
+    Cancellation and other BaseExceptions still retain the slot, as does uncertain acquisition.
     """
     _require_server()
     owner = uuid4().hex
@@ -174,8 +176,11 @@ async def execution() -> AsyncGenerator[None]:
         _LOG.warning("Admission acquired owner=%s", owner)
         try:
             yield
-        except BaseException:
-            _LOG.error("Execution failed or interrupted; admission retained owner=%s", owner)
+        except BaseException as exc:
+            if release_on_exception and isinstance(exc, Exception):
+                await _release(client, current.id, owner)
+            else:
+                _LOG.error("Execution failed or interrupted; admission retained owner=%s", owner)
             raise
         await _release(client, current.id, owner)
 
