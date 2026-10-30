@@ -22,7 +22,7 @@ TABLES = READ_TABLES
 QUERY_ID = "citation-edges"  # Keep the recovery key stable across the rename.
 COLUMNS = {
     PAPERS: "corpusid, title, year, venue, citationcount, influentialcitationcount, referencecount",
-    OUT: "citing, cited, isinfluential, intents",
+    OUT: "citing, cited, isinfluential, intents, citationid",
     IN: "citing, cited, isinfluential, intents",
 }
 SOURCES = {
@@ -31,7 +31,7 @@ SOURCES = {
     "toUInt8(bitOr(bitOr("
     "if(has(arrayFlatten(intents), 'background'), 1, 0), "
     "if(has(arrayFlatten(intents), 'methodology'), 2, 0)), "
-    "if(has(arrayFlatten(intents), 'result'), 4, 0))) "
+    "if(has(arrayFlatten(intents), 'result'), 4, 0))), citationid "
     "FROM citations FINAL WHERE citedcorpusid IS NOT NULL",
     # One scan of citations: the incoming table is the outgoing one, sorted the other way.
     IN: f"SELECT citing, cited, isinfluential, intents FROM {OUT}_new",
@@ -46,8 +46,8 @@ BLOCKS = {
     OUT: EDGE_BLOCKS,
     IN: EDGE_BLOCKS,
 }
-BYTES_PER_CITATION = 12
-"""Free disk for both new copies at about 4 bytes an edge each, with room for merges."""
+BYTES_PER_CITATION = 20
+"""Both new copies: 4 bytes each + 5.31 for OUT IDs (synthetic probe), with 50% merge room."""
 BYTES_PER_PAPER = 100
 """Provisional free disk per papers row, pending a measured build."""
 MIN_KEPT = 0.9
@@ -185,6 +185,14 @@ class ClickHouseReadTables:
         found = {row["name"]: int(row["total_rows"] or 0) for row in rows}
         if not set(TABLES) <= found.keys():
             raise TableRejected("the read tables do not exist; run the migrations")
+        columns = await self._client.rows(
+            "SELECT name FROM system.columns WHERE database = currentDatabase() "
+            f"AND table = '{OUT}' AND name = 'citationid'"
+        )
+        if not columns:
+            raise TableRejected(
+                "citation_edges_out.citationid is missing; run migration 00018 before rebuilding"
+            )
         try:
             disk = await self._client.rows(
                 "SELECT free_space FROM system.disks WHERE name = 'default'"
