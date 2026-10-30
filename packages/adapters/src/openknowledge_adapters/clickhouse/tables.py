@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from uuid import UUID
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.load_sql import (
@@ -132,6 +133,16 @@ class ClickHouseAppliedReleases:
             "INSERT INTO applied FORMAT JSONEachRow",
             data="\n".join(item.model_dump_json() for item in applied),
         )
+
+    async def took(self, target: str, target_uuid: UUID, release: ReleaseId) -> bool:
+        rows = await self._client.rows(
+            "SELECT 1 FROM applied WHERE target = {target:String} "
+            "AND target_uuid = {uuid:UUID} AND release = {release:String} LIMIT 1",
+            target=target,
+            uuid=str(target_uuid),
+            release=release,
+        )
+        return bool(rows)
 
     async def latest(self, target: str) -> AppliedRelease | None:
         rows = await self._client.rows(

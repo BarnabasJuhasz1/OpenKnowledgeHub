@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Literal, Protocol
+from uuid import UUID
 
 from openknowledge_contracts.datasets import DatasetName, ReleaseId, ReleaseMetadata
 from openknowledge_contracts.manifests import ManifestEntry, ObjectPath, ObjectRef, Producer
@@ -102,6 +103,8 @@ class TableLoader(Protocol):
 
 
 class AppliedReleases(Protocol):
+    async def took(self, target: str, target_uuid: UUID, release: ReleaseId) -> bool: ...
+
     async def record(self, applied: AppliedRelease) -> None: ...
 
     async def latest(self, target: str) -> AppliedRelease | None:

@@ -1,4 +1,5 @@
 import json
+from uuid import UUID
 
 import httpx
 import pytest
@@ -91,3 +92,22 @@ async def test_citations_require_enrichment_versions_before_checkpoint_reuse(cur
             with pytest.raises(TableRejected, match="populated legacy table must be preserved"):
                 await service.prepare(command)
     assert len(queries) == 2  # No checkpoint lookup, archive scan, or INSERT on legacy versions.
+
+
+@pytest.mark.parametrize("found", [False, True])
+async def test_applied_took_matches_target_uuid_and_release(found: bool) -> None:
+    target_uuid = UUID("00000000-0000-0000-0000-000000000001")
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        assert request.content.decode() == (
+            "SELECT 1 FROM applied WHERE target = {target:String} "
+            "AND target_uuid = {uuid:UUID} AND release = {release:String} LIMIT 1 "
+            "FORMAT JSONEachRow"
+        )
+        assert request.url.params["param_target"] == "papers"
+        assert request.url.params["param_uuid"] == str(target_uuid)
+        assert request.url.params["param_release"] == "2026-10-06"
+        return httpx.Response(200, text='{"1":1}\n' if found else "")
+
+    async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
+        assert await ch.applied.took("papers", target_uuid, "2026-10-06") is found
