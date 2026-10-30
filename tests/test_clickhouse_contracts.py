@@ -299,17 +299,31 @@ def test_replays_converge_whatever_order_batches_land_in(
 def test_edge_citationid_upgrade_and_rollback_preserve_existing_edges(tmp_path: Path) -> None:
     migration = MIGRATIONS / "00018_add_citation_edges_citationid.sql"
     upgrade, downgrade = section(migration, "Up"), section(migration, "Down")
+    migration_in = MIGRATIONS / "00019_add_citation_edges_in_citationid.sql"
+    upgrade_in, downgrade_in = section(migration_in, "Up"), section(migration_in, "Down")
     sql = f"""
         {section(MIGRATIONS / "00015_create_citation_edges.sql", "Up")}
         INSERT INTO citation_edges_out VALUES (1, 2, false, 0);
+        INSERT INTO citation_edges_in VALUES (1, 2, false, 0);
         {upgrade}
         {upgrade}
+        {upgrade_in}
+        {upgrade_in}
         SELECT citationid FROM citation_edges_out FORMAT JSONEachRow;
+        SELECT citationid FROM citation_edges_in FORMAT JSONEachRow;
+        {downgrade_in}
+        {downgrade_in}
+        SELECT * FROM citation_edges_in FORMAT JSONEachRow;
+        SELECT name FROM system.columns
+        WHERE table = 'citation_edges_out' AND name = 'citationid' FORMAT JSONEachRow;
         {downgrade}
         {downgrade}
         SELECT * FROM citation_edges_out FORMAT JSONEachRow;
     """
     assert clickhouse_local(sql, tmp_path) == [
         {"citationid": 0},
+        {"citationid": 0},
+        {"citing": 1, "cited": 2, "isinfluential": False, "intents": 0},
+        {"name": "citationid"},
         {"citing": 1, "cited": 2, "isinfluential": False, "intents": 0},
     ]

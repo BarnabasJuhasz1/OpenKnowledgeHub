@@ -93,7 +93,9 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         query = request.url.params.get("query", request.content.decode())
         events.append(query)
         if "FROM system.columns" in query and "citation_edges_out" in query:
-            rows = [] if failure == "missing_column" and not retry else [{"name": "citationid"}]
+            rows = [{"table": "citation_edges_out"}]
+            if failure != "missing_column" or retry:
+                rows.append({"table": "citation_edges_in"})
         elif "FROM system.columns" in query:
             rows = [
                 {
@@ -116,7 +118,7 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             return httpx.Response(200, text=marker)
         elif "FROM system.disks" in query:
             assert staging == {}, "capacity must be measured after reclaiming both copies"
-            rows = [{"free_space": 0 if failure == "disk" and not retry else 12000}]
+            rows = [{"free_space": 0 if failure == "disk" and not retry else 12800}]
         elif "SELECT name, total_rows" in query:
             rows = [
                 {"name": name, "total_rows": 100} for name in ("papers", "citations", *READ_TABLES)
@@ -177,7 +179,9 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         ) as error:
             await edges.build(PRODUCER, clock)
         if failure == "missing_column":
-            assert "run migration 00018 before rebuilding" in str(error.value)
+            assert "citation_edges_in.citationid is missing; run migration 00019" in str(
+                error.value
+            )
         if failure == "markers":
             # The new generation stays live but not current: swapping back is the riskier move.
             assert all(live[name] != initial[name] for name in READ_TABLES) and not markers

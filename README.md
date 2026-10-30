@@ -157,14 +157,14 @@ deployment `s2-build-read-tables/control-vm`. All three take the shared `clickho
 The edge tables retain duplicate citing/cited pairs, so readers use `DISTINCT`, and they are plain
 MergeTree, so a query with `FINAL` on them fails. `intents` is a mask of background (1),
 methodology (2) and result (4); a null and an empty list both give 0, and other values are dropped.
-Migration 00018 adds `citationid` to `citation_edges_out` so readers can fetch citation contexts by primary key; existing rows read 0 until rebuilt after 00018.
+Migrations 00018 and 00019 add `citationid` to `citation_edges_out` and `citation_edges_in` so readers can fetch citation contexts by primary key; existing rows read 0 until rebuilt after the migration.
 A rebuild requires completed papers and citations releases and records each table’s source
-release and live UUID in applied. It needs about 20 bytes of free disk per citations row plus
+release and live UUID in applied. It needs about 28 bytes of free disk per citations row plus
 a provisional 100 bytes per papers row. All three counts are validated before any swap; each
 must retain at least 90% of its live table (an empty live table passes). A refusal leaves the
 live tables unchanged; each sync repeats the rebuild until an operator resolves the refusal. A cancelled rebuild's
 insert keeps running in ClickHouse; the next rebuild stops it and removes stale staging tables
-before checking disk capacity. Apply migrations 00017 and 00018 before the first rebuild. After deploying,
+before checking disk capacity. Apply migrations 00017 to 00019 before the first rebuild. After deploying,
 run s2-build-read-tables once, verify all three applied markers at their source releases, and
 delete the old s2-build-citation-edges deployment from Prefect.
 

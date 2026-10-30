@@ -28,11 +28,12 @@ def test_edge_rebuild_preserves_live_citation_ids(tmp_path: Path) -> None:
         INSERT INTO citation_edges_in_new ({COLUMNS[IN]}) {SOURCES[IN]};
         SELECT citing, cited, citationid FROM citation_edges_out_new
         ORDER BY citationid FORMAT JSONEachRow;
-        SELECT citing, cited FROM citation_edges_in_new ORDER BY citing, cited FORMAT JSONEachRow;
+        SELECT citing, cited, citationid FROM citation_edges_in_new
+        ORDER BY citationid FORMAT JSONEachRow;
     """
     assert clickhouse_local(sql, tmp_path) == [
         {"citing": 1, "cited": 2, "citationid": 11},
         {"citing": 1, "cited": 2, "citationid": 12},
-        {"citing": 1, "cited": 2},
-        {"citing": 1, "cited": 2},
+        {"citing": 1, "cited": 2, "citationid": 11},
+        {"citing": 1, "cited": 2, "citationid": 12},
     ]
