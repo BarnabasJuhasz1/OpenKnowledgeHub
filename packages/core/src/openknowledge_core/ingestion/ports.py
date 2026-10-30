@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Literal, Protocol
 
@@ -140,8 +140,8 @@ class LoadTelemetry(Protocol):
 
 
 class ReadTables(Protocol):
-    async def is_current(self, release: ReleaseId) -> bool:
-        """Both live tables have publication markers for this release and their UUIDs."""
+    async def is_current(self, releases: Mapping[str, ReleaseId]) -> bool:
+        """All live read tables have markers for their source releases and UUIDs."""
         ...
 
     async def build(

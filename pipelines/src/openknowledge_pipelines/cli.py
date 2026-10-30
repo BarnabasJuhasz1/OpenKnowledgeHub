@@ -321,7 +321,7 @@ def verify_base_manifest(dataset: str, release: str, bucket: str, prefix: str) -
     _run(run, admission_required=False)
 
 
-@s2.command("build-read-tables", help="Rebuild both ClickHouse citation edge tables.")
+@s2.command("build-read-tables", help="Rebuild the ClickHouse read tables.")
 def build_read_tables() -> None:
     from openknowledge_pipelines import deployments
 

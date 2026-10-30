@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import signal
-from collections.abc import AsyncGenerator, Callable
+from collections.abc import AsyncGenerator, Callable, Mapping
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import replace
 from datetime import timedelta
@@ -49,6 +49,7 @@ from openknowledge_core.ingestion.errors import (
 from openknowledge_core.ingestion.models import PreparedDiff, TableState
 from openknowledge_core.ingestion.read_tables import (
     READ_TABLES,
+    SOURCE_OF,
     BuildReadTablesResult,
     ReadTableResult,
 )
@@ -230,12 +231,14 @@ class Cycle:
             ]
             return await self.loader.finish_diff(prepared, outcomes)
 
-        async def edges_current(release: str) -> bool:
+        async def edges_current(releases: Mapping[str, str]) -> bool:
             assert self.loading, "freshness must be checked under the shared lease"
             built = [await self.applied.latest(table) for table in READ_TABLES]
             return all(
-                row is not None and row.release == release and row.target_uuid == self.tables.uuid
-                for row in built
+                row is not None
+                and row.release == releases[SOURCE_OF[table]]
+                and row.target_uuid == self.tables.uuid
+                for table, row in zip(READ_TABLES, built, strict=True)
             )
 
         async def build_read_tables() -> BuildReadTablesResult:
@@ -245,11 +248,18 @@ class Cycle:
             citations = await self.applied.latest("citations")
             assert citations is not None
             self.events.append(("edges", "citations", citations.release))
+            releases: dict[str, str] = {}
+            for name in ("papers", "citations"):
+                marker = await self.applied.latest(name)
+                assert marker is not None
+                releases[name] = marker.release
             for table in READ_TABLES:
-                await self.applied.record(applied_release(table, citations.release, timedelta()))
-            built = ReadTableResult(rows=1, seconds=0)
+                await self.applied.record(
+                    applied_release(table, releases[SOURCE_OF[table]], timedelta())
+                )
             return BuildReadTablesResult(
-                source_release=citations.release, citation_edges_out=built, citation_edges_in=built
+                source_releases=releases,
+                tables={table: ReadTableResult(rows=1, seconds=0) for table in READ_TABLES},
             )
 
         return s2_sync.SyncServices(
@@ -343,12 +353,15 @@ async def test_old_read_tables_rebuild_at_final_release_before_archives(cycle: C
     command = cycle.command.model_copy(update={"enabled_archives": frozenset(LARGE_ORDER)})
     services = cycle.services()
     async with cycle.lease(), cycle.load_lease():
-        assert await services.read_tables.is_current(RELEASE)
-        assert not await services.read_tables.is_current(NEXT)
+        assert await services.read_tables.is_current({"papers": RELEASE, "citations": RELEASE})
+        assert not await services.read_tables.is_current({"papers": NEXT, "citations": NEXT})
     result = await s2_sync.run_sync(command, services)
     citations = next(item for item in result.datasets if item.dataset == "citations")
     assert (citations.start, citations.final) == (RELEASE, NEXT)
-    assert result.read_tables is not None and result.read_tables.source_release == NEXT
+    assert result.read_tables is not None and result.read_tables.source_releases == {
+        "papers": NEXT,
+        "citations": NEXT,
+    }
     assert [event for event in cycle.events if event[0] == "edges"] == [
         ("edges", "citations", NEXT)
     ]
@@ -377,10 +390,35 @@ async def test_read_tables_rebuild_once_per_citations_release(
     await cycle.applied.record(applied_release(READ_TABLES[0], NEXT, timedelta()))
     assert await cycle.applied.latest(READ_TABLES[1]) is None
     result = await s2_sync.run_sync(command, cycle.services())
-    assert result.read_tables is not None and result.read_tables.source_release == NEXT
+    assert result.read_tables is not None and result.read_tables.source_releases == {
+        "papers": NEXT,
+        "citations": NEXT,
+    }
     assert cycle.events[0] == ("edges", "citations", NEXT)
     cycle.events.clear()
     await s2_sync.run_sync(command, cycle.services())
+    assert cycle.events == []
+
+
+async def test_read_tables_rebuild_when_only_papers_moved(cycle: Cycle) -> None:
+    for dataset in CORE_ORDER:
+        await cycle.applied.record(
+            applied_release(dataset, RELEASE if dataset == "papers" else NEXT, timedelta())
+        )
+    for table in READ_TABLES:
+        await cycle.applied.record(
+            applied_release(table, RELEASE if SOURCE_OF[table] == "papers" else NEXT, timedelta())
+        )
+    services = cycle.services()
+    result = await s2_sync.run_sync(cycle.command, services)
+    papers = next(item for item in result.datasets if item.dataset == "papers")
+    citations = next(item for item in result.datasets if item.dataset == "citations")
+    assert papers.outcome == "synced" and citations.outcome == "current"
+    assert result.read_tables is not None
+    assert result.read_tables.source_releases == {"papers": NEXT, "citations": NEXT}
+    assert sum(event[0] == "edges" for event in cycle.events) == 1
+    cycle.events.clear()
+    await s2_sync.run_sync(cycle.command, services)
     assert cycle.events == []
 
 

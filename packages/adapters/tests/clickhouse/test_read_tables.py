@@ -21,9 +21,10 @@ from tests.fakes.ports import NEXT, PRODUCER, RELEASE, applied_release, clock
 
 @pytest.mark.parametrize("table", READ_TABLES)
 @pytest.mark.parametrize(
-    "state", ["current_empty", "missing_table", "replaced", "missing_marker", "stale"]
+    "state",
+    ["current_empty", "missing_table", "replaced", "missing_marker", "stale", "papers_moved"],
 )
-async def test_edge_freshness_checks_live_identity(table: str, state: str) -> None:
+async def test_read_tables_current_only_for_all_sources(table: str, state: str) -> None:
     def respond(request: httpx.Request) -> httpx.Response:
         query = request.content.decode()
         if "FROM system.tables" in query:
@@ -46,7 +47,7 @@ async def test_edge_freshness_checks_live_identity(table: str, state: str) -> No
         target = request.url.params["param_target"]
         if target == table and state == "missing_marker":
             return httpx.Response(200)
-        release = RELEASE if target == table and state == "stale" else NEXT
+        release = NEXT if target == table and state == "stale" else RELEASE
         marker = applied_release(target, release, timedelta())
         return httpx.Response(200, text=marker.model_dump_json())
 
@@ -57,7 +58,9 @@ async def test_edge_freshness_checks_live_identity(table: str, state: str) -> No
         edges = ClickHouseReadTables(
             client, ClickHouseTables(client, raw_bucket="raw"), ClickHouseAppliedReleases(client)
         )
-        assert await edges.is_current(NEXT) is (state == "current_empty")
+        assert await edges.is_current(
+            {"papers": NEXT if state == "papers_moved" else RELEASE, "citations": RELEASE}
+        ) is (state == "current_empty")
 
 
 @pytest.mark.parametrize("failure", ["disk", "partial_swap"])
@@ -88,16 +91,29 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         query = request.url.params.get("query", request.content.decode())
         events.append(query)
         if "FROM system.columns" in query:
-            rows = [{"default_expression": version_expression(CONTRACTS["citations"])}]
+            rows = [
+                {
+                    "default_expression": version_expression(
+                        CONTRACTS[request.url.params["param_table"]]
+                    )
+                }
+            ]
         elif "FROM applied" in query:
-            return httpx.Response(
-                200, text=applied_release("citations", NEXT, timedelta()).model_dump_json()
+            target = request.url.params["param_target"]
+            marker = next(
+                (marker for marker in reversed(markers) if json.loads(marker)["target"] == target),
+                applied_release(target, NEXT, timedelta()).model_dump_json(),
             )
+            return httpx.Response(200, text=marker)
         elif "FROM system.disks" in query:
             assert staging == {}, "capacity must be measured after reclaiming both copies"
-            rows = [{"free_space": 0 if failure == "disk" and not retry else 1200}]
+            rows = [{"free_space": 0 if failure == "disk" and not retry else 11200}]
         elif "SELECT name, total_rows" in query:
-            rows = [{"name": name, "total_rows": 100} for name in ("citations", *READ_TABLES)]
+            rows = [
+                {"name": name, "total_rows": 100} for name in ("papers", "citations", *READ_TABLES)
+            ]
+        elif "SELECT name, uuid" in query:
+            rows = [{"name": name, "uuid": str(uuid)} for name, uuid in live.items()]
         elif "FROM system.tables" in query:
             name = request.url.params["param_table"]
             rows = [{"uuid": str(live.get(name, UUID(int=1))), "total_rows": 100}]
@@ -109,14 +125,6 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             assert any("replace_running_query = 1" in event for event in events)
             name = query.split()[-2]
             assert name.endswith("_new")
-            if (
-                failure == "partial_swap"
-                and name == f"{READ_TABLES[0]}_new"
-                and live[READ_TABLES[0]] != initial[READ_TABLES[0]]
-                and not failed
-            ):
-                failed = True
-                return httpx.Response(500, text="synthetic post-exchange drop failure")
             staging.pop(name, None)
             rows = []
         elif query.startswith("CREATE TABLE"):
@@ -124,10 +132,13 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             staging[name] = UUID(int=next_uuid)
             next_uuid += 1
             rows = []
-        elif query.startswith("INSERT INTO citation_edges"):
+        elif query.startswith(tuple(f"INSERT INTO {name}_new" for name in READ_TABLES)):
             return httpx.Response(200, headers={"X-ClickHouse-Summary": '{"written_rows":100}'})
         elif query.startswith("EXCHANGE"):
             new, name = query.split()[2], query.split()[4]
+            if failure == "partial_swap" and name == READ_TABLES[1] and not failed:
+                failed = True
+                return httpx.Response(500, text="synthetic exchange failure")
             live[name], staging[new] = staging[new], live[name]
             rows = []
         elif query.startswith("INSERT INTO applied"):
@@ -149,31 +160,26 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         )
         with pytest.raises(TableRejected if failure == "disk" else TableUnavailable):
             await edges.build(PRODUCER, clock)
+        assert live == initial and not markers
         if failure == "disk":
-            assert live == initial and not markers
             assert not any(event.startswith("CREATE TABLE") for event in events)
-        else:
-            assert live[READ_TABLES[0]] != initial[READ_TABLES[0]]
-            assert live[READ_TABLES[1]] == initial[READ_TABLES[1]]
-            assert staging[f"{READ_TABLES[0]}_new"] == initial[READ_TABLES[0]]
         assert stages[-1] == (
-            "read tables: preflight and recovery"
-            if failure == "disk"
-            else f"read tables: publish {READ_TABLES[0]}",
+            "read tables: preflight and recovery" if failure == "disk" else "read tables: publish",
             "failed",
         )
         stages.clear()
         retry = True
         result = await edges.build(PRODUCER, clock)
-        assert result.source_release == NEXT
+        assert result.source_releases == {"papers": NEXT, "citations": NEXT}
+        assert await edges.is_current(result.source_releases)
         assert [name for name, state in stages if state == "completed"] == [
             "read tables: preflight and recovery",
             *(f"read tables: build {name}" for name in READ_TABLES),
             "read tables: validate counts",
-            *(f"read tables: publish {name}" for name in READ_TABLES),
+            "read tables: publish",
         ]
         assert staging == {}
-        for name, marker in zip(READ_TABLES, markers[-2:], strict=True):
+        for name, marker in zip(READ_TABLES, markers[-len(READ_TABLES) :], strict=True):
             recorded = json.loads(marker)
             assert recorded["target"] == name
             assert recorded["target_uuid"] == str(live[name])

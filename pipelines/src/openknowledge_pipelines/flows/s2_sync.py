@@ -227,15 +227,14 @@ async def _core(command: SyncCommand, services: SyncServices, item: DatasetSyncR
 
 
 async def _read_tables(services: SyncServices, result: SyncResult) -> None:
-    """Rebuild the edge tables when citations holds a release they were not built from."""
-    citations = next(item for item in result.datasets if item.dataset == "citations")
-    if citations.outcome not in ("synced", "current"):
+    """Rebuild together when either source moves."""
+    sources = [item for item in result.datasets if item.dataset in ("papers", "citations")]
+    if len(sources) != 2 or any(item.outcome not in ("synced", "current") for item in sources):
         return
+    releases = {item.dataset: item.final for item in sources if item.final is not None}
     try:
         async with services.load_lease():
-            if citations.final is not None and await services.read_tables.is_current(
-                citations.final
-            ):
+            if len(releases) == 2 and await services.read_tables.is_current(releases):
                 return
             result.read_tables = await services.build_read_tables()
     except IngestionError as exc:

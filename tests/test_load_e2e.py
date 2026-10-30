@@ -475,6 +475,7 @@ def test_measured_failure_retains_partial_writes_and_failure(
 
 def test_build_read_tables(ports: dict[str, str]) -> None:
     query(ports, "TRUNCATE TABLE citations")
+    query(ports, "TRUNCATE TABLE papers")
     deployments.ensure_limits()
     env = {
         "OKP_CLICKHOUSE_URL": f"http://127.0.0.1:{ports['CLICKHOUSE_PORT']}",
@@ -505,14 +506,44 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
     query(ports, "SYSTEM STOP MERGES citations")
     tombstone = "INSERT INTO citations (citationid, source_release, is_deleted) VALUES "
     query(ports, tombstone + "(6270000003, '2026-10-21', 1)")
+    papers = [
+        json.loads(line) for line in FIXTURE.with_name("papers.jsonl").read_text().splitlines()
+    ][:3]
+    archive(ports, "2026-10-19", [json.dumps(row) for row in papers], "papers")
+    ran(ports, "load", "--release", "2026-10-19", "--dataset", "papers")
+    query(ports, "SYSTEM STOP MERGES papers")
+    query(
+        ports,
+        "INSERT INTO papers (corpusid, title, source_release, is_deleted) VALUES "
+        "(102, NULL, '2026-10-20', 1), "
+        "(18446744073709551615, 'Latest title', '2026-10-20', 0)",
+    )
     for _ in range(2):
         result = build()
         assert result.exit_code == 0, result.output
         built = json.loads(result.output.splitlines()[-1])
-        assert built["source_release"] == "2026-10-20"
+        assert built["source_releases"] == {"papers": "2026-10-19", "citations": "2026-10-20"}
+        assert built["tables"]["papers_slim"]["rows"] == 2
+        assert query(ports, "SELECT corpusid, title FROM papers_slim ORDER BY corpusid") == (
+            "101\tA Synthetic Paper\n18446744073709551615\tLatest title\n"
+        )
+        markers = [
+            json.loads(line)
+            for line in query(
+                ports,
+                "SELECT target, argMax(release, applied_at) AS release FROM applied "
+                "WHERE target IN ('papers_slim', 'citation_edges_out', 'citation_edges_in') "
+                "GROUP BY target ORDER BY target FORMAT JSONEachRow",
+            ).splitlines()
+        ]
+        assert markers == [
+            {"target": "citation_edges_in", "release": "2026-10-20"},
+            {"target": "citation_edges_out", "release": "2026-10-20"},
+            {"target": "papers_slim", "release": "2026-10-19"},
+        ]
         for table in ("citation_edges_out", "citation_edges_in"):
-            assert built[table]["rows"] == 3
-            assert built[table]["seconds"] > 0
+            assert built["tables"][table]["rows"] == 3
+            assert built["tables"][table]["seconds"] > 0
             found = [
                 json.loads(line)
                 for line in query(
@@ -527,7 +558,8 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
     assert query(ports, edges + "'2026-10-20'") == "4\n"
     query(ports, tombstone + "(6270000004, '2026-10-21', 1), (6270000005, '2026-10-21', 1)")
     shrunk = build()
-    assert shrunk.exit_code != 0 and "no edge tables were swapped" in shrunk.output
+    assert shrunk.exit_code != 0 and "no read tables were swapped" in shrunk.output
     assert query(ports, "SELECT count() FROM citation_edges_in") == "3\n"
     query(ports, "SYSTEM START MERGES citations")
+    query(ports, "SYSTEM START MERGES papers")
     query(ports, "TRUNCATE TABLE citations")
