@@ -6,9 +6,13 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from openknowledge_adapters.clickhouse.read_tables import (
     COLUMNS,
+    DELTA,
     IN,
+    KEY,
     OUT,
     PAPERS,
     SOURCES,
@@ -135,3 +139,18 @@ def test_in_only_rebuild_fills_ids_from_out(tmp_path: Path) -> None:
         {"citing": 2, "cited": 1, "isinfluential": False, "intents": 1, "citationid": 21},
         {"citing": 1, "cited": 2, "isinfluential": True, "intents": 4, "citationid": 22},
     ]
+
+
+@needs_clickhouse
+@pytest.mark.parametrize("source", ["citations", "papers"])
+def test_delta_takes_keys_after_start_up_to_end(source: str, tmp_path: Path) -> None:
+    delta = ";\n".join(delta_sql(source, "2026-10-01", "2026-10-03"))
+    sql = f"""
+        {up()}
+        INSERT INTO {source} ({KEY[source]}, source_release, is_deleted)
+        VALUES (1, '2026-10-01', 0), (2, '2026-10-02', 0), (3, '2026-10-03', 0),
+               (4, '2026-10-04', 0), (5, '2026-10-02', 1);
+        {delta};
+        SELECT key FROM {DELTA[source]} ORDER BY key FORMAT JSONEachRow;
+    """
+    assert clickhouse_local(sql, tmp_path) == [{"key": 2}, {"key": 3}, {"key": 5}]
