@@ -33,6 +33,21 @@ from openknowledge_core.ingestion.read_tables import (
             GroupPlan(path=ReadTablesPath.FULL, start=None, end="2026-10-13"),
         ),
         (
+            {"marker": "2026-10-13", "ids_missing_in": True},
+            True,
+            GroupPlan(path=ReadTablesPath.FULL, start=None, end="2026-10-13"),
+        ),
+        (
+            {"marker": "2026-10-13", "ids_missing_in": True, "source_took_marker": False},
+            False,
+            GroupPlan(path=ReadTablesPath.FULL, start=None, end="2026-10-13"),
+        ),
+        (
+            {"marker": "2026-10-13", "ids_missing_in": True, "ids_missing_out": True},
+            False,
+            GroupPlan(path=ReadTablesPath.FULL, start=None, end="2026-10-13"),
+        ),
+        (
             {"marker": "2026-10-13"},
             False,
             GroupPlan(path=ReadTablesPath.CURRENT, start=None, end="2026-10-13"),
