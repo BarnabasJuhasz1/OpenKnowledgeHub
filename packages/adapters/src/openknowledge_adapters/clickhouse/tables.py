@@ -124,8 +124,13 @@ class ClickHouseAppliedReleases:
         self._client = client
 
     async def record(self, applied: AppliedRelease) -> None:
+        await self.record_all([applied])
+
+    async def record_all(self, applied: Sequence[AppliedRelease]) -> None:
+        """Write the markers in one insert, which ClickHouse applies whole or not at all."""
         await self._client.post(
-            "INSERT INTO applied FORMAT JSONEachRow", data=applied.model_dump_json()
+            "INSERT INTO applied FORMAT JSONEachRow",
+            data="\n".join(item.model_dump_json() for item in applied),
         )
 
     async def latest(self, target: str) -> AppliedRelease | None:

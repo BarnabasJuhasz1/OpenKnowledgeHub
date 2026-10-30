@@ -135,6 +135,8 @@ class ClickHouseReadTables:
                     )
         # EXCHANGE is not atomic across tables, even in one statement. Undo a partial swap so a
         # failure leaves the old generation live, and record nothing until all three are live.
+        # A failed marker insert leaves the new generation live but not current, so the next
+        # sync rebuilds it; swapping back here could strand the edge tables a generation apart.
         async with self._stage("read tables: publish"):
             swapped: list[str] = []
             try:
@@ -145,8 +147,8 @@ class ClickHouseReadTables:
                 for table in reversed(swapped):
                     await self._client.post(f"EXCHANGE TABLES {table}_new AND {table}")
                 raise
-            for table in TABLES:
-                await self._applied.record(
+            await self._applied.record_all(
+                [
                     AppliedRelease(
                         target=table,
                         target_uuid=await self._uuid(table),
@@ -156,7 +158,9 @@ class ClickHouseReadTables:
                         image_digest=producer.image_digest,
                         applied_at=clock(),
                     )
-                )
+                    for table in TABLES
+                ]
+            )
             for table in TABLES:
                 await self._client.post(f"DROP TABLE {table}_new SYNC")
         return BuildReadTablesResult(source_releases=releases, tables=results)

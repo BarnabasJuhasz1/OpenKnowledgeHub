@@ -101,7 +101,12 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         elif "FROM applied" in query:
             target = request.url.params["param_target"]
             marker = next(
-                (marker for marker in reversed(markers) if json.loads(marker)["target"] == target),
+                (
+                    marker
+                    for insert in reversed(markers)
+                    for marker in reversed(insert.splitlines())
+                    if json.loads(marker)["target"] == target
+                ),
                 applied_release(target, NEXT, timedelta()).model_dump_json(),
             )
             return httpx.Response(200, text=marker)
@@ -179,7 +184,8 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             "read tables: publish",
         ]
         assert staging == {}
-        for name, marker in zip(READ_TABLES, markers[-len(READ_TABLES) :], strict=True):
+        # One insert, so a failure cannot leave some tables marked and others not.
+        for name, marker in zip(READ_TABLES, markers[-1].splitlines(), strict=True):
             recorded = json.loads(marker)
             assert recorded["target"] == name
             assert recorded["target_uuid"] == str(live[name])
