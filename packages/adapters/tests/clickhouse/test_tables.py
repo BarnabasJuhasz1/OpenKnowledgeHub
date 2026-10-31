@@ -1,4 +1,5 @@
 import json
+from uuid import UUID
 
 import httpx
 import pytest
@@ -91,3 +92,33 @@ async def test_citations_require_enrichment_versions_before_checkpoint_reuse(cur
             with pytest.raises(TableRejected, match="populated legacy table must be preserved"):
                 await service.prepare(command)
     assert len(queries) == 2  # No checkpoint lookup, archive scan, or INSERT on legacy versions.
+
+
+@pytest.mark.parametrize("found", [False, True])
+async def test_applied_took_and_rebased_match_target_uuid_and_releases(found: bool) -> None:
+    target_uuid = UUID("00000000-0000-0000-0000-000000000001")
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        query, params = request.content.decode(), request.url.params
+        assert (params["param_target"], params["param_uuid"]) == ("papers", str(target_uuid))
+        if "from_release" in query:
+            # A base load records no from_release; a diff records the release it starts from.
+            assert query == (
+                "SELECT 1 FROM applied WHERE target = {target:String} "
+                "AND target_uuid = {uuid:UUID} AND from_release IS NULL "
+                "AND release > {after:Date} AND release <= {through:Date} "
+                "LIMIT 1 FORMAT JSONEachRow"
+            )
+            assert (params["param_after"], params["param_through"]) == ("2026-10-06", "2026-10-13")
+        else:
+            assert query == (
+                "SELECT 1 FROM applied WHERE target = {target:String} "
+                "AND target_uuid = {uuid:UUID} AND release = {release:String} LIMIT 1 "
+                "FORMAT JSONEachRow"
+            )
+            assert params["param_release"] == "2026-10-06"
+        return httpx.Response(200, text='{"1":1}\n' if found else "")
+
+    async with clickhouse.connect(CONFIG, transport=httpx.MockTransport(handle)) as ch:
+        assert await ch.applied.took("papers", target_uuid, "2026-10-06") is found
+        assert await ch.applied.rebased("papers", target_uuid, "2026-10-06", "2026-10-13") is found

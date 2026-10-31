@@ -140,11 +140,18 @@ class SyncObservation(BaseModel):
                 [
                     f"Source releases: {edges.source_releases}",
                     "",
-                    "| Table | Rows | Build and publication seconds |",
+                    "| Table | Rows inserted | Build and publication seconds |",
                     "| --- | --- | --- |",
                     *(
                         f"| {table} | {built.rows} | {built.seconds:.1f} |"
                         for table, built in edges.tables.items()
+                    ),
+                    "",
+                    "| Source | Path | Touched |",
+                    "| --- | --- | --- |",
+                    *(
+                        f"| {source} | {path} | {edges.touched.get(source, '—')} |"
+                        for source, path in edges.paths.items()
                     ),
                 ]
             )

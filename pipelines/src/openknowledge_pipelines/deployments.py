@@ -100,14 +100,14 @@ async def s2_load_diff(command: LoadDiff) -> LoadDiffResult:
 
 
 @flow(name="s2-build-read-tables", persist_result=False, retries=0)
-async def s2_build_read_tables() -> BuildReadTablesResult:
+async def s2_build_read_tables(full: bool = False) -> BuildReadTablesResult:
     settings = LoadSettings()  # pyright: ignore[reportCallIssue]
     async with (
         one_clickhouse_loader(wait=False),
         admission.execution(),
         bootstrap.open_read_tables(settings) as edges,
     ):
-        return await edges.build(bootstrap.producer(settings), lambda: datetime.now(UTC))
+        return await edges.build(bootstrap.producer(settings), lambda: datetime.now(UTC), full=full)
 
 
 async def _download(command: DownloadDataset, family: ArchiveFamily) -> BatchDownloadResult:

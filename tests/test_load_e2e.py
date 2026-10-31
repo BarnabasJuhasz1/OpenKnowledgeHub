@@ -481,10 +481,11 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
         "OKP_CLICKHOUSE_URL": f"http://127.0.0.1:{ports['CLICKHOUSE_PORT']}",
         "CLICKHOUSE_PASSWORD": "openknowledge",
         "OKP_CLICKHOUSE_RAW_BUCKET": BUCKET,
+        "OKP_READ_TABLES_MAX_DELTA_SHARE": "1",
     }
 
-    def build() -> Result:
-        return CliRunner().invoke(cli.main, ["s2", "build-read-tables"], env=env)
+    def build(*args: str) -> Result:
+        return CliRunner().invoke(cli.main, ["s2", "build-read-tables", *args], env=env)
 
     refused = build()
     assert refused.exit_code != 0 and "no completed release" in refused.output
@@ -518,10 +519,11 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
         "(102, NULL, '2026-10-20', 1), "
         "(18446744073709551615, 'Latest title', '2026-10-20', 0)",
     )
-    for _ in range(2):
-        result = build()
+    for args in ((), ("--full",)):
+        result = build(*args)
         assert result.exit_code == 0, result.output
         built = json.loads(result.output.splitlines()[-1])
+        assert built["paths"] == {"papers": "full", "citations": "full"}
         assert built["source_releases"] == {"papers": "2026-10-19", "citations": "2026-10-20"}
         assert built["tables"]["papers_slim"]["rows"] == 2
         assert query(ports, "SELECT corpusid, title FROM papers_slim ORDER BY corpusid") == (
@@ -556,16 +558,45 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
                     "cited": 102,
                     "isinfluential": True,
                     "intents": mask,
-                    **({"citationid": citationid} if table == "citation_edges_out" else {}),
+                    "citationid": citationid,
                 }
                 for mask, citationid in ((0, 6270000005), (2, 6270000001), (7, 6270000004))
             ]
     edges = "SELECT count() FROM applied WHERE target LIKE 'citation_edges_%' AND release = "
     assert query(ports, edges + "'2026-10-20'") == "4\n"
     query(ports, tombstone + "(6270000004, '2026-10-21', 1), (6270000005, '2026-10-21', 1)")
-    shrunk = build()
+    shrunk = build("--full")
     assert shrunk.exit_code != 0 and "no read tables were swapped" in shrunk.output
     assert query(ports, "SELECT count() FROM citation_edges_in") == "3\n"
+    # The diff moves citation 4 to paper 103 and tombstones citation 5.
+    old, new = "2026-10-20", "2026-10-22"
+    moved = next(row for row in rows if row["citationid"] == 6270000004)
+    archive_diff(
+        ports,
+        old,
+        new,
+        updates=[json.dumps({**moved, "citedcorpusid": 103})],
+        deletes=['{"citationid": 6270000005}'],
+        dataset="citations",
+    )
+    ran(ports, "load-diff", "--from-release", old, "--release", new, "--dataset", "citations")
+    updated = build()
+    assert updated.exit_code == 0, updated.output
+    built = json.loads(updated.output.splitlines()[-1])
+    assert built["paths"] == {"papers": "current", "citations": "incremental"}
+    # Citations 3, 4 and 5: the tombstones inserted by hand at 10-21 are in range, besides the diff.
+    assert built["touched"] == {"citations": 3}
+    assert set(built["tables"]) == {"citation_edges_out", "citation_edges_in"}
+    marker = (
+        "SELECT release, from_release FROM applied WHERE target = '{}' ORDER BY applied_at DESC"
+    )
+    for table in ("citation_edges_out", "citation_edges_in"):
+        assert built["tables"][table]["rows"] == 1
+        assert query(
+            ports, f"SELECT citing, cited, citationid FROM {table} ORDER BY citationid"
+        ) == ("101\t102\t6270000001\n101\t103\t6270000004\n")
+        assert query(ports, marker.format(table) + " LIMIT 1") == f"{new}\t{old}\n"
+    assert query(ports, "SELECT count() FROM applied WHERE target = 'papers_slim'") == "2\n"
     query(ports, "SYSTEM START MERGES citations")
     query(ports, "SYSTEM START MERGES papers")
     query(ports, "TRUNCATE TABLE citations")

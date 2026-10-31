@@ -151,20 +151,32 @@ To get past it, stop citation loads, run `RENAME TABLE citations TO citations_le
 The old checkpoints no longer count and stay in place. Drop `citations_legacy` once that load passes its checks.
 Migration 00015 adds `citation_edges_out` and `citation_edges_in`, slim tables ordered for
 outgoing and incoming neighbourhood lookups. Migration 00017 adds papers_slim, narrow paper
-metadata ordered by corpusid. The sync rebuilds all three when papers or citations changes;
-rebuild them manually with `okp s2 build-read-tables` or the unscheduled Prefect
+metadata ordered by corpusid. The sync brings them current when papers or citations changes;
+do it manually with `okp s2 build-read-tables` or the unscheduled Prefect
 deployment `s2-build-read-tables/control-vm`. All three take the shared `clickhouse` limit.
+When a source moved only by diffs since the release its read tables hold, they are updated in place:
+the keys the diffs touched are deleted from them and inserted again from the source. Anything else
+(a first build, a new base release, rows from before `citationid`) rebuilds all three, and so does
+`--full`. A diff touching more than `OKP_READ_TABLES_MAX_DELTA_SHARE` of a read table's rows (0.1, the
+most a full rebuild may drop) or more than `OKP_READ_TABLES_MAX_DELTA_KEYS` keys (100000000, which an
+update holds in memory) rebuilds in full.
+Before collecting delta keys, an in-place update requires 5 GiB plus 16 bytes per configured
+maximum key (including the over-cap sentinel), about 6.5 GiB at the default cap. After collection,
+it checks free disk again for the measured update rows plus 5 GiB. If it fails after its deletes,
+the tables stay half-updated until a rerun finishes; their applied markers move only at the end.
 The edge tables retain duplicate citing/cited pairs, so readers use `DISTINCT`, and they are plain
 MergeTree, so a query with `FINAL` on them fails. `intents` is a mask of background (1),
 methodology (2) and result (4); a null and an empty list both give 0, and other values are dropped.
-Migration 00018 adds `citationid` to `citation_edges_out` so readers can fetch citation contexts by primary key; existing rows read 0 until rebuilt after 00018.
+Migrations 00018 and 00020 add `citationid` to `citation_edges_out` and `citation_edges_in` so readers can fetch citation contexts by primary key; existing rows read 0 until rebuilt after the migration.
+When `citation_edges_out` has IDs but `citation_edges_in` does not, only `citation_edges_in` is rebuilt,
+from `citation_edges_out`: after migration 00020, one plain build fills `citation_edges_in.citationid`.
 A rebuild requires completed papers and citations releases and records each table’s source
-release and live UUID in applied. It needs about 20 bytes of free disk per citations row plus
+release and live UUID in applied. A full rebuild needs about 28 bytes of free disk per citations row plus
 a provisional 100 bytes per papers row. All three counts are validated before any swap; each
 must retain at least 90% of its live table (an empty live table passes). A refusal leaves the
 live tables unchanged; each sync repeats the rebuild until an operator resolves the refusal. A cancelled rebuild's
 insert keeps running in ClickHouse; the next rebuild stops it and removes stale staging tables
-before checking disk capacity. Apply migrations 00017 and 00018 before the first rebuild. After deploying,
+before checking disk capacity. Apply migrations 00017 to 00020 before the first rebuild. After deploying,
 run s2-build-read-tables once, verify all three applied markers at their source releases, and
 delete the old s2-build-citation-edges deployment from Prefect.
 

@@ -12,7 +12,7 @@ from uuid import UUID
 
 from pydantic import SecretStr
 
-from openknowledge_contracts.datasets import DatasetSummary, ReleaseMetadata, ShardRef
+from openknowledge_contracts.datasets import DatasetSummary, ReleaseId, ReleaseMetadata, ShardRef
 from openknowledge_contracts.manifests import ObjectPath, ObjectRef, Producer
 from openknowledge_contracts.tables.contract import UpdateMode
 from openknowledge_core.ingestion.commands import DownloadDataset, DownloadDiff, DownloadShard
@@ -394,6 +394,25 @@ class FakeApplied:
 
     async def record(self, applied: AppliedRelease) -> None:
         self.records.append(applied)
+
+    async def took(self, target: str, target_uuid: UUID, release: ReleaseId) -> bool:
+        return any(
+            record.target == target
+            and record.target_uuid == target_uuid
+            and record.release == release
+            for record in self.records
+        )
+
+    async def rebased(
+        self, target: str, target_uuid: UUID, after: ReleaseId, through: ReleaseId
+    ) -> bool:
+        return any(
+            record.target == target
+            and record.target_uuid == target_uuid
+            and record.from_release is None
+            and after < record.release <= through
+            for record in self.records
+        )
 
     async def latest(self, target: str) -> AppliedRelease | None:
         return next((found for found in reversed(self.records) if found.target == target), None)

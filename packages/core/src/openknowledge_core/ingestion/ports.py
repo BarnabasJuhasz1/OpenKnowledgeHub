@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Literal, Protocol
+from uuid import UUID
 
 from openknowledge_contracts.datasets import DatasetName, ReleaseId, ReleaseMetadata
 from openknowledge_contracts.manifests import ManifestEntry, ObjectPath, ObjectRef, Producer
@@ -102,6 +103,14 @@ class TableLoader(Protocol):
 
 
 class AppliedReleases(Protocol):
+    async def took(self, target: str, target_uuid: UUID, release: ReleaseId) -> bool: ...
+
+    async def rebased(
+        self, target: str, target_uuid: UUID, after: ReleaseId, through: ReleaseId
+    ) -> bool:
+        """Whether the table took a base release in ``(after, through]``."""
+        ...
+
     async def record(self, applied: AppliedRelease) -> None: ...
 
     async def latest(self, target: str) -> AppliedRelease | None:
@@ -149,5 +158,7 @@ class ReadTables(Protocol):
         ...
 
     async def build(
-        self, producer: Producer, clock: Callable[[], datetime]
-    ) -> BuildReadTablesResult: ...
+        self, producer: Producer, clock: Callable[[], datetime], *, full: bool = False
+    ) -> BuildReadTablesResult:
+        """Bring the read tables current, in place from diffs when possible, else rebuilt."""
+        ...

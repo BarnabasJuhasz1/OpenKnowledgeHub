@@ -307,13 +307,20 @@ def verify_base_manifest(dataset: str, release: str, bucket: str, prefix: str) -
     _run(run, admission_required=False)
 
 
-@s2.command("build-read-tables", help="Rebuild the ClickHouse read tables.")
-def build_read_tables() -> None:
+@s2.command(
+    "build-read-tables",
+    help=(
+        "Bring the ClickHouse read tables current: in place from diffs when possible, "
+        "else rebuild. --full always rebuilds."
+    ),
+)
+@click.option("--full", is_flag=True, help="Always rebuild instead of updating in place.")
+def build_read_tables(full: bool) -> None:
     from openknowledge_pipelines import deployments
 
     _require_managed_server((deployments.LOAD_LIMIT,))
     _settings(LoadSettings)
-    _run_managed(deployments.s2_build_read_tables)
+    _run_managed(lambda: deployments.s2_build_read_tables(full=full))
 
 
 @s2.command("sync", help="Run one coordinator cycle using OKP_SYNC configuration.")

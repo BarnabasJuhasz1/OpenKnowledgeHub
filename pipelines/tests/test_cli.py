@@ -30,6 +30,7 @@ from openknowledge_core.ingestion import (
     WatchdogResult,
     WatchdogService,
 )
+from openknowledge_core.ingestion.read_tables import BuildReadTablesResult
 from openknowledge_pipelines import admission, bootstrap, cli, deployments
 from openknowledge_pipelines.settings import (
     LoadSettings,
@@ -416,6 +417,36 @@ def test_archive_cli_routes_explicit_commands(
     assert isinstance(command, DownloadDiff) == diff
     if isinstance(command, DownloadDiff):
         assert command.from_release == "2026-10-06"
+
+
+@pytest.mark.usefixtures("prefect_server")
+@pytest.mark.parametrize(("arguments", "full"), [([], False), (["--full"], True)])
+def test_build_read_tables_passes_full_to_the_flow(
+    monkeypatch: pytest.MonkeyPatch, arguments: list[str], full: bool
+) -> None:
+    deployments.ensure_limits()
+    seen: list[bool] = []
+
+    class Edges:
+        async def build(
+            self, producer: object, clock: object, *, full: bool = False
+        ) -> BuildReadTablesResult:
+            seen.append(full)
+            return BuildReadTablesResult(source_releases={}, tables={})
+
+    @asynccontextmanager
+    async def open_read_tables(settings: LoadSettings) -> AsyncGenerator[Edges]:
+        yield Edges()
+
+    monkeypatch.setattr(bootstrap, "open_read_tables", open_read_tables)
+    for key, value in LOAD_ENV.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("PREFECT_API_URL", raising=False)
+    profile = Profile(name="read-tables-test", settings={PREFECT_API_URL: PREFECT_API_URL.value()})
+    with use_profile(profile):
+        code, output = okp("build-read-tables", *arguments)
+    assert code == 0, output
+    assert seen == [full]
 
 
 @pytest.mark.parametrize(

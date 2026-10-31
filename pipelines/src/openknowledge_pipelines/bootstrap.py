@@ -289,7 +289,10 @@ async def open_read_tables(
     observer = SyncObservation()
     # A full rebuild can outlast the per-object load timeout. Keep the connect timeout.
     async with clickhouse.connect(
-        _clickhouse(settings, None), read_table_stage=stage or observer.stage
+        _clickhouse(settings, None),
+        read_table_stage=stage or observer.stage,
+        read_tables_max_delta_share=settings.read_tables_max_delta_share,
+        read_tables_max_delta_keys=settings.read_tables_max_delta_keys,
     ) as ch:
         yield ch.read_tables
 
