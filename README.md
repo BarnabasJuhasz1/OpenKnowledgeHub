@@ -160,8 +160,10 @@ the keys the diffs touched are deleted from them and inserted again from the sou
 `--full`. A diff touching more than `OKP_READ_TABLES_MAX_DELTA_SHARE` of a read table's rows (0.1, the
 most a full rebuild may drop) or more than `OKP_READ_TABLES_MAX_DELTA_KEYS` keys (100000000, which an
 update holds in memory) rebuilds in full.
-An in-place update needs free disk for its rows plus 5 GiB. If it fails after its deletes, the tables
-stay half-updated until a rerun finishes the update; their applied markers move only at the end.
+Before collecting delta keys, an in-place update requires 5 GiB plus 16 bytes per configured
+maximum key (including the over-cap sentinel), about 6.5 GiB at the default cap. After collection,
+it checks free disk again for the measured update rows plus 5 GiB. If it fails after its deletes,
+the tables stay half-updated until a rerun finishes; their applied markers move only at the end.
 The edge tables retain duplicate citing/cited pairs, so readers use `DISTINCT`, and they are plain
 MergeTree, so a query with `FINAL` on them fails. `intents` is a mask of background (1),
 methodology (2) and result (4); a null and an empty list both give 0, and other values are dropped.

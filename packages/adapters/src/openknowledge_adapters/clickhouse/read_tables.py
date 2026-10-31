@@ -69,6 +69,8 @@ DELTA = {"papers": "read_delta_papers", "citations": "read_delta_citations"}
 """Scratch tables holding the keys a source took in since the read tables' release."""
 KEY = {"papers": "corpusid", "citations": "citationid"}
 BYTES_PER_KEY = {"papers": BYTES_PER_PAPER, "citations": BYTES_PER_CITATION}
+BYTES_PER_SCRATCH_KEY = 16
+"""An uncompressed UInt64 plus equal merge room; independent of the source row size."""
 DELTA_HEADROOM = 5 * 2**30
 """Free disk an in-place update needs on top of its rows: lightweight deletes write
 ``_row_exists`` masks and copy whole Compact parts, which stay below ``min_bytes_for_wide_part``."""
@@ -282,6 +284,11 @@ class ClickHouseReadTables:
         started = monotonic()
         tables = GROUPS[source]
         async with self._stage(f"read tables: {source} delta"):
+            # Reserve for delta_sql's full cap plus its over-cap sentinel before writing keys.
+            await self._require_free(
+                (self._max_delta_keys + 1) * BYTES_PER_SCRATCH_KEY + DELTA_HEADROOM,
+                f"collecting the {source} delta keys",
+            )
             for statement in delta_sql(source, start, end, self._max_delta_keys):
                 await self._run(statement)
             touched = (await self._counts(DELTA[source]))[DELTA[source]]

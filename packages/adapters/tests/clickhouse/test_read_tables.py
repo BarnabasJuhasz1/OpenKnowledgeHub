@@ -14,6 +14,7 @@ import pytest
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.read_tables import (
     BYTES_PER_CITATION,
+    BYTES_PER_SCRATCH_KEY,
     DELTA,
     DELTA_HEADROOM,
     ClickHouseReadTables,
@@ -340,6 +341,9 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         "over_share",
         "over_cap",
         "low_disk",
+        "low_disk_floor",
+        "low_disk_scratch",
+        "low_disk_sentinel",
         "missing_column",
         "full",
         "missing_marker",
@@ -380,12 +384,33 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
     if case == "in_only_mismatch":
         server.counts[f"{IN}_new"] = 99
     if case == "low_disk":
-        server.free_space = DELTA_HEADROOM + server.touched["citations"] * BYTES_PER_CITATION - 1
+        # Capacity can fall during collection; the measured pre-apply check must still run.
+        def consume_disk(request: httpx.Request) -> httpx.Response | None:
+            query = request.url.params.get("query", request.content.decode())
+            if query.startswith(f"INSERT INTO {DELTA['citations']}"):
+                server.free_space = (
+                    DELTA_HEADROOM + server.touched["citations"] * BYTES_PER_CITATION - 1
+                )
+            return None
+
+        server.fail = consume_disk
+    if case == "low_disk_floor":
+        server.free_space = DELTA_HEADROOM - 1
+    if case == "low_disk_scratch":
+        server.free_space = DELTA_HEADROOM + 100 * BYTES_PER_SCRATCH_KEY - 1
+    if case == "low_disk_sentinel":
+        server.free_space = DELTA_HEADROOM + 101 * BYTES_PER_SCRATCH_KEY - 1
+    if case == "citations":
+        # The exact collection boundary succeeds, including the over-cap sentinel key.
+        server.free_space = DELTA_HEADROOM + 101 * BYTES_PER_SCRATCH_KEY
     if case == "missing_column":
         server.columns = {OUT}
     refusals = {
         "in_only_mismatch": "citation edge counts differ",
         "low_disk": "updating the citations read tables needs about 5 GiB",
+        "low_disk_floor": "collecting the citations delta keys",
+        "low_disk_scratch": "collecting the citations delta keys",
+        "low_disk_sentinel": "collecting the citations delta keys",
         "missing_column": "citation_edges_in.citationid is missing; run migration 00020",
     }
     initial = server.live.copy()
@@ -395,6 +420,12 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
                 await edges.build(PRODUCER, clock)
             assert not any(event.startswith(("EXCHANGE", "DELETE")) for event in server.events)
             assert server.live == initial and not server.markers
+            if case.startswith("low_disk_"):
+                assert not any(event.startswith("INSERT INTO") for event in server.events)
+            elif case == "low_disk":
+                assert any(
+                    event.startswith(f"INSERT INTO {DELTA['citations']}") for event in server.events
+                )
             return
         result = await edges.build(PRODUCER, clock, full=case == "full")
     writes = [
