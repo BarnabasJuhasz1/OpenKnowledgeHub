@@ -1,22 +1,31 @@
-"""Freshness and rebuild recovery through the HTTP client, without sockets."""
+"""Freshness, rebuild recovery and in-place updates through the HTTP client, without sockets."""
 
 import json
-from collections.abc import AsyncGenerator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncGenerator, Callable, Iterable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import timedelta
+from typing import Any
 from uuid import UUID
 
 import httpx
 import pytest
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
-from openknowledge_adapters.clickhouse.read_tables import ClickHouseReadTables
+from openknowledge_adapters.clickhouse.read_tables import DELTA, ClickHouseReadTables
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_contracts.tables.clickhouse import version_expression
 from openknowledge_contracts.tables.s2 import CONTRACTS
 from openknowledge_core.ingestion.errors import TableRejected, TableUnavailable
-from openknowledge_core.ingestion.read_tables import READ_TABLES
+from openknowledge_core.ingestion.read_tables import (
+    GROUPS,
+    READ_TABLES,
+    SOURCE_OF,
+    ReadTablesPath,
+)
 from tests.fakes.ports import NEXT, PRODUCER, RELEASE, applied_release, clock
+
+PAPERS, OUT, IN = READ_TABLES
+FULL, INCREMENTAL, CURRENT = ReadTablesPath.FULL, ReadTablesPath.INCREMENTAL, ReadTablesPath.CURRENT
 
 
 @pytest.mark.parametrize("table", READ_TABLES)
@@ -63,18 +72,148 @@ async def test_read_tables_current_only_for_all_sources(table: str, state: str) 
         ) is (state == "current_empty")
 
 
+def marker(target: str, release: str, uuid: int = 1) -> str:
+    found = applied_release(target, release, timedelta())
+    return found.model_copy(update={"target_uuid": UUID(int=uuid)}).model_dump_json()
+
+
+class FakeClickHouse:
+    """The server a build talks to: live tables, scratch copies and applied markers."""
+
+    def __init__(self) -> None:
+        self.live = {name: UUID(int=index + 1) for index, name in enumerate(READ_TABLES)}
+        self.staging = {
+            f"{name}_new": UUID(int=index + 3) for index, name in enumerate(READ_TABLES)
+        }
+        self.history: list[str] = []
+        """Markers present before the build, oldest first."""
+        self.markers: list[str] = []
+        """The bodies of the build's marker inserts."""
+        self.events: list[str] = []
+        self.replaced: set[str] = set()
+        self.columns = {OUT, IN}
+        self.free_space = 12800
+        self.counts: dict[str, int] = {}
+        self.touched = {"papers": 0, "citations": 0}
+        self.zero_ids: set[str] = set()
+        self.fail: Callable[[httpx.Request], httpx.Response | None] = lambda request: None
+        self.next_uuid = 20
+
+    def marked(self) -> list[dict[str, Any]]:
+        bodies = (line for body in self.markers for line in body.splitlines())
+        return [json.loads(line) for line in (*self.history, *bodies)]
+
+    def respond(self, request: httpx.Request) -> httpx.Response:
+        params = request.url.params
+        query = params.get("query", request.content.decode())
+        self.events.append(query)
+        if (failure := self.fail(request)) is not None:
+            return failure
+        if query.startswith("SELECT 1 SETTINGS"):
+            assert "replace_running_query = 1" in query
+            self.replaced.add(params["query_id"])
+            rows = []
+        elif query.startswith("SELECT 1 FROM applied"):
+            took = any(
+                (found["target"], found["target_uuid"], found["release"])
+                == (params["param_target"], params["param_uuid"], params["param_release"])
+                for found in self.marked()
+            )
+            rows = [{"1": 1}] if took else []
+        elif query.startswith("SELECT 1 FROM"):
+            assert "citationid = 0 LIMIT 1" in query
+            rows = [{"1": 1}] if query.split()[3] in self.zero_ids else []
+        elif query.startswith("SELECT count() AS rows FROM"):
+            rows = [{"rows": self.counts.get(query.split()[5], 100)}]
+        elif "FROM system.columns" in query and OUT in query:
+            rows = [{"table": table} for table in sorted(self.columns)]
+        elif "FROM system.columns" in query:
+            contract = CONTRACTS[params["param_table"]]
+            rows = [{"default_expression": version_expression(contract)}]
+        elif "FROM applied" in query:
+            found = [item for item in self.marked() if item["target"] == params["param_target"]]
+            rows = found[-1:]
+        elif "FROM system.disks" in query:
+            assert not any(name.endswith("_new") for name in self.staging), (
+                "capacity must be measured after reclaiming the copies"
+            )
+            rows = [{"free_space": self.free_space}]
+        elif "SELECT name, total_rows" in query:
+            rows = [
+                {"name": name, "total_rows": 100} for name in ("papers", "citations", *READ_TABLES)
+            ]
+        elif "SELECT name, uuid" in query:
+            rows = [{"name": name, "uuid": str(uuid)} for name, uuid in self.live.items()]
+        elif "FROM system.tables" in query:
+            name = params["param_table"]
+            rows = [{"uuid": str(self.live.get(name, UUID(int=1))), "total_rows": 100}]
+        elif query.startswith("DROP TABLE"):
+            assert self.replaced == {"citation-edges", "read-tables-delete"}
+            name = query.removesuffix(" SYNC").split()[-1]
+            assert name.endswith("_new") or name in DELTA.values()
+            self.staging.pop(name, None)
+            rows = []
+        elif query.startswith("CREATE TABLE"):
+            self.staging[query.split()[2]] = UUID(int=self.next_uuid)
+            self.next_uuid += 1
+            rows = []
+        elif query.startswith("INSERT INTO applied"):
+            self.markers.append(request.content.decode())
+            rows = []
+        elif query.startswith("INSERT INTO"):
+            # A rerun replaces a still-running statement of the same kind.
+            assert params["query_id"] == "citation-edges"
+            name = query.split()[2]
+            source = next((source for source, delta in DELTA.items() if delta == name), None)
+            if source is not None:
+                written = self.counts[name] = self.touched[source]
+            else:
+                written = 100 if name.endswith("_new") else self.touched[SOURCE_OF[name]]
+            summary = json.dumps({"written_rows": written})
+            return httpx.Response(200, headers={"X-ClickHouse-Summary": summary})
+        elif query.startswith("DELETE FROM"):
+            assert params["query_id"] == "read-tables-delete"
+            assert query.split()[2] in self.live
+            rows = []
+        elif query.startswith("EXCHANGE"):
+            new, name = query.split()[2], query.split()[4]
+            self.live[name], self.staging[new] = self.staging[new], self.live[name]
+            rows = []
+        else:
+            raise AssertionError(query)
+        return httpx.Response(200, text="\n".join(json.dumps(row) for row in rows))
+
+
+@asynccontextmanager
+async def read_tables(
+    server: FakeClickHouse,
+    stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
+) -> AsyncGenerator[ClickHouseReadTables]:
+    async with httpx.AsyncClient(
+        base_url="http://clickhouse", transport=httpx.MockTransport(server.respond)
+    ) as http:
+        client = ClickHouseClient(http, database="test")
+        yield ClickHouseReadTables(
+            client,
+            ClickHouseTables(client, raw_bucket="raw"),
+            ClickHouseAppliedReleases(client),
+            stage,
+        )
+
+
+def in_order(events: Iterable[str], prefixes: Iterable[str]) -> bool:
+    remaining = iter(events)
+    return all(any(event.startswith(prefix) for event in remaining) for prefix in prefixes)
+
+
 @pytest.mark.parametrize(
     "failure", ["disk", "missing_column", "partial_swap", "markers", "lost_answer"]
 )
 async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: str) -> None:
-    live = {name: UUID(int=index + 1) for index, name in enumerate(READ_TABLES)}
-    initial = live.copy()
-    staging = {f"{name}_new": UUID(int=index + 3) for index, name in enumerate(READ_TABLES)}
-    events: list[str] = []
-    markers: list[str] = []
+    server = FakeClickHouse()
+    server.history = [marker(name, NEXT) for name in GROUPS]
+    initial = server.live.copy()
     failed = False
-    retry = False
-    next_uuid = 20
     stages: list[tuple[str, str]] = []
 
     @asynccontextmanager
@@ -88,92 +227,27 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         else:
             stages.append((name, "completed"))
 
-    def respond(request: httpx.Request) -> httpx.Response:
-        nonlocal failed, next_uuid
+    def fail(request: httpx.Request) -> httpx.Response | None:
+        nonlocal failed
         query = request.url.params.get("query", request.content.decode())
-        events.append(query)
-        if "FROM system.columns" in query and "citation_edges_out" in query:
-            rows = [{"table": "citation_edges_out"}]
-            if failure != "missing_column" or retry:
-                rows.append({"table": "citation_edges_in"})
-        elif "FROM system.columns" in query:
-            rows = [
-                {
-                    "default_expression": version_expression(
-                        CONTRACTS[request.url.params["param_table"]]
-                    )
-                }
-            ]
-        elif "FROM applied" in query:
-            target = request.url.params["param_target"]
-            marker = next(
-                (
-                    marker
-                    for insert in reversed(markers)
-                    for marker in reversed(insert.splitlines())
-                    if json.loads(marker)["target"] == target
-                ),
-                applied_release(target, NEXT, timedelta()).model_dump_json(),
-            )
-            return httpx.Response(200, text=marker)
-        elif "FROM system.disks" in query:
-            assert staging == {}, "capacity must be measured after reclaiming both copies"
-            rows = [{"free_space": 0 if failure == "disk" and not retry else 12800}]
-        elif "SELECT name, total_rows" in query:
-            rows = [
-                {"name": name, "total_rows": 100} for name in ("papers", "citations", *READ_TABLES)
-            ]
-        elif "SELECT name, uuid" in query:
-            rows = [{"name": name, "uuid": str(uuid)} for name, uuid in live.items()]
-        elif "FROM system.tables" in query:
-            name = request.url.params["param_table"]
-            rows = [{"uuid": str(live.get(name, UUID(int=1))), "total_rows": 100}]
-        elif query.startswith("SELECT 1"):
-            assert request.url.params["query_id"] == "citation-edges"
-            assert "replace_running_query = 1" in query
-            rows = []
-        elif query.startswith("DROP TABLE"):
-            assert any("replace_running_query = 1" in event for event in events)
-            name = query.split()[-2]
-            assert name.endswith("_new")
-            staging.pop(name, None)
-            rows = []
-        elif query.startswith("CREATE TABLE"):
-            name = query.split()[2]
-            staging[name] = UUID(int=next_uuid)
-            next_uuid += 1
-            rows = []
-        elif query.startswith(tuple(f"INSERT INTO {name}_new" for name in READ_TABLES)):
-            return httpx.Response(200, headers={"X-ClickHouse-Summary": '{"written_rows":100}'})
-        elif query.startswith("EXCHANGE"):
-            new, name = query.split()[2], query.split()[4]
-            if failure == "partial_swap" and name == READ_TABLES[1] and not failed:
-                failed = True
-                return httpx.Response(500, text="synthetic exchange failure")
-            live[name], staging[new] = staging[new], live[name]
-            rows = []
-        elif query.startswith("INSERT INTO applied"):
-            if failure in ("markers", "lost_answer") and not failed:
-                failed = True
-                if failure == "lost_answer":
-                    markers.append(request.content.decode())
-                return httpx.Response(500, text="synthetic marker failure")
-            markers.append(request.content.decode())
-            rows = []
-        else:
-            raise AssertionError(query)
-        return httpx.Response(200, text="\n".join(json.dumps(row) for row in rows))
+        if failed:
+            return None
+        if failure == "partial_swap" and query.startswith(f"EXCHANGE TABLES {OUT}_new"):
+            failed = True
+            return httpx.Response(500, text="synthetic exchange failure")
+        if failure in ("markers", "lost_answer") and query.startswith("INSERT INTO applied"):
+            failed = True
+            if failure == "lost_answer":
+                server.markers.append(request.content.decode())
+            return httpx.Response(500, text="synthetic marker failure")
+        return None
 
-    async with httpx.AsyncClient(
-        base_url="http://clickhouse", transport=httpx.MockTransport(respond)
-    ) as http:
-        client = ClickHouseClient(http, database="test")
-        edges = ClickHouseReadTables(
-            client,
-            ClickHouseTables(client, raw_bucket="raw"),
-            ClickHouseAppliedReleases(client),
-            stage,
-        )
+    server.fail = fail
+    if failure == "disk":
+        server.free_space = 0
+    if failure == "missing_column":
+        server.columns = {OUT}
+    async with read_tables(server, stage) as edges:
         with pytest.raises(
             TableRejected if failure in ("disk", "missing_column") else TableUnavailable
         ) as error:
@@ -184,19 +258,20 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             )
         if failure == "markers":
             # The new generation stays live but not current: swapping back is the riskier move.
-            assert all(live[name] != initial[name] for name in READ_TABLES) and not markers
+            assert all(server.live[name] != initial[name] for name in READ_TABLES)
+            assert not server.markers
             assert not await edges.is_current({"papers": NEXT, "citations": NEXT})
         elif failure == "lost_answer":
             # The markers committed, so the next sync skips the build and only reclaims.
             assert await edges.is_current({"papers": NEXT, "citations": NEXT})
-            assert set(staging.values()) == set(initial.values())
+            assert set(server.staging.values()) == set(initial.values())
             await edges.reclaim()
-            assert staging == {}
+            assert server.staging == {}
             return
         else:
-            assert live == initial and not markers
+            assert server.live == initial and not server.markers
         if failure in ("disk", "missing_column"):
-            assert not any(event.startswith("CREATE TABLE") for event in events)
+            assert not any(event.startswith("CREATE TABLE") for event in server.events)
         assert stages[-1] == (
             "read tables: preflight and recovery"
             if failure in ("disk", "missing_column")
@@ -204,20 +279,124 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
             "failed",
         )
         stages.clear()
-        retry = True
+        server.free_space, server.columns = 12800, {OUT, IN}
         result = await edges.build(PRODUCER, clock)
         assert result.source_releases == {"papers": NEXT, "citations": NEXT}
+        assert result.paths == {"papers": FULL, "citations": FULL}
         assert await edges.is_current(result.source_releases)
-        assert [name for name, state in stages if state == "completed"] == [
-            "read tables: preflight and recovery",
-            *(f"read tables: build {name}" for name in READ_TABLES),
-            "read tables: validate counts",
-            "read tables: publish",
-        ]
-        assert staging == {}
-        # One insert, so a failure cannot leave some tables marked and others not.
-        for name, marker in zip(READ_TABLES, markers[-1].splitlines(), strict=True):
-            recorded = json.loads(marker)
-            assert recorded["target"] == name
-            assert recorded["target_uuid"] == str(live[name])
-            assert recorded["release"] == NEXT
+    assert [name for name, state in stages if state == "completed"] == [
+        "read tables: recovery and plan",
+        "read tables: preflight and recovery",
+        *(f"read tables: build {name}" for name in READ_TABLES),
+        "read tables: validate counts",
+        "read tables: publish",
+    ]
+    assert server.staging == {}
+    # One insert, so a failure cannot leave some tables marked and others not.
+    for name, line in zip(READ_TABLES, server.markers[-1].splitlines(), strict=True):
+        recorded = json.loads(line)
+        assert (recorded["target"], recorded["target_uuid"], recorded["release"]) == (
+            name,
+            str(server.live[name]),
+            NEXT,
+        )
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "papers",
+        "citations",
+        "in_only_first",
+        "mismatch",
+        "over_share",
+        "full",
+        "missing_marker",
+        "uuid_moved",
+        "markers_disagree",
+        "rebased",
+        "ids_out",
+    ],
+)
+async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
+    case: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    server = FakeClickHouse()
+    moved = "papers" if case == "papers" else "citations"
+    for source in GROUPS:
+        server.history.append(marker(source, RELEASE, 9 if case == "rebased" else 1))
+        server.history.append(marker(source, NEXT if source == moved else RELEASE))
+    for table in READ_TABLES:
+        release = "2026-09-29" if case == "markers_disagree" and table == IN else RELEASE
+        if not (case == "missing_marker" and table == IN):
+            server.history.append(marker(table, release, server.live[table].int))
+    if case == "uuid_moved":
+        server.live[IN] = UUID(int=9)
+    server.zero_ids = {"ids_out": {OUT}, "in_only_first": {IN}}.get(case, set())
+    server.touched = {"papers": 4, "citations": 31 if case == "over_share" else 5}
+    if case == "mismatch":
+        server.counts[IN] = 99
+    initial = server.live.copy()
+    async with read_tables(server) as edges:
+        result = await edges.build(PRODUCER, clock, full=case == "full")
+    writes = [
+        event
+        for event in server.events
+        if event.startswith(("CREATE", "INSERT INTO", "DELETE", "EXCHANGE"))
+    ]
+    recorded = [json.loads(line) for line in server.markers[-1].splitlines()]
+    assert server.staging == {}
+    if case in ("papers", "citations", "in_only_first"):
+        assert result.paths == {
+            source: INCREMENTAL if source == moved else CURRENT for source in GROUPS
+        }
+        assert result.touched == {moved: server.touched[moved]}
+        assert [found["target"] for found in recorded] == list(GROUPS[moved])
+        for found in recorded:
+            assert found["target_uuid"] == str(server.live[found["target"]])
+            assert (found["from_release"], found["release"]) == (RELEASE, NEXT)
+        assert not any(event.startswith(f"CREATE TABLE {OUT}_new") for event in writes)
+    if case == "papers":
+        # Review Focus 4: a papers-only diff writes nothing to the edge tables.
+        assert not any("citation_edges" in event for event in writes)
+        assert server.live == initial and len(server.markers) == 1
+    elif case == "citations":
+        assert in_order(
+            server.events,
+            [
+                f"INSERT INTO {DELTA['citations']}",
+                f"DELETE FROM {OUT}",
+                f"DELETE FROM {IN}",
+                f"INSERT INTO {OUT} ",
+                f"INSERT INTO {IN} ",
+                f"SELECT count() AS rows FROM {OUT}",
+                f"SELECT count() AS rows FROM {IN}",
+                "INSERT INTO applied",
+            ],
+        )
+        assert not any(PAPERS in event for event in writes)
+        assert server.live == initial and len(server.markers) == 1
+    elif case == "in_only_first":
+        # The incoming edges are rebuilt from the outgoing ones, then both take the diff.
+        assert in_order(
+            server.events,
+            [
+                f"CREATE TABLE {IN}_new AS {IN}",
+                f"INSERT INTO {IN}_new",
+                f"EXCHANGE TABLES {IN}_new AND {IN}",
+                "INSERT INTO applied",
+                f"INSERT INTO {DELTA['citations']}",
+                f"DELETE FROM {IN}",
+            ],
+        )
+        first = json.loads(server.markers[0])
+        assert (first["target"], first["release"], first["from_release"]) == (IN, RELEASE, None)
+        assert server.live[IN] != initial[IN] and server.live[OUT] == initial[OUT]
+    else:
+        assert result.paths == {"papers": FULL, "citations": FULL}
+        assert all(f"CREATE TABLE {table}_new AS {table}" in writes for table in READ_TABLES)
+        assert [found["target"] for found in recorded] == list(READ_TABLES)
+        assert all(found["from_release"] is None for found in recorded)
+        assert any(event.startswith("DELETE") for event in writes) is (case == "mismatch")
+        if case == "mismatch":
+            assert "citation edge counts differ" in caplog.text

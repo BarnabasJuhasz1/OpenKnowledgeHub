@@ -152,5 +152,7 @@ class ReadTables(Protocol):
         ...
 
     async def build(
-        self, producer: Producer, clock: Callable[[], datetime]
-    ) -> BuildReadTablesResult: ...
+        self, producer: Producer, clock: Callable[[], datetime], *, full: bool = False
+    ) -> BuildReadTablesResult:
+        """Bring the read tables current, in place from diffs when possible, else rebuilt."""
+        ...

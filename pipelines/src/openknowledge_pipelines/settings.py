@@ -53,6 +53,8 @@ class LoadSettings(CommonSettings):
     clickhouse_raw_bucket: BucketName
     """The bucket the server's ``raw`` named collection reads."""
     clickhouse_timeout_seconds: PositiveFloat = 3600.0
+    read_tables_max_delta_share: float = Field(0.3, gt=0, le=1)
+    """Diffs touching more of a source than this rebuild its read tables in full."""
 
 
 class WatchdogSettings(LoadSettings):
