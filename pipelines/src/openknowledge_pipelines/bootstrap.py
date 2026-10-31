@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from importlib.metadata import version
 from typing import TYPE_CHECKING
 
@@ -19,10 +21,12 @@ from openknowledge_core.ingestion import (
 from openknowledge_core.ingestion.archive_progress import ArchiveProgress
 from openknowledge_core.ingestion.consumers import ArchiveConsumer
 from openknowledge_core.ingestion.coordinator import CORE_ORDER, LARGE_ORDER
+from openknowledge_core.ingestion.errors import IngestionError
 from openknowledge_core.ingestion.families import ArchiveFamily
 from openknowledge_core.ingestion.measurement import LoadObservation
 from openknowledge_core.ingestion.ports import LoadTelemetry, ReadTables
-from openknowledge_core.search import SearchIndexService
+from openknowledge_core.search import IndexPapers, SearchIndexService
+from openknowledge_core.search.commands import IndexPapersResult
 from openknowledge_pipelines.settings import (
     BatchSettings,
     CommonSettings,
@@ -297,8 +301,30 @@ async def open_read_tables(
         yield ch.read_tables
 
 
+async def _index_search_part(settings: SearchSettings, command: IndexPapers) -> IndexPapersResult:
+    async with (
+        clickhouse.connect(_clickhouse(settings, settings.clickhouse_timeout_seconds)) as ch,
+        opensearch.connect(_opensearch(settings)) as sink,
+    ):
+        service = SearchIndexService(source=ch.search, sink=sink, shards=settings.index_shards)
+        return await service.index(command)
+
+
+def _search_part_worker(settings: SearchSettings, command: IndexPapers) -> IndexPapersResult:
+    # Never send vendor exceptions, response bodies, or settings over the result pipe.
+    try:
+        return asyncio.run(_index_search_part(settings, command))
+    except IngestionError as exc:
+        raise type(exc)(str(exc)) from None
+    except Exception:
+        raise RuntimeError(
+            "Search part failed; inspect source and sink health before resuming"
+        ) from None
+
+
 async def run_search_index(settings: SearchSettings) -> SearchIndexResult:
     from openknowledge_pipelines import admission
+    from openknowledge_pipelines.flows.process_parts import PartProcesses
     from openknowledge_pipelines.flows.search_index import run_index
 
     async with (
@@ -306,13 +332,18 @@ async def run_search_index(settings: SearchSettings) -> SearchIndexResult:
         opensearch.connect(_opensearch(settings)) as sink,
     ):
         service = SearchIndexService(source=ch.search, sink=sink, shards=settings.index_shards)
-        return await run_index(
-            service,
-            ch.search,
-            sink,
-            ch.indexed,
-            execution=lambda: admission.execution(release_on_exception=True),
-            base_parts=settings.index_base_parts,
-            diff_parts=settings.index_diff_parts,
-            parallelism=settings.index_parallelism,
-        )
+        workers = PartProcesses(partial(_search_part_worker, settings), settings.index_parallelism)
+        try:
+            return await run_index(
+                service,
+                ch.search,
+                sink,
+                ch.indexed,
+                execution=lambda: admission.execution(release_on_exception=True),
+                base_parts=settings.index_base_parts,
+                diff_parts=settings.index_diff_parts,
+                parallelism=settings.index_parallelism,
+                index=workers.index,
+            )
+        finally:
+            await workers.close()

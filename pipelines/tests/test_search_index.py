@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from pathlib import Path
 from uuid import UUID
 
 import pytest
@@ -167,3 +168,53 @@ async def test_deploy_closes_admission_running_parts_drain_and_rerun_resumes() -
     await run()
     assert sorted(r.part for r in progress.rows if r.kind == "part") == [1, 2, 3, 4]
     assert len(source.asked) == 4 and admission.status().active_slots == 0
+
+
+@pytest.mark.usefixtures("prefect_server")
+@pytest.mark.parametrize("mode", ["exit", "sigkill"])
+async def test_lost_worker_joins_sibling_retains_admission_and_never_publishes(
+    tmp_path: Path, mode: str
+) -> None:
+    import os
+    from functools import partial
+
+    from openknowledge_pipelines.flows.process_parts import PartProcesses, PartWorkerLost
+    from tests.fakes.search_parts import crash_with_sibling
+
+    source, sink, progress = RangedSource(), SettledSink(), Progress()
+    source.base_rows = [SourceRows(corpusid=i, paper=paper_row(i, 10)) for i in (1, 2)]
+    workers = PartProcesses(partial(crash_with_sibling, str(tmp_path), mode), 2)
+    service = SearchIndexService(source=source, sink=sink, shards=1)
+
+    @flow(persist_result=False)
+    async def run() -> SearchIndexResult:
+        return await run_index(
+            service,
+            source,
+            sink,
+            progress,
+            execution=lambda: admission.execution(release_on_exception=True),
+            base_parts=2,
+            diff_parts=2,
+            parallelism=2,
+            index=workers.index,
+        )
+
+    try:
+        with pytest.raises(PartWorkerLost, match="admission retained"):
+            await run()
+        # Observe the admission boundary BEFORE the outer bootstrap closes its pool.
+        assert admission.status().active_slots == 2
+        for part in (1, 2):
+            pid = int((tmp_path / f"{part}.started").read_text())
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+        assert sink.target is None and not sink.refreshed
+        assert [r.kind for r in progress.rows] == ["started"]
+    finally:
+        await workers.close()
+        admission.status("close")
+        held = admission.status().active_slots
+        if held:
+            admission.release(held)
+        admission.status("open")
