@@ -278,7 +278,7 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         ) as error:
             await edges.build(PRODUCER, clock)
         if failure == "missing_column":
-            assert "citation_edges_in.citationid is missing; run migration 00019" in str(
+            assert "citation_edges_in.citationid is missing; run migration 00020" in str(
                 error.value
             )
         if failure == "markers":
@@ -380,7 +380,7 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
     refusals = {
         "in_only_mismatch": "citation edge counts differ",
         "low_disk": "updating the citations read tables needs about 5 GiB",
-        "missing_column": "citation_edges_in.citationid is missing; run migration 00019",
+        "missing_column": "citation_edges_in.citationid is missing; run migration 00020",
     }
     initial = server.live.copy()
     async with read_tables(server, max_delta_keys=4 if case == "over_cap" else 100) as edges:

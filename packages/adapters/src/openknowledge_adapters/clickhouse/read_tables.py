@@ -464,7 +464,7 @@ class ClickHouseReadTables:
             f"AND table IN ('{OUT}', '{IN}') AND name = 'citationid'"
         )
         have_ids = {row["table"] for row in columns}
-        for table, migration in ((OUT, "00018"), (IN, "00019")):
+        for table, migration in ((OUT, "00018"), (IN, "00020")):
             if table not in have_ids:
                 raise TableRejected(
                     f"{table}.citationid is missing; run migration {migration} before rebuilding"

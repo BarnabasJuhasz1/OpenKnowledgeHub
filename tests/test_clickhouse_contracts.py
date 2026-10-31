@@ -299,7 +299,7 @@ def test_replays_converge_whatever_order_batches_land_in(
 def test_edge_citationid_upgrade_and_rollback_preserve_existing_edges(tmp_path: Path) -> None:
     migration = MIGRATIONS / "00018_add_citation_edges_citationid.sql"
     upgrade, downgrade = section(migration, "Up"), section(migration, "Down")
-    migration_in = MIGRATIONS / "00019_add_citation_edges_in_citationid.sql"
+    migration_in = MIGRATIONS / "00020_add_citation_edges_in_citationid.sql"
     upgrade_in, downgrade_in = section(migration_in, "Up"), section(migration_in, "Down")
     sql = f"""
         {section(MIGRATIONS / "00015_create_citation_edges.sql", "Up")}
