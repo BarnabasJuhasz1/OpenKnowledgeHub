@@ -157,8 +157,9 @@ deployment `s2-build-read-tables/control-vm`. All three take the shared `clickho
 When a source moved only by diffs since the release its read tables hold, they are updated in place:
 the keys the diffs touched are deleted from them and inserted again from the source. Anything else
 (a first build, a new base release, rows from before `citationid`) rebuilds all three, and so does
-`--full`. A diff touching more than `OKP_READ_TABLES_MAX_DELTA_SHARE` of a source (0.3) or more than
-`OKP_READ_TABLES_MAX_DELTA_KEYS` keys (100000000, which an update holds in memory) rebuilds in full.
+`--full`. A diff touching more than `OKP_READ_TABLES_MAX_DELTA_SHARE` of a read table's rows (0.1, the
+most a full rebuild may drop) or more than `OKP_READ_TABLES_MAX_DELTA_KEYS` keys (100000000, which an
+update holds in memory) rebuilds in full.
 An in-place update needs free disk for its rows plus 5 GiB. If it fails after its deletes, the tables
 stay half-updated until a rerun finishes the update; their applied markers move only at the end.
 The edge tables retain duplicate citing/cited pairs, so readers use `DISTINCT`, and they are plain

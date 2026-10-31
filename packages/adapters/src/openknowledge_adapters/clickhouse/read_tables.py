@@ -134,7 +134,7 @@ class ClickHouseReadTables:
         tables: ClickHouseTables,
         applied: ClickHouseAppliedReleases,
         stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
-        max_delta_share: float = 0.3,
+        max_delta_share: float = 0.1,
         max_delta_keys: int = 100_000_000,
     ) -> None:
         self._client = client
@@ -142,7 +142,8 @@ class ClickHouseReadTables:
         self._applied = applied
         self._stage: Callable[[str], AbstractAsyncContextManager[None]] = stage or _no_stage
         self._max_delta_share = max_delta_share
-        """Touched keys over this share of a source rebuild in full, the cheaper path then."""
+        """Touched keys over this share of a read table rebuild in full. Each key is at most one
+        row there, so the default never drops more than a full rebuild would keep."""
         self._max_delta_keys = max_delta_keys
         """Touched keys over this count rebuild in full: an update holds them all in memory."""
 
@@ -247,7 +248,10 @@ class ClickHouseReadTables:
 
     async def _missing_ids(self, table: str) -> bool:
         """Whether rows from before ``citationid`` remain, which an update cannot key on."""
-        return bool(await self._client.rows(f"SELECT 1 FROM {table} WHERE citationid = 0 LIMIT 1"))
+        started = monotonic()
+        found = await self._client.rows(f"SELECT 1 FROM {table} WHERE citationid = 0 LIMIT 1")
+        log.info("zero-ID probe on %s took %.1f s", table, monotonic() - started)
+        return bool(found)
 
     async def _in_only(
         self, release: ReleaseId, producer: Producer, clock: Callable[[], datetime]
@@ -281,11 +285,11 @@ class ClickHouseReadTables:
             for statement in delta_sql(source, start, end, self._max_delta_keys):
                 await self._run(statement)
             touched = (await self._counts(DELTA[source]))[DELTA[source]]
-            total = await self._source_rows(source)
+            total = min((await self._counts(*tables)).values())
             if touched > self._max_delta_keys or touched > self._max_delta_share * total:
                 log.info(
-                    "%s touched %d of %d rows, over the %d key cap or the %.0f%% share; "
-                    "rebuilding in full",
+                    "%s touched %d keys for %d read table rows, over the %d key cap or the "
+                    "%.0f%% share; rebuilding in full",
                     source,
                     touched,
                     total,
@@ -387,11 +391,15 @@ class ClickHouseReadTables:
 
     async def _run(self, statement: str) -> int:
         """Run under the kind's fixed query ID, which a rerun replaces; return rows inserted."""
+        started = monotonic()
+        rows = 0
         if statement.startswith("INSERT"):
-            return await self._client.written(statement, query_id=QUERY_ID)
-        query_id = DELETE_QUERY_ID if statement.startswith("DELETE") else None
-        await self._client.post(statement, query_id=query_id)
-        return 0
+            rows = await self._client.written(statement, query_id=QUERY_ID)
+        else:
+            query_id = DELETE_QUERY_ID if statement.startswith("DELETE") else None
+            await self._client.post(statement, query_id=query_id)
+        log.info("%s took %.1f s", " ".join(statement.split()[:3]), monotonic() - started)
+        return rows
 
     async def _marker(
         self,
@@ -433,14 +441,6 @@ class ClickHouseReadTables:
             rows = await self._client.rows(f"SELECT count() AS rows FROM {table}")
             counts[table] = int(rows[0]["rows"])
         return counts
-
-    async def _source_rows(self, source: str) -> int:
-        rows = await self._client.rows(
-            "SELECT total_rows FROM system.tables "
-            "WHERE database = currentDatabase() AND name = {table:String}",
-            table=source,
-        )
-        return int(rows[0]["total_rows"] or 0)
 
     async def _preflight(self) -> dict[str, int]:
         """Check the read tables and capacity; return live row counts."""

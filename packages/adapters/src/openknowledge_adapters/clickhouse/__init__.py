@@ -47,7 +47,7 @@ async def connect(
     *,
     transport: httpx.AsyncBaseTransport | None = None,
     read_table_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
-    read_tables_max_delta_share: float = 0.3,
+    read_tables_max_delta_share: float = 0.1,
     read_tables_max_delta_keys: int = 100_000_000,
 ) -> AsyncGenerator[ClickHouse, None]:
     http = httpx.AsyncClient(

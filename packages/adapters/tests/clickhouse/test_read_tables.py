@@ -1,6 +1,7 @@
 """Freshness, rebuild recovery and in-place updates through the HTTP client, without sockets."""
 
 import json
+import logging
 from collections.abc import AsyncGenerator, Callable, Iterable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from datetime import timedelta
@@ -352,6 +353,7 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
 async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
     case: str, caplog: pytest.LogCaptureFixture
 ) -> None:
+    caplog.set_level(logging.INFO)
     server = FakeClickHouse()
     moved = {"papers": "papers", "in_only": "", "in_only_mismatch": ""}.get(case, "citations")
     for source in GROUPS:
@@ -368,7 +370,8 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
     if case == "uuid_moved":
         server.live[IN] = UUID(int=9)
     server.zero_ids = {OUT} if case == "ids_out" else {IN} if "in_only" in case else set()
-    server.touched = {"papers": 4, "citations": 31 if case == "over_share" else 5}
+    # 11 of the read tables' 100 rows could drop more than a full rebuild keeps.
+    server.touched = {"papers": 4, "citations": 11 if case == "over_share" else 5}
     if case == "mismatch":
         server.counts[IN] = 99
     if case == "in_only_mismatch":
@@ -427,6 +430,7 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
             ],
         )
         assert not any(PAPERS in event for event in writes)
+        assert f"DELETE FROM {OUT} took" in caplog.text
         assert server.live == initial and len(server.markers) == 1
     elif case == "in_only_first":
         # The incoming edges are rebuilt from the outgoing ones, then both take the diff.
