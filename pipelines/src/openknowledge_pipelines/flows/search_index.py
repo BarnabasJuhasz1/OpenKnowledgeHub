@@ -1,7 +1,7 @@
 """Managed paper indexing with durable part receipts and bounded task concurrency."""
 
 import asyncio
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AbstractAsyncContextManager
 from datetime import UTC, datetime
 
@@ -10,6 +10,7 @@ from prefect.cache_policies import NO_CACHE
 from pydantic import BaseModel
 
 from openknowledge_core.search import IndexPapers, SearchIndexService, SettleIndex
+from openknowledge_core.search.commands import IndexPapersResult
 from openknowledge_core.search.errors import SearchRejected
 from openknowledge_core.search.ports import IndexedProgress, SearchSink, SearchSource
 from openknowledge_core.search.progress import Indexed, IndexPass, plan_index
@@ -30,6 +31,7 @@ async def run_index(
     base_parts: int,
     diff_parts: int,
     parallelism: int,
+    index: Callable[[IndexPapers], Awaitable[IndexPapersResult]] | None = None,
 ) -> SearchIndexResult:
     receipts = await progress.receipts()
     decision = plan_index(
@@ -68,7 +70,7 @@ async def run_index(
                     if not prepared:
                         await service.prepare(plan.index)
                         prepared = True
-            await service.index(
+            await (index or service.index)(
                 IndexPapers(
                     index=plan.index,
                     release=plan.release,
@@ -103,7 +105,15 @@ async def run_index(
     finally:
         # Drain already started work before releasing clients or reporting failure.
         if running:
-            await asyncio.gather(*running, return_exceptions=True)
+            drain = asyncio.gather(*running, return_exceptions=True)
+            interrupted = False
+            while not drain.done():
+                try:
+                    await asyncio.shield(drain)
+                except asyncio.CancelledError:
+                    interrupted = True
+            if interrupted:
+                raise asyncio.CancelledError
     async with execution():
         if (await progress.state()).sources != plan.sources:
             raise SearchRejected("source tables changed during indexing; rerun for a new base")

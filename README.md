@@ -264,6 +264,37 @@ Unless set, `OKP_OPENSEARCH_USER` is `hub-indexer`, `OKP_OPENSEARCH_TIMEOUT_SECO
 An unreachable OpenSearch or ClickHouse fails the flow; completed parts remain resumable.
 `tests/test_search_e2e.py` runs it against ClickHouse and OpenSearch in Docker.
 
+### Parallel indexing and worker upgrades
+
+`OKP_INDEX_PARALLELISM` controls spawned partition workers (default 2, allowed 1–6).
+Each process owns its ClickHouse/OpenSearch clients and handles one partition at a time;
+only commands and results cross process boundaries. The coordinator owns admission,
+completed-part receipts and final alias publication. Two workers leave CPU capacity for
+OpenSearch; an eight-vCPU VM can use six workers. Increase from the conservative default
+only after observing CPU and write queues.
+The worker container remains bounded by its existing memory limit.
+
+An image-only upgrade resumes the existing index: keep source table UUIDs, search contract,
+`OKP_INDEX_BASE_PARTS`/`OKP_INDEX_DIFF_PARTS`, and persisted receipts unchanged. The stored
+plan retains partition bounds; the image digest is not part of its identity. Do not reset the
+index or rebuild source tables for this upgrade. Completed partitions are skipped and an
+unfinished partition can replay its versioned writes safely.
+
+Use the Infrastructure `deploy` workflow with the tested commit and immutable image digest.
+It closes admission, waits for active partitions to finish, replaces both runners and reopens
+admission. The old run can fail when it next attempts a partition while admission is closed.
+After rollout succeeds, run `search-index/opensearch-vm` once (or follow an already queued
+run). Verify that it uses the same physical index and advances the existing part receipts.
+A drain timeout leaves admission closed: inspect the active work rather than clearing slots.
+Lost worker processes also retain admission because server-side requests may still be running;
+reconcile those requests before manually releasing retained slots. Cancellation waits for
+submitted workers and retains admission under the existing interrupted-work policy.
+
+For a network-free CPU comparison, run `uv run python -m tests.search_index_benchmark`.
+A 40,000-document synthetic workload measured 4.42s inline versus 2.27s with two reused
+workers (~1.95×) on the dev host. This measures validation/transformation/serialization,
+not production end-to-end throughput; ClickHouse and OpenSearch can become the next limits.
+
 Before a pull request:
 
 ```sh
