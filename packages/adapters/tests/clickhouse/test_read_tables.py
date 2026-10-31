@@ -370,8 +370,11 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
     if case == "uuid_moved":
         server.live[IN] = UUID(int=9)
     server.zero_ids = {OUT} if case == "ids_out" else {IN} if "in_only" in case else set()
-    # 11 of the read tables' 100 rows could drop more than a full rebuild keeps.
-    server.touched = {"papers": 4, "citations": 11 if case == "over_share" else 5}
+    # 6 keys could drop more than a full rebuild keeps from the smaller edge table's 50 rows,
+    # though not from the 100 rows of citations or of the larger one.
+    server.touched = {"papers": 4, "citations": 6 if case == "over_share" else 5}
+    if case == "over_share":
+        server.counts[IN] = 50
     if case == "mismatch":
         server.counts[IN] = 99
     if case == "in_only_mismatch":
