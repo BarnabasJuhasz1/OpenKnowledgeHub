@@ -150,7 +150,8 @@ class FakeClickHouse:
         elif query.startswith("DROP TABLE"):
             assert self.replaced == {"citation-edges", "read-tables-delete"}
             name = query.removesuffix(" SYNC").split()[-1]
-            assert name.endswith("_new") or name in DELTA.values()
+            # DROP ... SYNC after an insert hangs in ClickHouse 26.8, so scratch keys never wait.
+            assert name.endswith("_new") or (name in DELTA.values() and not query.endswith("SYNC"))
             self.staging.pop(name, None)
             rows = []
         elif query.startswith("CREATE TABLE"):
@@ -308,6 +309,8 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         "papers",
         "citations",
         "in_only_first",
+        "in_only",
+        "in_only_mismatch",
         "mismatch",
         "over_share",
         "full",
@@ -322,7 +325,7 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
     case: str, caplog: pytest.LogCaptureFixture
 ) -> None:
     server = FakeClickHouse()
-    moved = "papers" if case == "papers" else "citations"
+    moved = {"papers": "papers", "in_only": "", "in_only_mismatch": ""}.get(case, "citations")
     for source in GROUPS:
         server.history.append(marker(source, RELEASE, 9 if case == "rebased" else 1))
         server.history.append(marker(source, NEXT if source == moved else RELEASE))
@@ -332,12 +335,20 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
             server.history.append(marker(table, release, server.live[table].int))
     if case == "uuid_moved":
         server.live[IN] = UUID(int=9)
-    server.zero_ids = {"ids_out": {OUT}, "in_only_first": {IN}}.get(case, set())
+    server.zero_ids = {OUT} if case == "ids_out" else {IN} if "in_only" in case else set()
     server.touched = {"papers": 4, "citations": 31 if case == "over_share" else 5}
     if case == "mismatch":
         server.counts[IN] = 99
+    if case == "in_only_mismatch":
+        server.counts[f"{IN}_new"] = 99
     initial = server.live.copy()
     async with read_tables(server) as edges:
+        if case == "in_only_mismatch":
+            with pytest.raises(TableRejected, match="citation edge counts differ"):
+                await edges.build(PRODUCER, clock)
+            assert not any(event.startswith("EXCHANGE") for event in server.events)
+            assert server.live == initial and not server.markers
+            return
         result = await edges.build(PRODUCER, clock, full=case == "full")
     writes = [
         event
@@ -392,6 +403,21 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
         first = json.loads(server.markers[0])
         assert (first["target"], first["release"], first["from_release"]) == (IN, RELEASE, None)
         assert server.live[IN] != initial[IN] and server.live[OUT] == initial[OUT]
+    elif case == "in_only":
+        # Rollout step 2: only the incoming edges are rebuilt, from the outgoing ones.
+        assert result.paths == {"papers": CURRENT, "citations": ReadTablesPath.IN_ONLY}
+        assert result.touched == {}
+        assert [event for event in writes if event.startswith("EXCHANGE")] == [
+            f"EXCHANGE TABLES {IN}_new AND {IN}"
+        ]
+        assert not any(
+            event.startswith("DELETE") or DELTA["citations"] in event for event in writes
+        )
+        assert len(server.markers) == 1
+        assert [
+            (found["target"], found["release"], found["from_release"]) for found in recorded
+        ] == [(IN, RELEASE, None)]
+        assert recorded[0]["target_uuid"] == str(server.live[IN]) != str(initial[IN])
     else:
         assert result.paths == {"papers": FULL, "citations": FULL}
         assert all(f"CREATE TABLE {table}_new AS {table}" in writes for table in READ_TABLES)

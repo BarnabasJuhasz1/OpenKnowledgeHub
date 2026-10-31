@@ -155,8 +155,10 @@ class ClickHouseReadTables:
             )
         # Reclaim abandoned copies, including an old live table after a partial swap or a lost
         # marker answer. Stop the old insert first; never drop the published names.
-        for table in (*(f"{table}_new" for table in TABLES), *DELTA.values()):
-            await self._client.post(f"DROP TABLE IF EXISTS {table} SYNC")
+        for table in TABLES:
+            await self._client.post(f"DROP TABLE IF EXISTS {table}_new SYNC")
+        for table in DELTA.values():
+            await self._client.post(f"DROP TABLE IF EXISTS {table}")
 
     async def build(
         self, producer: Producer, clock: Callable[[], datetime], *, full: bool = False
