@@ -175,7 +175,9 @@ async def test_deploy_closes_admission_running_parts_drain_and_rerun_resumes() -
 async def test_lost_worker_joins_sibling_retains_admission_and_never_publishes(
     tmp_path: Path, mode: str
 ) -> None:
+    import asyncio
     import os
+    from contextlib import AsyncExitStack, asynccontextmanager
     from functools import partial
 
     from openknowledge_pipelines.flows.process_parts import PartProcesses, PartWorkerLost
@@ -185,6 +187,16 @@ async def test_lost_worker_joins_sibling_retains_admission_and_never_publishes(
     source.base_rows = [SourceRows(corpusid=i, paper=paper_row(i, 10)) for i in (1, 2)]
     workers = PartProcesses(partial(crash_with_sibling, str(tmp_path), mode), 2)
     service = SearchIndexService(source=source, sink=sink, shards=1)
+    acquire = asyncio.Lock()
+
+    @asynccontextmanager
+    async def execution() -> AsyncGenerator[None]:
+        # The temporary SQLite server can reject concurrent counter mutations.
+        # Serialize acquisition only; both real admission slots and workers stay active.
+        async with AsyncExitStack() as stack:
+            async with acquire:
+                await stack.enter_async_context(admission.execution(release_on_exception=True))
+            yield
 
     @flow(persist_result=False)
     async def run() -> SearchIndexResult:
@@ -193,7 +205,7 @@ async def test_lost_worker_joins_sibling_retains_admission_and_never_publishes(
             source,
             sink,
             progress,
-            execution=lambda: admission.execution(release_on_exception=True),
+            execution=execution,
             base_parts=2,
             diff_parts=2,
             parallelism=2,
