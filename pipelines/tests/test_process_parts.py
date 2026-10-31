@@ -63,6 +63,7 @@ async def test_cancellation_drains_and_submission_is_bounded(tmp_path: Path) -> 
 def test_worker_settings_bounds_and_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CLICKHOUSE_PASSWORD", raising=False)
     monkeypatch.delenv("OPENSEARCH_PASSWORD", raising=False)
+    monkeypatch.delenv("OKP_INDEX_PARALLELISM", raising=False)
     values = {
         "clickhouse_url": "http://localhost:8123",
         "CLICKHOUSE_PASSWORD": "test",
