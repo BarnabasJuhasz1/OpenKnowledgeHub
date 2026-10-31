@@ -1,15 +1,16 @@
-"""``okp search index`` against ClickHouse and OpenSearch in Docker, which CI must have."""
+"""The indexing flow against ClickHouse and OpenSearch in Docker, which CI must have."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import date
 from typing import Any
 
 import httpx
-from click.testing import CliRunner
+import pytest
 
-from openknowledge_pipelines import cli
+from openknowledge_pipelines.index_deployment import search_index
 from tests import test_load_e2e as load_e2e
 from tests.test_load_e2e import BUCKET, FIXTURE, archive, archive_diff, ran
 
@@ -23,7 +24,7 @@ INDEX = "papers"
 BASE, NEXT = "2026-10-13", "2026-10-20"
 
 
-def okp_search(ports: dict[str, str], *args: str, command: str = "index") -> tuple[int, str]:
+def indexed(ports: dict[str, str]) -> dict[str, Any]:
     env = {
         "OKP_CLICKHOUSE_URL": f"http://127.0.0.1:{ports['CLICKHOUSE_PORT']}",
         "CLICKHOUSE_PASSWORD": "openknowledge",
@@ -35,14 +36,10 @@ def okp_search(ports: dict[str, str], *args: str, command: str = "index") -> tup
         "OKP_INDEX_DIFF_PARTS": "2",
         "OKP_INDEX_PARALLELISM": "2",
     }
-    result = CliRunner().invoke(cli.main, ["search", command, *args], env=env)
-    return result.exit_code, result.output
-
-
-def indexed(ports: dict[str, str], *args: str) -> dict[str, Any]:
-    code, output = okp_search(ports, *args)
-    assert code == 0, output
-    return json.loads(output.splitlines()[-1])
+    with pytest.MonkeyPatch.context() as patch:
+        for name, value in env.items():
+            patch.setenv(name, value)
+        return asyncio.run(search_index()).model_dump(mode="json")
 
 
 def document(ports: dict[str, str], corpusid: str) -> dict[str, Any] | None:

@@ -2,9 +2,9 @@
 
 A document's version is the largest ``version`` of the rows it was built from, a delete carries
 the same, and every write uses OpenSearch's ``external_gte`` versioning. So a slice can be run
-again at the same or a newer release: an equal version is accepted again, and a pass over an
-older release is refused rather than applied, as long as OpenSearch still remembers a deleted
-document's version, which it drops after ``index.gc_deletes``.
+again: sources always read the latest rows, so versions only rise and an equal version is
+accepted again. An older document version is refused while OpenSearch remembers it; deleted
+versions are dropped after ``index.gc_deletes``.
 """
 
 from __future__ import annotations

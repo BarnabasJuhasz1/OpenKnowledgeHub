@@ -42,15 +42,18 @@ async def run_index(
     if decision.reason == "current":
         async with execution():
             if not await sink.exists(plan.index):
-                raise SearchRejected(f"completed index {plan.index} is missing")
+                raise SearchRejected(
+                    f"index {plan.index} is missing; receipts in indexed point at it"
+                )
             await sink.switch_alias("papers", plan.index)
         return SearchIndexResult(outcome="current", index=plan.index)
     if not any(r.plan == plan and r.kind == "started" for r in receipts):
-        low, high = await source.bounds(plan.release)
-        plan = plan.model_copy(update={"low": low, "high": high})
-        await progress.record(Indexed(plan=plan, kind="started", recorded_at=datetime.now(UTC)))
+        async with execution():
+            low, high = await source.bounds(plan.release)
+            plan = plan.model_copy(update={"low": low, "high": high})
+            await progress.record(Indexed(plan=plan, kind="started", recorded_at=datetime.now(UTC)))
     if (plan.from_release is not None or decision.finished) and not await sink.exists(plan.index):
-        raise SearchRejected(f"completed index {plan.index} is missing")
+        raise SearchRejected(f"index {plan.index} is missing; receipts in indexed point at it")
     preparation = asyncio.Lock()
     prepared = False
 
@@ -60,10 +63,11 @@ async def run_index(
     async def index_part(part: int, plan: IndexPass) -> None:
         nonlocal prepared
         async with execution():
-            async with preparation:
-                if not prepared:
-                    await service.prepare(plan.index)
-                    prepared = True
+            if plan.from_release is None:
+                async with preparation:
+                    if not prepared:
+                        await service.prepare(plan.index)
+                        prepared = True
             await service.index(
                 IndexPapers(
                     index=plan.index,

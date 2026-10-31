@@ -771,3 +771,28 @@ def test_search_joins_current_text_and_tldr_only_changes(tmp_path: Path) -> None
         assert live.version == 41492 and gone.version == 41493
     assert operations[4] is None
     assert operations[5] is not None and operations[5].version == 41492
+
+
+@needs_clickhouse
+def test_search_base_reads_latest_papers_after_merges(tmp_path: Path) -> None:
+    from openknowledge_adapters.clickhouse.search import BASE_QUERY
+
+    setup = (
+        up()
+        + """
+        INSERT INTO papers (corpusid, title, source_release, is_deleted)
+        VALUES (1, 'original', '2026-10-06', 0),
+               (2, 'later deleted', '2026-10-06', 0),
+               (3, 'unchanged', '2026-10-06', 0);
+        INSERT INTO papers (corpusid, title, source_release, is_deleted)
+        VALUES (1, 'updated', '2026-10-13', 0), (2, '', '2026-10-13', 1);
+        OPTIMIZE TABLE papers FINAL;
+    """
+    )
+    found = clickhouse_local(
+        setup + BASE_QUERY.replace("SETTINGS", "FORMAT JSONEachRow SETTINGS"),
+        tmp_path,
+        low="1",
+        high="3",
+    )
+    assert {row["corpusid"]: row["title"] for row in found} == {1: "updated", 3: "unchanged"}

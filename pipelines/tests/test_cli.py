@@ -795,25 +795,40 @@ def test_measured_cli_capacity_preserves_report_and_load_outcome(
     assert path.read_bytes() == before
 
 
-@pytest.mark.usefixtures("wired", "prefect_server")
-def test_search_cli_runs_the_managed_flow(monkeypatch: pytest.MonkeyPatch) -> None:
-    from openknowledge_pipelines.flows.search_index import SearchIndexResult
-    from openknowledge_pipelines.settings import SearchSettings
+@pytest.mark.parametrize("outcome", ["completed", "failed", "missing"])
+def test_search_cli_runs_the_managed_flow(monkeypatch: pytest.MonkeyPatch, outcome: str) -> None:
+    from uuid import UUID
+
+    import prefect.deployments
+    from prefect.client.schemas.objects import FlowRun
+    from prefect.exceptions import ObjectNotFound
+    from prefect.states import Completed, Failed
+
+    from openknowledge_pipelines.index_deployment import DEPLOYMENT_NAME
 
     checked: list[tuple[str, ...]] = []
     monkeypatch.setattr(cli, "_require_managed_server", checked.append)
+    run = FlowRun(
+        name="manual-index",
+        flow_id=UUID(int=1),
+        state=Completed() if outcome == "completed" else Failed(),
+    )
 
-    async def run_search(settings: SearchSettings) -> SearchIndexResult:
-        assert (settings.index_base_parts, settings.index_diff_parts) == (256, 18)
-        assert settings.index_parallelism == 2
-        return SearchIndexResult(outcome="current", index="papers-v2-test")
+    def run_search(name: str) -> FlowRun:
+        assert name == DEPLOYMENT_NAME
+        if outcome == "missing":
+            raise ObjectNotFound(RuntimeError("deployment missing"))
+        return run
 
-    monkeypatch.setattr(bootstrap, "run_search_index", run_search)
-    monkeypatch.delenv("S2_API_KEY", raising=False)
-    result = CliRunner().invoke(cli.main, ["search", "index"], env={**LOAD_ENV, **SEARCH_ENV})
-    assert result.exit_code == 0, result.output
+    monkeypatch.setattr(prefect.deployments, "run_deployment", run_search)
+    for name in (*LOAD_ENV, *SEARCH_ENV, "S2_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    result = CliRunner().invoke(cli.main, ["search", "index"])
+    assert result.exit_code == (0 if outcome == "completed" else 1), result.output
     assert checked == [(admission.NAME,)]
-    assert json.loads(result.output.splitlines()[-1]) == {
-        "outcome": "current",
-        "index": "papers-v2-test",
-    }
+    if outcome == "missing":
+        assert f"{DEPLOYMENT_NAME} is not served yet" in result.output
+        assert "serve-index on the OpenSearch VM" in result.output
+    else:
+        assert run.name in result.output and str(run.id) in result.output
+        assert ("Completed" if outcome == "completed" else "Failed") in result.output

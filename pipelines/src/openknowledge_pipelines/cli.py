@@ -7,7 +7,7 @@ import os
 from collections.abc import Callable, Coroutine, Mapping
 from contextlib import aclosing
 from pathlib import Path
-from typing import Any, Literal, TextIO
+from typing import Any, Literal, TextIO, cast
 from uuid import UUID
 
 import click
@@ -544,14 +544,26 @@ def search() -> None:
     """The paper search index."""
 
 
-@search.command("index", help="Bring the papers alias up to the applied release through Prefect.")
+@search.command("index", help="Queue the papers indexing deployment and wait for its final state.")
 def index() -> None:
+    from prefect.client.schemas.objects import FlowRun
+    from prefect.deployments import run_deployment
+    from prefect.exceptions import ObjectNotFound
+
     from openknowledge_pipelines import admission
-    from openknowledge_pipelines.index_deployment import search_index
+    from openknowledge_pipelines.index_deployment import DEPLOYMENT_NAME
 
     _require_managed_server((admission.NAME,))
-    _settings(SearchSettings)
-    _run_managed(search_index)
+    try:
+        run = cast("FlowRun", run_deployment(DEPLOYMENT_NAME))
+    except ObjectNotFound:
+        raise click.ClickException(
+            f"{DEPLOYMENT_NAME} is not served yet; run okp serve-index on the OpenSearch VM"
+        ) from None
+    message = f"Flow run {run.name} ({run.id}): {run.state or 'unknown state'}"
+    if run.state is None or not run.state.is_completed():
+        raise click.ClickException(message)
+    click.echo(message)
 
 
 @main.command("serve-index", help="Serve only search indexing on the OpenSearch VM.")

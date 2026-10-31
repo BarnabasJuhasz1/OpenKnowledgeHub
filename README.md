@@ -191,23 +191,28 @@ Until those are implemented, do not load a base over a populated table with miss
 
 ```sh
 uv run okp serve-index      # second serve process, on the OpenSearch VM
-uv run okp search index     # optional managed run in-process
+uv run okp search index     # queue the deployment and wait for its final state
 ```
 
 Apply ClickHouse migration `00019` before starting the indexer. The `search-index/opensearch-vm`
 deployment queues one run at a time, triggered by Completed or Failed runs of `s2-load`,
 `s2-load-diff` and `s2-sync`, with a six-hour fallback schedule. It uses the shared Prefect
 server (`PREFECT_API_URL`) and admission gate, and creates no S2 or ClickHouse concurrency
-limits. On first installation the gate requires operator admission, as described above.
+limits. Manual `okp search index` runs use the same deployment queue and need only the
+shared Prefect connection locally; search credentials and settings belong to the OpenSearch VM.
+On first installation the gate requires operator admission, as described above.
 
 Readers query the `papers` alias. When `papers`, `abstracts` and `tldrs` are applied at one
-release with matching live table UUIDs, the flow reads their current rows into one document
-per paper. If they are not aligned, it logs why and finishes without writes. A contract
+release with matching live table UUIDs, the flow reads their latest rows into one document
+per paper. If they are not aligned, it logs why and finishes without writes. Rows can be
+newer than the pass's release: replacing merges discard older versions, so the indexer
+always reads the latest state. The release bounds the key range and the diff's lower edge;
+new IDs above the frozen range are picked up by the next diff. A contract
 change or base table replacement builds a physical index named
 `papers-v<contract>-<release>-<source fingerprint>`. After all parts succeed, the flow resets
 refresh to its default, refreshes, and atomically switches the alias. Old indexes are retained.
-Otherwise it updates the live index by ID from its recorded release through the applied
-release, covering missed releases in one pass, then refreshes and records completion.
+Otherwise it updates the live index by ID for IDs touched after its recorded release,
+covering missed releases in one pass, then refreshes and records the applied release.
 A current run repairs the alias if needed and does no document writes.
 
 `title`, `abstract` and `tldr` go through OpenSearch's `english` analyzer, which stems, so a match on `networks` finds `network`.
@@ -227,7 +232,8 @@ ClickHouse's `http_send_timeout` must allow for a stalled bulk request (30 secon
 
 The `indexed` table stores frozen bounds, source UUIDs, contract version and completed parts.
 A failed base leaves an unpublished partial index; a failed diff can leave some live documents
-updated. Each part and the closing step takes its own admission slot; planning takes none.
+updated. Each part, the bounds/started receipt step and the closing step takes its own admission slot;
+receipt and applied-state reads for planning take none.
 Ordinary search exceptions release the slot, since requests are awaited and writes are idempotent.
 Cancellation or uncertain admission still requires operator reconciliation as described below.
 When a deploy closes admission, running parts drain and the next part is refused, failing the run.
@@ -237,7 +243,8 @@ the next run diffs it to the applied release. No old index is deleted. Indexing 
 limit, so loads can continue. Rows changed during a read are sent again by the next pass.
 
 Each document carries the largest `version` of its three rows, and the writes use `external_gte`, which accepts an equal version again.
-A part can be run again at the same or a newer release. A write below the version the index holds is refused and the pass stops with exit 1.
+Reading the latest rows keeps versions nondecreasing across resumed parts and later diffs.
+The next diff re-reads keys touched after the receipt's release.
 A bulk item that OpenSearch refuses with 429 is sent again up to 3 times, after 2, 4 and 8 seconds; an item still refused after that stops the pass with exit 1, and a rerun sends it again.
 An index is created with `refresh_interval` at -1, so a base build does not write a small segment every second.
 It needs `OKP_CLICKHOUSE_URL`, `CLICKHOUSE_PASSWORD`, `OKP_CLICKHOUSE_RAW_BUCKET`, `OKP_OPENSEARCH_URL` and `OPENSEARCH_PASSWORD`.

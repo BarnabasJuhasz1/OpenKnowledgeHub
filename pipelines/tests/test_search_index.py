@@ -6,7 +6,7 @@ from prefect import flow
 from prefect.events import DeploymentEventTrigger
 
 from openknowledge_core.search import SearchIndexService, SourceRows
-from openknowledge_core.search.errors import BulkRefused
+from openknowledge_core.search.errors import BulkRefused, SearchRejected
 from openknowledge_core.search.progress import Indexed, SearchState
 from openknowledge_pipelines import admission
 from openknowledge_pipelines.flows.search_index import SearchIndexResult, run_index
@@ -47,8 +47,18 @@ class Progress:
 
 
 @pytest.mark.usefixtures("prefect_server")
-async def test_failed_part_resumes_and_alias_switch_follows_settle() -> None:
-    source, sink, progress = RangedSource(), SettledSink(), Progress()
+@pytest.mark.parametrize("changed_sources", [False, True])
+async def test_failed_part_resumes_and_alias_switch_follows_settle(changed_sources: bool) -> None:
+    class RunProgress(Progress):
+        async def state(self) -> SearchState:
+            state = await super().state()
+            if changed_sources and sum(r.kind == "part" for r in self.rows) == 3:
+                return state.model_copy(
+                    update={"sources": {**state.sources, "papers": UUID(int=99)}}
+                )
+            return state
+
+    source, sink, progress = RangedSource(), SettledSink(), RunProgress()
     source.base_rows = [SourceRows(corpusid=i, paper=paper_row(i, 10)) for i in (1, 2, 3)]
     sink.refused = "2"
     service = SearchIndexService(source=source, sink=sink, shards=1)
@@ -73,6 +83,13 @@ async def test_failed_part_resumes_and_alias_switch_follows_settle() -> None:
     assert sink.target is None and not sink.refreshed
     original_bounds = progress.rows[0].plan
     sink.refused = None
+    if changed_sources:
+        with pytest.raises(SearchRejected, match="source tables changed during indexing"):
+            await run()
+        assert sink.target is None and not sink.refreshed
+        assert not any(r.kind == "complete" for r in progress.rows)
+        assert admission.status().active_slots == 0
+        return
     result = await run()
     assert result.outcome == "base"
     assert [r.part for r in progress.rows if r.kind == "part"] == [1, 2, 3]

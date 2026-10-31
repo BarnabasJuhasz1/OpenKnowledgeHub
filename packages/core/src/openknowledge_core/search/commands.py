@@ -11,7 +11,7 @@ from openknowledge_core.search.models import CorpusSlice, IndexName
 
 
 class IndexPapers(BaseModel):
-    """Write one corpus ID slice of the papers at ``release`` into ``index``.
+    """Write latest papers into ``index``, over a corpus ID slice bounded at ``release``.
 
     With ``from_release``, only the papers with a row after it are written, as a diff pass over
     an index that holds ``from_release`` and so must exist. Without it, every live paper of the

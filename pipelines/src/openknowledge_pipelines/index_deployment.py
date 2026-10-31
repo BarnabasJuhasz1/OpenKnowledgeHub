@@ -12,6 +12,9 @@ from openknowledge_pipelines import admission, bootstrap
 from openknowledge_pipelines.flows.search_index import SearchIndexResult
 from openknowledge_pipelines.settings import SearchSettings
 
+DEPLOYMENT = "opensearch-vm"
+DEPLOYMENT_NAME = f"search-index/{DEPLOYMENT}"
+
 
 @flow(name="search-index", persist_result=False, retries=0)
 async def search_index() -> SearchIndexResult:
@@ -22,7 +25,7 @@ async def search_index() -> SearchIndexResult:
 def index_deployment() -> RunnerDeployment:
     return RunnerDeployment.from_flow(
         search_index,
-        "opensearch-vm",
+        DEPLOYMENT,
         entrypoint_type=EntrypointType.MODULE_PATH,
         concurrency_limit=1,
         triggers=[

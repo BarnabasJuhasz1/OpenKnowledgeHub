@@ -16,21 +16,21 @@ class SearchSource(Protocol):
         ...
 
     async def base(self, release: ReleaseId, low: int, high: int) -> AsyncGenerator[SourceRows]:
-        """The live rows of both tables at ``release``, one item per corpus ID from low to high.
+        """Latest live papers and text, one item per corpus ID from low to high.
 
-        The tables keep one row per key, so ``release`` must be the one they hold: an older
-        state cannot be read back once a later release replaced a row. Items come in no set
-        order.
+        ``release`` identifies the pass whose bounds supplied the range, not a historical
+        snapshot. Items come in no set order.
         """
         ...
 
     async def diff(
         self, from_release: ReleaseId, release: ReleaseId, low: int, high: int
     ) -> AsyncGenerator[SourceRows]:
-        """The latest row per key in both tables, tombstones included, for the changed keys.
+        """The latest row per key in all three tables, tombstones included, for the changed keys.
 
-        A key counts as changed when either table has a row for it at a release after
-        ``from_release`` and up to ``release``.
+        A key counts as changed when any table has a row after ``from_release``.
+        ``release`` identifies the pass whose bounds supplied the range; rows have no upper
+        release bound.
         """
         ...
 
