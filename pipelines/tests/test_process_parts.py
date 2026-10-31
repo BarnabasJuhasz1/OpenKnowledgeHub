@@ -60,20 +60,26 @@ async def test_cancellation_drains_and_submission_is_bounded(tmp_path: Path) -> 
         await workers.close()
 
 
-def test_worker_settings_bounds_and_default() -> None:
-    settings = SearchSettings.model_validate(
-        {
-            "clickhouse_url": "http://localhost:8123",
-            "clickhouse_password": "test",
-            "clickhouse_raw_bucket": "test-bucket",
-            "opensearch_url": "http://localhost:9200",
-            "opensearch_password": "test",
-        }
-    )
-    assert settings.index_parallelism == 2
-    for invalid in (0, 5):
-        with pytest.raises(ValidationError):
-            SearchSettings.model_validate({**settings.model_dump(), "index_parallelism": invalid})
+def test_worker_settings_bounds_and_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("CLICKHOUSE_PASSWORD", raising=False)
+    monkeypatch.delenv("OPENSEARCH_PASSWORD", raising=False)
+    values = {
+        "clickhouse_url": "http://localhost:8123",
+        "CLICKHOUSE_PASSWORD": "test",
+        "clickhouse_raw_bucket": "test-bucket",
+        "opensearch_url": "http://localhost:9200",
+        "OPENSEARCH_PASSWORD": "test",
+    }
+    assert SearchSettings.model_validate(values).index_parallelism == 2
+    for valid in (1, 6):
+        assert (
+            SearchSettings.model_validate({**values, "index_parallelism": valid}).index_parallelism
+            == valid
+        )
+    for invalid in (0, 7):
+        with pytest.raises(ValidationError) as error:
+            SearchSettings.model_validate({**values, "index_parallelism": invalid})
+        assert [item["loc"] for item in error.value.errors()] == [("index_parallelism",)]
 
 
 async def test_typed_domain_failure_survives_spawn() -> None:

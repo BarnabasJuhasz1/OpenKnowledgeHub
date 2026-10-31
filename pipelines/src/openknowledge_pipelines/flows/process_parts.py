@@ -15,6 +15,16 @@ class PartWorkerLost(BaseException):
     """External requests may survive a lost child; admission must stay occupied."""
 
 
+class _PartPool(ProcessPoolExecutor):
+    def _spawn_process(self) -> None:
+        # CPython 3.12 submit() wakes the manager BEFORE registering a new child.
+        # If it consumes that wakeup during spawn, it can wait on the old sentinel
+        # list and miss this child's death until a sibling returns. Wake it again
+        # after registration. These private hooks are tied to the pinned runtime.
+        super()._spawn_process()  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+        self._executor_manager_thread_wakeup.wakeup()
+
+
 class PartProcesses:
     def __init__(
         self, worker: Callable[[IndexPapers], IndexPapersResult], parallelism: int
@@ -22,7 +32,7 @@ class PartProcesses:
         self._shutdown: asyncio.Task[None] | None = None
         self._worker = worker
         self._slots = asyncio.Semaphore(parallelism)
-        self._pool = ProcessPoolExecutor(
+        self._pool = _PartPool(
             max_workers=parallelism, mp_context=multiprocessing.get_context("spawn")
         )
 

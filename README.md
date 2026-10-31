@@ -266,11 +266,12 @@ An unreachable OpenSearch or ClickHouse fails the flow; completed parts remain r
 
 ### Parallel indexing and worker upgrades
 
-`OKP_INDEX_PARALLELISM` controls spawned partition workers (default 2, allowed 1–4).
+`OKP_INDEX_PARALLELISM` controls spawned partition workers (default 2, allowed 1–6).
 Each process owns its ClickHouse/OpenSearch clients and handles one partition at a time;
 only commands and results cross process boundaries. The coordinator owns admission,
 completed-part receipts and final alias publication. Two workers leave CPU capacity for
-OpenSearch on the current four-vCPU VM; increase only after observing CPU and write queues.
+OpenSearch; an eight-vCPU VM can use six workers. Increase from the conservative default
+only after observing CPU and write queues.
 The worker container remains bounded by its existing memory limit.
 
 An image-only upgrade resumes the existing index: keep source table UUIDs, search contract,

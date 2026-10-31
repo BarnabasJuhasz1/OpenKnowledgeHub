@@ -187,16 +187,12 @@ async def test_lost_worker_joins_sibling_retains_admission_and_never_publishes(
     source.base_rows = [SourceRows(corpusid=i, paper=paper_row(i, 10)) for i in (1, 2)]
     workers = PartProcesses(partial(crash_with_sibling, str(tmp_path), mode), 2)
     service = SearchIndexService(source=source, sink=sink, shards=1)
-    acquire = asyncio.Lock()
 
     @asynccontextmanager
     async def execution() -> AsyncGenerator[None]:
-        # The temporary SQLite server can reject concurrent counter mutations.
-        # Serialize acquisition only; both real admission slots and workers stay active.
-        async with AsyncExitStack() as stack:
-            async with acquire:
-                await stack.enter_async_context(admission.execution(release_on_exception=True))
-            yield
+        # Admission is reserved for the whole run below, before task/flow state writes
+        # can contend with counter mutations in the temporary SQLite server.
+        yield
 
     @flow(persist_result=False)
     async def run() -> SearchIndexResult:
@@ -214,7 +210,15 @@ async def test_lost_worker_joins_sibling_retains_admission_and_never_publishes(
 
     try:
         with pytest.raises(PartWorkerLost, match="admission retained"):
-            await run()
+            async with AsyncExitStack() as reserved:
+                for _ in range(2):
+                    await reserved.enter_async_context(
+                        admission.execution(release_on_exception=True)
+                    )
+                assert admission.status().active_slots == 2
+                # The sibling sleeps for 30s: natural completion must not satisfy join.
+                async with asyncio.timeout(20):
+                    await run()
         # Observe the admission boundary BEFORE the outer bootstrap closes its pool.
         assert admission.status().active_slots == 2
         for part in (1, 2):

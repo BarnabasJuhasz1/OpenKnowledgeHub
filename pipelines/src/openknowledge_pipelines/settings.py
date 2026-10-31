@@ -75,8 +75,8 @@ class SearchSettings(LoadSettings):
     """Per request, where a bulk request carries about 5 MB."""
     index_base_parts: PositiveInt = 256
     index_diff_parts: PositiveInt = 18
-    index_parallelism: int = Field(2, ge=1, le=4)
-    """Spawned part workers; two reserves CPU for colocated OpenSearch. Hard cap four."""
+    index_parallelism: int = Field(2, ge=1, le=6)
+    """Spawned part workers; two reserves CPU for colocated OpenSearch. Hard cap six."""
     index_shards: PositiveInt = 5
     """Primary shards of an index that okp search index creates."""
 
