@@ -68,6 +68,9 @@ class SearchSettings(LoadSettings):
     opensearch_password: SecretStr = Field(validation_alias="OPENSEARCH_PASSWORD")
     opensearch_timeout_seconds: PositiveFloat = 60.0
     """Per request, where a bulk request carries about 5 MB."""
+    index_base_parts: PositiveInt = 256
+    index_diff_parts: PositiveInt = 18
+    index_parallelism: PositiveInt = 2
     index_shards: PositiveInt = 5
     """Primary shards of an index that okp search index creates."""
 

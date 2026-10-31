@@ -30,12 +30,10 @@ from openknowledge_core.ingestion import (
     WatchdogResult,
     WatchdogService,
 )
-from openknowledge_core.search import SearchIndexService, SourceRows
 from openknowledge_pipelines import admission, bootstrap, cli, deployments
 from openknowledge_pipelines.settings import (
     LoadSettings,
     PipelineSettings,
-    SearchSettings,
     WatchdogSettings,
 )
 from tests.fakes.ports import (
@@ -43,14 +41,11 @@ from tests.fakes.ports import (
     PRODUCER,
     RELEASE,
     FakeApplied,
-    FakeSearchSink,
-    FakeSearchSource,
     FakeSource,
     FakeStore,
     FakeTables,
     applied_release,
     clock,
-    paper_row,
 )
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -666,81 +661,11 @@ def test_admission_command_failure_does_not_claim_closure(
     assert "secret diagnostic" not in result.output
 
 
-@pytest.mark.usefixtures("wired")
-def test_search_index_creates_the_index_and_prints_the_result(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    source, sink = FakeSearchSource(), FakeSearchSink()
-    source.base_rows = [SourceRows(corpusid=101, paper=paper_row(101, 41464, title="A Paper"))]
-
-    @asynccontextmanager
-    async def open_search_service(settings: SearchSettings) -> AsyncGenerator[SearchIndexService]:
-        assert settings.opensearch_user == "hub-indexer"
-        yield SearchIndexService(source=source, sink=sink, shards=settings.index_shards)
-
-    monkeypatch.setattr(bootstrap, "open_search_service", open_search_service)
-    monkeypatch.delenv("S2_API_KEY", raising=False)
-    for name, value in {**LOAD_ENV, **SEARCH_ENV}.items():
-        monkeypatch.setenv(name, value)
-    result = CliRunner().invoke(
-        cli.main,
-        ["search", "index", "--index", "papers-v1", "--release", "2026-10-06", "--range", "1/1"],
-    )
-    assert result.exit_code == 0, result.output
-    printed = json.loads(result.output.splitlines()[-1])
-    assert (printed["created"], printed["written"], printed["documents"]) == (True, 1, 1)
-    assert (printed["part"], printed["parts"], printed["from_release"]) == (1, 1, None)
-    assert sink.created["papers-v1"][1]["index"]["number_of_shards"] == 2
-    result = CliRunner().invoke(
-        cli.main,
-        ["search", "index", "--index", "papers-v1", "--release", "2026-10-06", "--range", "3/2"],
-    )
-    assert result.exit_code == 2
-    assert "the part must not exceed the number of parts" in result.output
-    result = CliRunner().invoke(
-        cli.main, ["search", "index", "--index", "papers-v1", "--release", "2026-10-06"]
-    )
-    assert result.exit_code == 2
-    assert "Missing option '--range'" in result.output
-
-
-@pytest.mark.usefixtures("wired")
-def test_search_settle_lets_the_index_refresh_again_and_refreshes_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    sink = FakeSearchSink()
-
-    @asynccontextmanager
-    async def open_search_service(settings: SearchSettings) -> AsyncGenerator[SearchIndexService]:
-        yield SearchIndexService(source=FakeSearchSource(), sink=sink, shards=settings.index_shards)
-
-    monkeypatch.setattr(bootstrap, "open_search_service", open_search_service)
-    monkeypatch.delenv("S2_API_KEY", raising=False)
-    for name, value in {**LOAD_ENV, **SEARCH_ENV}.items():
-        monkeypatch.setenv(name, value)
-    result = CliRunner().invoke(cli.main, ["search", "settle", "--index", "papers-v1"])
-    assert result.exit_code == 0, result.output
-    printed = json.loads(result.output.splitlines()[-1])
-    assert printed == {"index": "papers-v1", "refresh_interval": "default"}
-    assert (sink.intervals, sink.refreshed) == ({"papers-v1": None}, ["papers-v1"])
-
-
-@pytest.mark.parametrize("command", ["index", "settle"])
-def test_search_requires_admission_before_opening_clients(
-    monkeypatch: pytest.MonkeyPatch, command: str
-) -> None:
-    for name, value in {**LOAD_ENV, **SEARCH_ENV}.items():
-        monkeypatch.setenv(name, value)
-
-    def forbidden(*args: object, **kwargs: object) -> None:
-        pytest.fail("search must acquire admission before opening clients")
-
-    monkeypatch.setattr(bootstrap, "open_search_service", forbidden)
-    options = ["--release", RELEASE, "--range", "1/1"] if command == "index" else []
+def test_search_requires_the_managed_server(monkeypatch: pytest.MonkeyPatch) -> None:
     with temporary_settings({PREFECT_API_URL: None}):
-        result = CliRunner().invoke(cli.main, ["search", command, "--index", "papers-v1", *options])
+        result = CliRunner().invoke(cli.main, ["search", "index"])
     assert result.exit_code == 1
-    assert "Admission requires the shared PREFECT_API_URL" in result.output
+    assert "Managed commands require" in result.output
 
 
 @pytest.mark.parametrize("scenario", ["busy", "success", "failure"])
@@ -868,3 +793,42 @@ def test_measured_cli_capacity_preserves_report_and_load_outcome(
     code, output = okp(*args)
     assert code == 1 and "choose a new writable file" in output
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("outcome", ["completed", "failed", "missing"])
+def test_search_cli_runs_the_managed_flow(monkeypatch: pytest.MonkeyPatch, outcome: str) -> None:
+    from uuid import UUID
+
+    import prefect.deployments
+    from prefect.client.schemas.objects import FlowRun
+    from prefect.exceptions import ObjectNotFound
+    from prefect.states import Completed, Failed
+
+    from openknowledge_pipelines.index_deployment import DEPLOYMENT_NAME
+
+    checked: list[tuple[str, ...]] = []
+    monkeypatch.setattr(cli, "_require_managed_server", checked.append)
+    run = FlowRun(
+        name="manual-index",
+        flow_id=UUID(int=1),
+        state=Completed() if outcome == "completed" else Failed(),
+    )
+
+    def run_search(name: str) -> FlowRun:
+        assert name == DEPLOYMENT_NAME
+        if outcome == "missing":
+            raise ObjectNotFound(RuntimeError("deployment missing"))
+        return run
+
+    monkeypatch.setattr(prefect.deployments, "run_deployment", run_search)
+    for name in (*LOAD_ENV, *SEARCH_ENV, "S2_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    result = CliRunner().invoke(cli.main, ["search", "index"])
+    assert result.exit_code == (0 if outcome == "completed" else 1), result.output
+    assert checked == [(admission.NAME,)]
+    if outcome == "missing":
+        assert f"{DEPLOYMENT_NAME} is not served yet" in result.output
+        assert "serve-index on the OpenSearch VM" in result.output
+    else:
+        assert run.name in result.output and str(run.id) in result.output
+        assert ("Completed" if outcome == "completed" else "Failed") in result.output

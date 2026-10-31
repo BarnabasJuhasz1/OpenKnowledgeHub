@@ -11,6 +11,7 @@ import httpx
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
 from openknowledge_adapters.clickhouse.config import ClickHouseConfig
+from openknowledge_adapters.clickhouse.indexed import ClickHouseIndexed
 from openknowledge_adapters.clickhouse.read_tables import ClickHouseReadTables
 from openknowledge_adapters.clickhouse.search import ClickHouseSearchSource
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
@@ -37,6 +38,7 @@ class ClickHouse(NamedTuple):
     applied: ClickHouseAppliedReleases
     telemetry: ClickHouseLoadTelemetry
     search: ClickHouseSearchSource
+    indexed: ClickHouseIndexed
 
 
 @asynccontextmanager
@@ -66,6 +68,7 @@ async def connect(
             applied=applied,
             telemetry=ClickHouseLoadTelemetry(client),
             search=ClickHouseSearchSource(client),
+            indexed=ClickHouseIndexed(client),
         )
 
 

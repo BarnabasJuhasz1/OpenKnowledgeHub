@@ -11,7 +11,7 @@ from openknowledge_core.search.models import CorpusSlice, IndexName
 
 
 class IndexPapers(BaseModel):
-    """Write one corpus ID slice of the papers at ``release`` into ``index``.
+    """Write latest papers into ``index``, over a corpus ID slice bounded at ``release``.
 
     With ``from_release``, only the papers with a row after it are written, as a diff pass over
     an index that holds ``from_release`` and so must exist. Without it, every live paper of the
@@ -25,6 +25,7 @@ class IndexPapers(BaseModel):
     from_release: ReleaseId | None = None
     part: PositiveInt
     parts: PositiveInt
+    bounds: tuple[int, int] | None = None
 
     @model_validator(mode="after")
     def _consistent(self) -> Self:
@@ -40,7 +41,7 @@ class IndexPapers(BaseModel):
 
 
 class IndexPapersResult(BaseModel):
-    """``written`` and ``deleted`` count the operations sent; ``documents`` is the index's count."""
+    """Operations sent by one completed part."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -55,8 +56,6 @@ class IndexPapersResult(BaseModel):
     deleted: NonNegativeInt
     requests: NonNegativeInt
     """Bulk batches sent, which the client and the bulk helper may each send more than once."""
-    documents: NonNegativeInt
-    """Documents the index holds after the pass, once refreshed."""
 
 
 class SettleIndex(BaseModel):

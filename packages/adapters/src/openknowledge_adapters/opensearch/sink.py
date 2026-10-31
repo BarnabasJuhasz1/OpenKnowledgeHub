@@ -1,4 +1,4 @@
-"""The search sink over OpenSearch: index creation, versioned bulk writes, refresh and count.
+"""The search sink over OpenSearch: index creation, versioned bulk writes, and refresh.
 
 Every bulk item carries its version with ``external_gte``, so the same operations can be sent
 again. The client's own retries cover a dropped connection and the 502 to 504 statuses; a bulk
@@ -20,6 +20,7 @@ from opensearchpy import AsyncOpenSearch
 from opensearchpy.exceptions import (
     AuthenticationException,
     AuthorizationException,
+    NotFoundError,
     SerializationError,
     SSLError,
     TransportError,
@@ -60,6 +61,38 @@ class OpenSearchSink:
         self._client = client
         self._initial_backoff = initial_backoff
         self._max_backoff = max_backoff
+
+    async def alias_target(self, alias: IndexName) -> IndexName | None:
+        async def lookup() -> object:
+            try:
+                return await self._client.indices.get_alias(index="papers-v*", name=alias)
+            except NotFoundError:
+                return {}
+
+        targets = await self._call("read alias", alias, lookup())
+        if not isinstance(targets, dict):
+            raise SearchRejected(f"OpenSearch answered alias {alias} without index targets")
+        found = cast("dict[str, object]", targets)
+        if len(found) > 1:
+            raise SearchRejected(f"alias {alias} has more than one target")
+        return next(iter(found), None)
+
+    async def switch_alias(self, alias: IndexName, index: IndexName) -> None:
+        target = await self.alias_target(alias)
+        if target == index:
+            return
+        actions: list[dict[str, Any]] = []
+        if target is not None:
+            actions.append({"remove": {"index": target, "alias": alias}})
+        actions.append({"add": {"index": index, "alias": alias}})
+        answer: object = await self._call(
+            "switch alias", alias, self._client.indices.update_aliases(body={"actions": actions})
+        )
+        if (
+            not isinstance(answer, dict)
+            or cast("dict[str, object]", answer).get("acknowledged") is not True
+        ):
+            raise SearchRejected(f"OpenSearch did not acknowledge switching alias {alias}; rerun")
 
     async def exists(self, index: IndexName) -> bool:
         return bool(await self._call("look up", index, self._client.indices.exists(index=index)))
@@ -110,13 +143,6 @@ class OpenSearchSink:
 
     async def refresh(self, index: IndexName) -> None:
         await self._call("refresh", index, self._client.indices.refresh(index=index))
-
-    async def count(self, index: IndexName) -> int:
-        answer: object = await self._call("count", index, self._client.count(index=index))
-        count = cast("dict[str, object]", answer).get("count") if isinstance(answer, dict) else None
-        if isinstance(count, bool) or not isinstance(count, int) or count < 0:
-            raise SearchRejected(f"OpenSearch answered the count of {index} without a count")
-        return count
 
     async def _refused(
         self, index: IndexName, actions: list[dict[str, Any]], sent: Collection[str]

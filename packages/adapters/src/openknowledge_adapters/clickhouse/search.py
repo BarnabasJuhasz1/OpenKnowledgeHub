@@ -1,9 +1,8 @@
 """Read the latest paper, abstract and TLDR rows for each search document.
 
-Base papers use FINAL to hide tombstones. Text joins and diff papers retain the latest
-row including tombstones, whose versions contribute to the document version. A diff
-reads keys touched in any of the three tables. Joins stay within the part's corpus ID
-range and stream without a final sort; bounds tile the keys at the requested release.
+Versions only rise when every read takes the latest rows; replacing merges discard older
+rows, so historical reads cannot be relied on. Release bounds only the corpus ID range
+and the diff's lower edge. Joins stay within that range and stream without a final sort.
 """
 
 from __future__ import annotations
@@ -76,42 +75,42 @@ BASE_QUERY = f"""
 SELECT p.corpusid AS corpusid, {_PROJECTION}
 FROM (
     SELECT {_PAPER_COLUMNS} FROM papers FINAL
-    WHERE {_RANGE} AND is_deleted = 0 AND {_AT}
+    WHERE {_RANGE} AND is_deleted = 0
 ) AS p
 LEFT JOIN (
     SELECT {_ABSTRACT_COLUMNS} FROM abstracts
-    WHERE {_RANGE} AND {_AT}
+    WHERE {_RANGE}
     {_LATEST}
 ) AS a ON a.corpusid = p.corpusid
 LEFT JOIN (
     SELECT {_TLDR_COLUMNS} FROM tldrs
-    WHERE {_RANGE} AND {_AT}
+    WHERE {_RANGE}
     {_LATEST}
 ) AS t ON t.corpusid = p.corpusid
 {_SETTINGS}"""
 DIFF_QUERY = f"""
 WITH touched AS (
-    SELECT corpusid FROM papers WHERE {_RANGE} AND {_AFTER} AND {_AT}
+    SELECT corpusid FROM papers WHERE {_RANGE} AND {_AFTER}
     UNION DISTINCT
-    SELECT corpusid FROM abstracts WHERE {_RANGE} AND {_AFTER} AND {_AT}
+    SELECT corpusid FROM abstracts WHERE {_RANGE} AND {_AFTER}
     UNION DISTINCT
-    SELECT corpusid FROM tldrs WHERE {_RANGE} AND {_AFTER} AND {_AT}
+    SELECT corpusid FROM tldrs WHERE {_RANGE} AND {_AFTER}
 )
 SELECT touched.corpusid AS corpusid, {_PROJECTION}
 FROM touched
 LEFT JOIN (
     SELECT {_PAPER_COLUMNS} FROM papers
-    WHERE {_RANGE} AND {_AT} AND corpusid IN (SELECT corpusid FROM touched)
+    WHERE {_RANGE} AND corpusid IN (SELECT corpusid FROM touched)
     {_LATEST}
 ) AS p ON p.corpusid = touched.corpusid
 LEFT JOIN (
     SELECT {_ABSTRACT_COLUMNS} FROM abstracts
-    WHERE {_RANGE} AND {_AT} AND corpusid IN (SELECT corpusid FROM touched)
+    WHERE {_RANGE} AND corpusid IN (SELECT corpusid FROM touched)
     {_LATEST}
 ) AS a ON a.corpusid = touched.corpusid
 LEFT JOIN (
     SELECT {_TLDR_COLUMNS} FROM tldrs
-    WHERE {_RANGE} AND {_AT} AND corpusid IN (SELECT corpusid FROM touched)
+    WHERE {_RANGE} AND corpusid IN (SELECT corpusid FROM touched)
     {_LATEST}
 ) AS t ON t.corpusid = touched.corpusid
 {_SETTINGS}"""
@@ -126,12 +125,12 @@ class ClickHouseSearchSource:
         return int(rows[0]["low"]), int(rows[0]["high"])
 
     async def base(self, release: ReleaseId, low: int, high: int) -> AsyncGenerator[SourceRows]:
-        return self._rows(BASE_QUERY, low, high, release=release)
+        return self._rows(BASE_QUERY, low, high)
 
     async def diff(
         self, from_release: ReleaseId, release: ReleaseId, low: int, high: int
     ) -> AsyncGenerator[SourceRows]:
-        return self._rows(DIFF_QUERY, low, high, release=release, from_release=from_release)
+        return self._rows(DIFF_QUERY, low, high, from_release=from_release)
 
     async def _rows(
         self, query: str, low: int, high: int, **parameters: str

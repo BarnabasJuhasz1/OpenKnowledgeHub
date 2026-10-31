@@ -190,12 +190,31 @@ Until those are implemented, do not load a base over a populated table with miss
 ## Indexing papers into OpenSearch
 
 ```sh
-uv run okp search index --index papers-v2 --release <release_id> [--from-release <release_id>] --range I/N
-uv run okp search settle --index papers-v2
+uv run okp serve-index      # second serve process, on the OpenSearch VM
+uv run okp search index     # queue the deployment and wait for its final state
 ```
 
-It reads the live rows of `papers`, `abstracts` and `tldrs` from ClickHouse and writes one search document per paper into the index, with the abstract and `tldr` when present.
-A base pass creates the index with the mapping of `packages/contracts/src/openknowledge_contracts/search/papers.py` when it does not exist, and writes into it when it does.
+Apply ClickHouse migration `00019` before starting the indexer. The `search-index/opensearch-vm`
+deployment queues one run at a time, triggered by Completed or Failed runs of `s2-load`,
+`s2-load-diff` and `s2-sync`, with a six-hour fallback schedule. It uses the shared Prefect
+server (`PREFECT_API_URL`) and admission gate, and creates no S2 or ClickHouse concurrency
+limits. Manual `okp search index` runs use the same deployment queue and need only the
+shared Prefect connection locally; search credentials and settings belong to the OpenSearch VM.
+On first installation the gate requires operator admission, as described above.
+
+Readers query the `papers` alias. When `papers`, `abstracts` and `tldrs` are applied at one
+release with matching live table UUIDs, the flow reads their latest rows into one document
+per paper. If they are not aligned, it logs why and finishes without writes. Rows can be
+newer than the pass's release: replacing merges discard older versions, so the indexer
+always reads the latest state. The release bounds the key range and the diff's lower edge;
+new IDs above the frozen range are picked up by the next diff. A contract
+change or base table replacement builds a physical index named
+`papers-v<contract>-<release>-<source fingerprint>`. After all parts succeed, the flow resets
+refresh to its default, refreshes, and atomically switches the alias. Old indexes are retained.
+Otherwise it updates the live index by ID for IDs touched after its recorded release,
+covering missed releases in one pass, then refreshes and records the applied release.
+A current run repairs the alias if needed and does no document writes.
+
 `title`, `abstract` and `tldr` go through OpenSearch's `english` analyzer, which stems, so a match on `networks` finds `network`.
 `publicationdate` is a `date` in `yyyy-MM-dd` that takes range queries and sorts, and a value in another shape leaves the field unindexed but keeps the document.
 `title.exact` uses the `standard` analyzer without stemming.
@@ -203,25 +222,35 @@ The `lowercase` keyword normalizer makes filters on `venue`, `journal.name`, `s2
 `journal.volume` and `journal.pages` are keywords with their original case.
 A keyword value longer than 8191 characters stays in `_source` but is not indexed, since OpenSearch refuses a term over 32766 bytes.
 Changing the mapping means building a new index.
-A diff pass needs the index to exist and stops with exit 1 otherwise.
-Without `--from-release`, every live paper at the release is written.
-With it, only the papers with a newer row in `papers`, `abstracts` or `tldrs` are written, and a paper deleted since is deleted from the index.
-`--range I/N` writes part I of the corpusid range split into N equal parts, and is required.
-The range is the smallest to the largest corpusid at the release, read again by every part, so run all parts of one pass before the next load.
-A part streams from ClickHouse into the bulk requests, so the pass never holds it whole, but ClickHouse reads one side of each join whole into a hash table before it sends the first row, so a part should hold about 1M papers, or 1M changed papers in a diff pass.
-ClickHouse ends the stream when it cannot write to it for `http_send_timeout`, 30 s unless the server's default profile raises it, so a bulk write that stalls that long stops the part with exit 1, and a rerun repeats it.
-All three tables, including `tldrs`, must be applied at the same release, and that release must be the latest applied. The tables keep no history, so a base pass at an older release does not rebuild that release, it drops every paper whose latest row is newer, can carry an older abstract or TLDR, and still reports success.
+Parts are Prefect tasks with bounded concurrency. `OKP_INDEX_BASE_PARTS` defaults to 256,
+`OKP_INDEX_DIFF_PARTS` to 18, and `OKP_INDEX_PARALLELISM` to 2. The roughly 255M papers
+and 50M abstracts need about 1M papers per part: ClickHouse hashes a join side whole.
+Diff joins read touched keys, so 18 parts target about 1M changed documents per part for a
+weekly diff of 17–18M documents. Corpus ID distribution can be uneven; tune parts and
+parallelism to the VM's memory. Each part streams into bulk requests of about 5 MB.
+ClickHouse's `http_send_timeout` must allow for a stalled bulk request (30 seconds by default).
+
+The `indexed` table stores frozen bounds, source UUIDs, contract version and completed parts.
+A failed base leaves an unpublished partial index; a failed diff can leave some live documents
+updated. Each part, the bounds/started receipt step and the closing step takes its own admission slot;
+receipt and applied-state reads for planning take none.
+Ordinary search exceptions release the slot, since requests are awaited and writes are idempotent.
+Cancellation or uncertain admission still requires operator reconciliation as described below.
+When a deploy closes admission, running parts drain and the next part is refused, failing the run.
+Rerun after the deploy to skip successful parts. An unfinished base resumes at its own release
+while contract, source UUIDs and part count match, even if applied has advanced. Once complete,
+the next run diffs it to the applied release. No old index is deleted. Indexing holds no `clickhouse`
+limit, so loads can continue. Rows changed during a read are sent again by the next pass.
+
 Each document carries the largest `version` of its three rows, and the writes use `external_gte`, which accepts an equal version again.
-A part can be run again at the same or a newer release. A write below the version the index holds is refused and the pass stops with exit 1.
+Reading the latest rows keeps versions nondecreasing across resumed parts and later diffs.
+The next diff re-reads keys touched after the receipt's release.
 A bulk item that OpenSearch refuses with 429 is sent again up to 3 times, after 2, 4 and 8 seconds; an item still refused after that stops the pass with exit 1, and a rerun sends it again.
 An index is created with `refresh_interval` at -1, so a base build does not write a small segment every second.
-Each pass refreshes the index at its end, so what it wrote is searchable.
-A base build ends with `okp search settle` once its last part is written, which resets `refresh_interval` to the default and refreshes the index.
 It needs `OKP_CLICKHOUSE_URL`, `CLICKHOUSE_PASSWORD`, `OKP_CLICKHOUSE_RAW_BUCKET`, `OKP_OPENSEARCH_URL` and `OPENSEARCH_PASSWORD`.
 Unless set, `OKP_OPENSEARCH_USER` is `hub-indexer`, `OKP_OPENSEARCH_TIMEOUT_SECONDS` is 60 and `OKP_INDEX_SHARDS` is 5.
-An OpenSearch or ClickHouse that cannot be reached ends the run with exit 1 before anything is written.
+An unreachable OpenSearch or ClickHouse fails the flow; completed parts remain resumable.
 `tests/test_search_e2e.py` runs it against ClickHouse and OpenSearch in Docker.
-The flow and the deployment come with the next pull request.
 
 Before a pull request:
 
@@ -250,7 +279,8 @@ Deployments pin that digest, never a tag, and pass it as `OKP_IMAGE_DIGEST`: rec
 ## Deployment admission
 
 All mutating CLI commands and served flows hold a shared Prefect
-`deployment-admission` slot for their lifetime. Read-only `read-base`,
+`deployment-admission` slot for their lifetime, except search indexing, which admits each part
+and its closing step separately. Read-only `read-base`,
 `verify-base-manifest` and watchdog work while closed. Existing admitted Google Batch
 shard workers finish without Prefect access; direct shard commands require admission.
 
@@ -274,7 +304,8 @@ Standalone loads, load-diff and citation edge rebuilds (CLI and served flows) ac
 before admission and fail promptly when busy, without capacity retries. Sync waits for
 ClickHouse while holding its source lease and admission; it does not refuse on load contention.
 Source lease refusals or cancellation before admission take no admission slot.
-Once admitted, only successful work releases its slot. Failed/interrupted runs and uncertain API responses
+Except for ordinary search exceptions, only successful work releases its slot.
+Failed/interrupted runs and uncertain API responses
 require operator reconciliation: external work may survive. Counter mutations are never
 replayed on uncertain responses. This includes a load of a release that has not been archived,
 even if validation failed before writes: close admission, verify no surviving work, and use

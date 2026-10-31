@@ -7,6 +7,7 @@ from typing import Any, Protocol
 
 from openknowledge_contracts.datasets import ReleaseId
 from openknowledge_core.search.models import BulkOperation, IndexName, SourceRows
+from openknowledge_core.search.progress import Indexed, SearchState
 
 
 class SearchSource(Protocol):
@@ -15,26 +16,38 @@ class SearchSource(Protocol):
         ...
 
     async def base(self, release: ReleaseId, low: int, high: int) -> AsyncGenerator[SourceRows]:
-        """The live rows of both tables at ``release``, one item per corpus ID from low to high.
+        """Latest live papers and text, one item per corpus ID from low to high.
 
-        The tables keep one row per key, so ``release`` must be the one they hold: an older
-        state cannot be read back once a later release replaced a row. Items come in no set
-        order.
+        ``release`` identifies the pass whose bounds supplied the range, not a historical
+        snapshot. Items come in no set order.
         """
         ...
 
     async def diff(
         self, from_release: ReleaseId, release: ReleaseId, low: int, high: int
     ) -> AsyncGenerator[SourceRows]:
-        """The latest row per key in both tables, tombstones included, for the changed keys.
+        """The latest row per key in all three tables, tombstones included, for the changed keys.
 
-        A key counts as changed when either table has a row for it at a release after
-        ``from_release`` and up to ``release``.
+        A key counts as changed when any table has a row after ``from_release``.
+        ``release`` identifies the pass whose bounds supplied the range; rows have no upper
+        release bound.
         """
         ...
 
 
+class IndexedProgress(Protocol):
+    async def state(self) -> SearchState: ...
+
+    async def receipts(self) -> list[Indexed]: ...
+
+    async def record(self, receipt: Indexed) -> None: ...
+
+
 class SearchSink(Protocol):
+    async def alias_target(self, alias: IndexName) -> IndexName | None: ...
+
+    async def switch_alias(self, alias: IndexName, index: IndexName) -> None: ...
+
     async def exists(self, index: IndexName) -> bool: ...
 
     async def create_index(
@@ -50,5 +63,3 @@ class SearchSink(Protocol):
         ...
 
     async def refresh(self, index: IndexName) -> None: ...
-
-    async def count(self, index: IndexName) -> int: ...
