@@ -52,6 +52,7 @@ from openknowledge_core.ingestion.read_tables import (
     SOURCE_OF,
     BuildReadTablesResult,
     ReadTableResult,
+    ReadTablesPath,
 )
 from openknowledge_pipelines import admission, bootstrap, deployments
 from openknowledge_pipelines.flows import s2_batch_download, s2_sync
@@ -265,6 +266,8 @@ class Cycle:
             return BuildReadTablesResult(
                 source_releases=releases,
                 tables={table: ReadTableResult(rows=1, seconds=0) for table in READ_TABLES},
+                paths={"papers": ReadTablesPath.CURRENT, "citations": ReadTablesPath.INCREMENTAL},
+                touched={"citations": 1234},
             )
 
         return s2_sync.SyncServices(
@@ -863,6 +866,8 @@ async def test_sync_artifact_is_persisted_on_its_real_run_with_partial_outcomes(
     else:
         assert "| citation_edges_out | 1 |" in markdown
         assert "| citation_edges_in | 1 |" in markdown
+        assert "| papers | current | — |" in markdown
+        assert "| citations | incremental | 1234 |" in markdown
     assert FlowRunContext.get() is None
 
 

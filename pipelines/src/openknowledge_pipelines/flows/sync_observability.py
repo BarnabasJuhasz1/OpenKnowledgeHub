@@ -146,6 +146,13 @@ class SyncObservation(BaseModel):
                         f"| {table} | {built.rows} | {built.seconds:.1f} |"
                         for table, built in edges.tables.items()
                     ),
+                    "",
+                    "| Source | Path | Touched |",
+                    "| --- | --- | --- |",
+                    *(
+                        f"| {source} | {path} | {edges.touched.get(source, '—')} |"
+                        for source, path in edges.paths.items()
+                    ),
                 ]
             )
         else:
