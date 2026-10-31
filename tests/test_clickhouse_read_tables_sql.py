@@ -145,7 +145,7 @@ def test_in_only_rebuild_fills_ids_from_out(tmp_path: Path) -> None:
 @pytest.mark.parametrize("source", ["citations", "papers"])
 def test_delta_takes_keys_after_start_up_to_end(source: str, tmp_path: Path) -> None:
     complete, capped = (
-        ";\n".join(delta_sql(source, "2026-10-01", "2026-10-03", max_keys)) for max_keys in (3, 2)
+        ";\n".join(delta_sql(source, "2026-10-01", "2026-10-03", max_keys)) for max_keys in (3, 1)
     )
     sql = f"""
         {up()}
@@ -161,4 +161,4 @@ def test_delta_takes_keys_after_start_up_to_end(source: str, tmp_path: Path) -> 
         SELECT count() AS keys FROM {DELTA[source]} FORMAT JSONEachRow;
     """
     # Keys 2 and 5 come twice in range but count once; a capped delta stops one key past its cap.
-    assert clickhouse_local(sql, tmp_path) == [{"key": 2}, {"key": 3}, {"key": 5}, {"keys": 3}]
+    assert clickhouse_local(sql, tmp_path) == [{"key": 2}, {"key": 3}, {"key": 5}, {"keys": 2}]
