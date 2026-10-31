@@ -864,6 +864,7 @@ async def test_sync_artifact_is_persisted_on_its_real_run_with_partial_outcomes(
     elif failure == "edges":
         assert "Rebuild failed; publication may be partial" in markdown
     else:
+        assert "| Table | Rows inserted |" in markdown
         assert "| citation_edges_out | 1 |" in markdown
         assert "| citation_edges_in | 1 |" in markdown
         assert "| papers | current | — |" in markdown

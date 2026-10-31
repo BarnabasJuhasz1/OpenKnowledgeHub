@@ -46,9 +46,10 @@ SOURCES = {
     # One scan of citations: the incoming table is the outgoing one, sorted the other way.
     IN: f"{EDGES_IN}_new",
 }
-SETTINGS = (
-    "SETTINGS max_memory_usage = 8000000000, max_execution_time = 14400, max_insert_threads = 1, "
+MEMORY = (
+    "SETTINGS max_memory_usage = 8000000000, max_execution_time = 14400, max_insert_threads = 1"
 )
+SETTINGS = f"{MEMORY}, "
 EDGE_BLOCKS = "min_insert_block_size_rows = 50000000, min_insert_block_size_bytes = 0"
 BLOCKS = {
     # Paper rows carry titles: 50M of them would not fit the memory limit, so cap blocks by bytes.
@@ -68,18 +69,26 @@ DELTA = {"papers": "read_delta_papers", "citations": "read_delta_citations"}
 """Scratch tables holding the keys a source took in since the read tables' release."""
 KEY = {"papers": "corpusid", "citations": "citationid"}
 BYTES_PER_KEY = {"papers": BYTES_PER_PAPER, "citations": BYTES_PER_CITATION}
+DELTA_HEADROOM = 5 * 2**30
+"""Free disk an in-place update needs on top of its rows: lightweight deletes write
+``_row_exists`` masks and copy whole Compact parts, which stay below ``min_bytes_for_wide_part``."""
 _RELEASE = TypeAdapter(ReleaseId)
 log = logging.getLogger(__name__)
 
 
-def delta_sql(source: str, start: ReleaseId, end: ReleaseId) -> list[str]:
-    """Collect the keys ``source`` wrote in ``(start, end]``, tombstones and superseded rows too."""
+def delta_sql(source: str, start: ReleaseId, end: ReleaseId, max_keys: int) -> list[str]:
+    """Collect the keys ``source`` wrote in ``(start, end]``, tombstones and superseded rows too.
+
+    It stops one key past ``max_keys``, so a delta over the cap never has to fit in memory.
+    """
     start, end = _RELEASE.validate_python(start), _RELEASE.validate_python(end)
     return [
         f"DROP TABLE IF EXISTS {DELTA[source]}",
         f"CREATE TABLE {DELTA[source]} (key UInt64) ENGINE = MergeTree ORDER BY key",
         f"INSERT INTO {DELTA[source]} SELECT DISTINCT {KEY[source]} FROM {source} "
-        f"WHERE source_release > '{start}' AND source_release <= '{end}'",
+        f"WHERE source_release > '{start}' AND source_release <= '{end}' "
+        # One thread: each would hold its own set of up to max_keys keys.
+        f"LIMIT {max_keys + 1} {MEMORY}, max_threads = 1",
     ]
 
 
@@ -126,6 +135,7 @@ class ClickHouseReadTables:
         applied: ClickHouseAppliedReleases,
         stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
         max_delta_share: float = 0.3,
+        max_delta_keys: int = 100_000_000,
     ) -> None:
         self._client = client
         self._tables = tables
@@ -133,6 +143,8 @@ class ClickHouseReadTables:
         self._stage: Callable[[str], AbstractAsyncContextManager[None]] = stage or _no_stage
         self._max_delta_share = max_delta_share
         """Touched keys over this share of a source rebuild in full, the cheaper path then."""
+        self._max_delta_keys = max_delta_keys
+        """Touched keys over this count rebuild in full: an update holds them all in memory."""
 
     async def is_current(self, releases: Mapping[str, ReleaseId]) -> bool:
         live = await self._live()
@@ -191,10 +203,11 @@ class ClickHouseReadTables:
             if plan.path is ReadTablesPath.IN_ONLY or plan.in_only_first:
                 results[IN] = await self._in_only(plan.start or plan.end, producer, clock)
             if plan.path is ReadTablesPath.INCREMENTAL and plan.start is not None:
-                updated = await self._incremental(name, plan.start, plan.end, producer, clock)
-                if updated is None:
-                    return await self._full(producer, clock, releases)
-                touched[name], tables = updated
+                touched[name], tables = await self._incremental(
+                    name, plan.start, plan.end, producer, clock
+                )
+                if tables is None:
+                    return await self._full(producer, clock, releases, touched)
                 results |= tables
         return BuildReadTablesResult(
             source_releases=releases,
@@ -215,11 +228,19 @@ class ClickHouseReadTables:
         }
         marker = found.pop() if len(found) == 1 else None
         took = marker is not None and await self._applied.took(group, source_uuid, marker)
+        rebased = (
+            marker is not None
+            and took
+            and await self._applied.rebased(group, source_uuid, marker, source)
+        )
         edges = took and OUT in tables
+        if edges:
+            await self._require_ids()
         return GroupState(
             marker=marker,
             source=source,
             source_took_marker=took,
+            source_rebased=rebased,
             ids_missing_out=edges and await self._missing_ids(OUT),
             ids_missing_in=edges and await self._missing_ids(IN),
         )
@@ -252,26 +273,29 @@ class ClickHouseReadTables:
         end: ReleaseId,
         producer: Producer,
         clock: Callable[[], datetime],
-    ) -> tuple[int, dict[str, ReadTableResult]] | None:
-        """Take ``source``'s diffs into its read tables in place, or None to rebuild them all."""
+    ) -> tuple[int, dict[str, ReadTableResult] | None]:
+        """Take ``source``'s diffs into its read tables in place; no tables to rebuild them all."""
         started = monotonic()
         tables = GROUPS[source]
         async with self._stage(f"read tables: {source} delta"):
-            for statement in delta_sql(source, start, end):
+            for statement in delta_sql(source, start, end, self._max_delta_keys):
                 await self._run(statement)
             touched = (await self._counts(DELTA[source]))[DELTA[source]]
             total = await self._source_rows(source)
-            if touched > self._max_delta_share * total:
+            if touched > self._max_delta_keys or touched > self._max_delta_share * total:
                 log.info(
-                    "%s touched %d of %d rows, over the %.0f%% share; rebuilding in full",
+                    "%s touched %d of %d rows, over the %d key cap or the %.0f%% share; "
+                    "rebuilding in full",
                     source,
                     touched,
                     total,
+                    self._max_delta_keys,
                     self._max_delta_share * 100,
                 )
-                return None
+                return touched, None
             await self._require_free(
-                touched * BYTES_PER_KEY[source], f"updating the {source} read tables"
+                touched * BYTES_PER_KEY[source] + DELTA_HEADROOM,
+                f"updating the {source} read tables",
             )
         async with self._stage(f"read tables: {source} apply"):
             written: dict[str, int] = {}
@@ -288,7 +312,7 @@ class ClickHouseReadTables:
                         counts[OUT],
                         counts[IN],
                     )
-                    return None
+                    return touched, None
             await self._applied.record_all(
                 [await self._marker(table, end, start, producer, clock) for table in tables]
             )
@@ -303,6 +327,7 @@ class ClickHouseReadTables:
         producer: Producer,
         clock: Callable[[], datetime],
         releases: Mapping[str, ReleaseId],
+        touched: Mapping[str, int] | None = None,
     ) -> BuildReadTablesResult:
         async with self._stage("read tables: preflight and recovery"):
             await self.reclaim()
@@ -357,6 +382,7 @@ class ClickHouseReadTables:
             source_releases=dict(releases),
             tables=results,
             paths=dict.fromkeys(GROUPS, ReadTablesPath.FULL),
+            touched=dict(touched or {}),
         )
 
     async def _run(self, statement: str) -> int:
@@ -425,6 +451,14 @@ class ClickHouseReadTables:
         found = {row["name"]: int(row["total_rows"] or 0) for row in rows}
         if not set(TABLES) <= found.keys():
             raise TableRejected("the read tables do not exist; run the migrations")
+        await self._require_ids()
+        await self._require_free(
+            found["citations"] * BYTES_PER_CITATION + found["papers"] * BYTES_PER_PAPER,
+            "building read tables",
+        )
+        return await self._counts(*TABLES)
+
+    async def _require_ids(self) -> None:
         columns = await self._client.rows(
             "SELECT table FROM system.columns WHERE database = currentDatabase() "
             f"AND table IN ('{OUT}', '{IN}') AND name = 'citationid'"
@@ -435,11 +469,6 @@ class ClickHouseReadTables:
                 raise TableRejected(
                     f"{table}.citationid is missing; run migration {migration} before rebuilding"
                 )
-        await self._require_free(
-            found["citations"] * BYTES_PER_CITATION + found["papers"] * BYTES_PER_PAPER,
-            "building read tables",
-        )
-        return await self._counts(*TABLES)
 
     async def _require_free(self, needed: int, action: str) -> None:
         try:

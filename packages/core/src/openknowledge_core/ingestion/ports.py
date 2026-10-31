@@ -105,6 +105,12 @@ class TableLoader(Protocol):
 class AppliedReleases(Protocol):
     async def took(self, target: str, target_uuid: UUID, release: ReleaseId) -> bool: ...
 
+    async def rebased(
+        self, target: str, target_uuid: UUID, after: ReleaseId, through: ReleaseId
+    ) -> bool:
+        """Whether the table took a base release in ``(after, through]``."""
+        ...
+
     async def record(self, applied: AppliedRelease) -> None: ...
 
     async def latest(self, target: str) -> AppliedRelease | None:

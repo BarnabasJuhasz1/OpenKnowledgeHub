@@ -48,6 +48,7 @@ async def connect(
     transport: httpx.AsyncBaseTransport | None = None,
     read_table_stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
     read_tables_max_delta_share: float = 0.3,
+    read_tables_max_delta_keys: int = 100_000_000,
 ) -> AsyncGenerator[ClickHouse, None]:
     http = httpx.AsyncClient(
         base_url=str(config.url),
@@ -65,7 +66,12 @@ async def connect(
         applied = ClickHouseAppliedReleases(client)
         yield ClickHouse(
             read_tables=ClickHouseReadTables(
-                client, tables, applied, read_table_stage, read_tables_max_delta_share
+                client,
+                tables,
+                applied,
+                read_table_stage,
+                read_tables_max_delta_share,
+                read_tables_max_delta_keys,
             ),
             tables=tables,
             applied=applied,

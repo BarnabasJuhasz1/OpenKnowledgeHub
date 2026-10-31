@@ -292,6 +292,7 @@ async def open_read_tables(
         _clickhouse(settings, None),
         read_table_stage=stage or observer.stage,
         read_tables_max_delta_share=settings.read_tables_max_delta_share,
+        read_tables_max_delta_keys=settings.read_tables_max_delta_keys,
     ) as ch:
         yield ch.read_tables
 

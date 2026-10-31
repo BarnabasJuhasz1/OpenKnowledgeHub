@@ -32,6 +32,8 @@ class GroupState(BaseModel):
     marker: ReleaseId | None
     source: ReleaseId
     source_took_marker: bool
+    source_rebased: bool
+    """The source took a base release after the marker, so its diffs do not lead from it."""
     ids_missing_out: bool
     ids_missing_in: bool
 
@@ -50,6 +52,7 @@ def plan_group(state: GroupState, *, full: bool) -> GroupPlan:
         full
         or state.marker is None
         or not state.source_took_marker
+        or state.source_rebased
         or state.marker > state.source
         or state.ids_missing_out
     ):

@@ -403,6 +403,17 @@ class FakeApplied:
             for record in self.records
         )
 
+    async def rebased(
+        self, target: str, target_uuid: UUID, after: ReleaseId, through: ReleaseId
+    ) -> bool:
+        return any(
+            record.target == target
+            and record.target_uuid == target_uuid
+            and record.from_release is None
+            and after < record.release <= through
+            for record in self.records
+        )
+
     async def latest(self, target: str) -> AppliedRelease | None:
         return next((found for found in reversed(self.records) if found.target == target), None)
 

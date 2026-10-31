@@ -140,7 +140,7 @@ class SyncObservation(BaseModel):
                 [
                     f"Source releases: {edges.source_releases}",
                     "",
-                    "| Table | Rows | Build and publication seconds |",
+                    "| Table | Rows inserted | Build and publication seconds |",
                     "| --- | --- | --- |",
                     *(
                         f"| {table} | {built.rows} | {built.seconds:.1f} |"

@@ -570,11 +570,12 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
     assert query(ports, "SELECT count() FROM citation_edges_in") == "3\n"
     # The diff moves citation 4 to paper 103 and tombstones citation 5.
     old, new = "2026-10-20", "2026-10-22"
+    moved = next(row for row in rows if row["citationid"] == 6270000004)
     archive_diff(
         ports,
         old,
         new,
-        updates=[json.dumps({**rows[3], "citedcorpusid": 103})],
+        updates=[json.dumps({**moved, "citedcorpusid": 103})],
         deletes=['{"citationid": 6270000005}'],
         dataset="citations",
     )
@@ -583,6 +584,7 @@ def test_build_read_tables(ports: dict[str, str]) -> None:
     assert updated.exit_code == 0, updated.output
     built = json.loads(updated.output.splitlines()[-1])
     assert built["paths"] == {"papers": "current", "citations": "incremental"}
+    # Citations 3, 4 and 5: the tombstones inserted by hand at 10-21 are in range, besides the diff.
     assert built["touched"] == {"citations": 3}
     assert set(built["tables"]) == {"citation_edges_out", "citation_edges_in"}
     marker = (

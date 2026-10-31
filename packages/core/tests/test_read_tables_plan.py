@@ -23,6 +23,11 @@ from openknowledge_core.ingestion.read_tables import (
             GroupPlan(path=ReadTablesPath.FULL, start=None, end="2026-10-13"),
         ),
         (
+            {"source_rebased": True},
+            False,
+            GroupPlan(path=ReadTablesPath.FULL, start=None, end="2026-10-13"),
+        ),
+        (
             {"marker": "2026-10-20"},
             False,
             GroupPlan(path=ReadTablesPath.FULL, start=None, end="2026-10-13"),
@@ -80,6 +85,7 @@ def test_plan_group(changes: dict[str, object], full: bool, expected: GroupPlan)
             "marker": "2026-10-06",
             "source": "2026-10-13",
             "source_took_marker": True,
+            "source_rebased": False,
             "ids_missing_out": False,
             "ids_missing_in": False,
             **changes,

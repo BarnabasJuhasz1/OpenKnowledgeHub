@@ -144,6 +144,21 @@ class ClickHouseAppliedReleases:
         )
         return bool(rows)
 
+    async def rebased(
+        self, target: str, target_uuid: UUID, after: ReleaseId, through: ReleaseId
+    ) -> bool:
+        """Whether the table took a base release in ``(after, through]``; a diff names its start."""
+        rows = await self._client.rows(
+            "SELECT 1 FROM applied WHERE target = {target:String} AND target_uuid = {uuid:UUID} "
+            "AND from_release IS NULL AND release > {after:Date} AND release <= {through:Date} "
+            "LIMIT 1",
+            target=target,
+            uuid=str(target_uuid),
+            after=after,
+            through=through,
+        )
+        return bool(rows)
+
     async def latest(self, target: str) -> AppliedRelease | None:
         rows = await self._client.rows(
             f"SELECT {APPLIED_COLUMNS} FROM applied "

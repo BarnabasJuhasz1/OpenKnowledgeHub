@@ -11,7 +11,12 @@ import httpx
 import pytest
 
 from openknowledge_adapters.clickhouse.client import ClickHouseClient
-from openknowledge_adapters.clickhouse.read_tables import DELTA, ClickHouseReadTables
+from openknowledge_adapters.clickhouse.read_tables import (
+    BYTES_PER_CITATION,
+    DELTA,
+    DELTA_HEADROOM,
+    ClickHouseReadTables,
+)
 from openknowledge_adapters.clickhouse.tables import ClickHouseAppliedReleases, ClickHouseTables
 from openknowledge_contracts.tables.clickhouse import version_expression
 from openknowledge_contracts.tables.s2 import CONTRACTS
@@ -72,9 +77,10 @@ async def test_read_tables_current_only_for_all_sources(table: str, state: str) 
         ) is (state == "current_empty")
 
 
-def marker(target: str, release: str, uuid: int = 1) -> str:
+def marker(target: str, release: str, uuid: int = 1, from_release: str | None = None) -> str:
     found = applied_release(target, release, timedelta())
-    return found.model_copy(update={"target_uuid": UUID(int=uuid)}).model_dump_json()
+    update = {"target_uuid": UUID(int=uuid), "from_release": from_release}
+    return found.model_copy(update=update).model_dump_json()
 
 
 class FakeClickHouse:
@@ -92,7 +98,7 @@ class FakeClickHouse:
         self.events: list[str] = []
         self.replaced: set[str] = set()
         self.columns = {OUT, IN}
-        self.free_space = 12800
+        self.free_space = DELTA_HEADROOM + 12800
         self.counts: dict[str, int] = {}
         self.touched = {"papers": 0, "citations": 0}
         self.zero_ids: set[str] = set()
@@ -114,14 +120,30 @@ class FakeClickHouse:
             self.replaced.add(params["query_id"])
             rows = []
         elif query.startswith("SELECT 1 FROM applied"):
-            took = any(
-                (found["target"], found["target_uuid"], found["release"])
-                == (params["param_target"], params["param_uuid"], params["param_release"])
+            mine = [
+                found
                 for found in self.marked()
-            )
-            rows = [{"1": 1}] if took else []
+                if (found["target"], found["target_uuid"])
+                == (params["param_target"], params["param_uuid"])
+            ]
+            if "from_release IS NULL" in query:
+                after, through = params["param_after"], params["param_through"]
+                mine = [
+                    found
+                    for found in mine
+                    if found["from_release"] is None and after < found["release"] <= through
+                ]
+            else:
+                mine = [found for found in mine if found["release"] == params["param_release"]]
+            rows = [{"1": 1}] if mine else []
         elif query.startswith("SELECT 1 FROM"):
             assert "citationid = 0 LIMIT 1" in query
+            if query.split()[3] not in self.columns:
+                return httpx.Response(
+                    404,
+                    headers={"X-ClickHouse-Exception-Code": "47"},
+                    text="Code: 47. DB::Exception: Unknown expression identifier `citationid`",
+                )
             rows = [{"1": 1}] if query.split()[3] in self.zero_ids else []
         elif query.startswith("SELECT count() AS rows FROM"):
             rows = [{"rows": self.counts.get(query.split()[5], 100)}]
@@ -189,6 +211,7 @@ class FakeClickHouse:
 async def read_tables(
     server: FakeClickHouse,
     stage: Callable[[str], AbstractAsyncContextManager[None]] | None = None,
+    max_delta_keys: int = 100,
 ) -> AsyncGenerator[ClickHouseReadTables]:
     async with httpx.AsyncClient(
         base_url="http://clickhouse", transport=httpx.MockTransport(server.respond)
@@ -199,6 +222,7 @@ async def read_tables(
             ClickHouseTables(client, raw_bucket="raw"),
             ClickHouseAppliedReleases(client),
             stage,
+            max_delta_keys=max_delta_keys,
         )
 
 
@@ -313,11 +337,15 @@ async def test_rebuild_reclaims_staging_before_capacity_and_recovers(failure: st
         "in_only_mismatch",
         "mismatch",
         "over_share",
+        "over_cap",
+        "low_disk",
+        "missing_column",
         "full",
         "missing_marker",
         "uuid_moved",
         "markers_disagree",
         "rebased",
+        "new_base",
         "ids_out",
     ],
 )
@@ -328,7 +356,11 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
     moved = {"papers": "papers", "in_only": "", "in_only_mismatch": ""}.get(case, "citations")
     for source in GROUPS:
         server.history.append(marker(source, RELEASE, 9 if case == "rebased" else 1))
-        server.history.append(marker(source, NEXT if source == moved else RELEASE))
+        if source == moved:
+            start = None if case == "new_base" else RELEASE
+            server.history.append(marker(source, NEXT, from_release=start))
+        else:
+            server.history.append(marker(source, RELEASE))
     for table in READ_TABLES:
         release = "2026-09-29" if case == "markers_disagree" and table == IN else RELEASE
         if not (case == "missing_marker" and table == IN):
@@ -341,12 +373,21 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
         server.counts[IN] = 99
     if case == "in_only_mismatch":
         server.counts[f"{IN}_new"] = 99
+    if case == "low_disk":
+        server.free_space = DELTA_HEADROOM + server.touched["citations"] * BYTES_PER_CITATION - 1
+    if case == "missing_column":
+        server.columns = {OUT}
+    refusals = {
+        "in_only_mismatch": "citation edge counts differ",
+        "low_disk": "updating the citations read tables needs about 5 GiB",
+        "missing_column": "citation_edges_in.citationid is missing; run migration 00019",
+    }
     initial = server.live.copy()
-    async with read_tables(server) as edges:
-        if case == "in_only_mismatch":
-            with pytest.raises(TableRejected, match="citation edge counts differ"):
+    async with read_tables(server, max_delta_keys=4 if case == "over_cap" else 100) as edges:
+        if case in refusals:
+            with pytest.raises(TableRejected, match=refusals[case]):
                 await edges.build(PRODUCER, clock)
-            assert not any(event.startswith("EXCHANGE") for event in server.events)
+            assert not any(event.startswith(("EXCHANGE", "DELETE")) for event in server.events)
             assert server.live == initial and not server.markers
             return
         result = await edges.build(PRODUCER, clock, full=case == "full")
@@ -420,6 +461,9 @@ async def test_build_updates_in_place_when_the_sources_moved_by_diffs(
         assert recorded[0]["target_uuid"] == str(server.live[IN]) != str(initial[IN])
     else:
         assert result.paths == {"papers": FULL, "citations": FULL}
+        # A fallback keeps the count that sent it there.
+        fell_back = case in ("over_share", "over_cap", "mismatch")
+        assert result.touched == ({"citations": server.touched["citations"]} if fell_back else {})
         assert all(f"CREATE TABLE {table}_new AS {table}" in writes for table in READ_TABLES)
         assert [found["target"] for found in recorded] == list(READ_TABLES)
         assert all(found["from_release"] is None for found in recorded)

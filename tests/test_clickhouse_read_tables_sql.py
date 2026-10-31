@@ -66,9 +66,9 @@ def _full_build(suffix: str) -> str:
 @needs_clickhouse
 def test_incremental_update_equals_full_rebuild(tmp_path: Path) -> None:
     run = [
-        *delta_sql("citations", "2026-10-01", "2026-10-03"),
+        *delta_sql("citations", "2026-10-01", "2026-10-03", 100),
         *apply_sql("citations"),
-        *delta_sql("papers", "2026-10-01", "2026-10-03"),
+        *delta_sql("papers", "2026-10-01", "2026-10-03", 100),
         *apply_sql("papers"),
     ]
     # A run that stopped before its last insert, then two complete reruns.
@@ -144,13 +144,21 @@ def test_in_only_rebuild_fills_ids_from_out(tmp_path: Path) -> None:
 @needs_clickhouse
 @pytest.mark.parametrize("source", ["citations", "papers"])
 def test_delta_takes_keys_after_start_up_to_end(source: str, tmp_path: Path) -> None:
-    delta = ";\n".join(delta_sql(source, "2026-10-01", "2026-10-03"))
+    complete, capped = (
+        ";\n".join(delta_sql(source, "2026-10-01", "2026-10-03", max_keys)) for max_keys in (3, 2)
+    )
     sql = f"""
         {up()}
+        SYSTEM STOP MERGES {source};
         INSERT INTO {source} ({KEY[source]}, source_release, is_deleted)
         VALUES (1, '2026-10-01', 0), (2, '2026-10-02', 0), (3, '2026-10-03', 0),
                (4, '2026-10-04', 0), (5, '2026-10-02', 1);
-        {delta};
+        INSERT INTO {source} ({KEY[source]}, source_release, is_deleted)
+        VALUES (2, '2026-10-03', 0), (5, '2026-10-03', 1);
+        {complete};
         SELECT key FROM {DELTA[source]} ORDER BY key FORMAT JSONEachRow;
+        {capped};
+        SELECT count() AS keys FROM {DELTA[source]} FORMAT JSONEachRow;
     """
-    assert clickhouse_local(sql, tmp_path) == [{"key": 2}, {"key": 3}, {"key": 5}]
+    # Keys 2 and 5 come twice in range but count once; a capped delta stops one key past its cap.
+    assert clickhouse_local(sql, tmp_path) == [{"key": 2}, {"key": 3}, {"key": 5}, {"keys": 3}]
