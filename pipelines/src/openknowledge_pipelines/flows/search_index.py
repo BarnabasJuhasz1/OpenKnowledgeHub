@@ -14,6 +14,9 @@ from openknowledge_core.search.commands import IndexPapersResult
 from openknowledge_core.search.errors import SearchRejected
 from openknowledge_core.search.ports import IndexedProgress, SearchSink, SearchSource
 from openknowledge_core.search.progress import Indexed, IndexPass, plan_index
+from openknowledge_pipelines.flows.s2_download import retry_transient
+
+PART_RETRY_DELAYS: list[float] = [15, 30, 60]
 
 
 class SearchIndexResult(BaseModel):
@@ -60,7 +63,13 @@ async def run_index(
     prepared = False
 
     @task(
-        name="index-part", task_run_name="part {part}", cache_policy=NO_CACHE, persist_result=False
+        name="index-part",
+        task_run_name="part {part}",
+        cache_policy=NO_CACHE,
+        persist_result=False,
+        retries=3,
+        retry_delay_seconds=PART_RETRY_DELAYS,
+        retry_condition_fn=retry_transient,
     )
     async def index_part(part: int, plan: IndexPass) -> None:
         nonlocal prepared

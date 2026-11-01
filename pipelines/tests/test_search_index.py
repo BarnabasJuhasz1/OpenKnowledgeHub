@@ -1,4 +1,4 @@
-from collections.abc import AsyncGenerator
+from collections.abc import AsyncGenerator, Awaitable, Callable
 from pathlib import Path
 from uuid import UUID
 
@@ -6,7 +6,9 @@ import pytest
 from prefect import flow
 from prefect.events import DeploymentEventTrigger
 
+from openknowledge_core.ingestion.errors import ContractViolation
 from openknowledge_core.search import SearchIndexService, SourceRows
+from openknowledge_core.search.commands import IndexPapers, IndexPapersResult
 from openknowledge_core.search.errors import BulkRefused, SearchRejected
 from openknowledge_core.search.progress import Indexed, SearchState
 from openknowledge_pipelines import admission
@@ -233,4 +235,118 @@ async def test_lost_worker_joins_sibling_retains_admission_and_never_publishes(
         held = admission.status().active_slots
         if held:
             admission.release(held)
+        admission.status("open")
+
+
+@flow(persist_result=False)
+async def run_retry_parts(
+    service: SearchIndexService,
+    source: RangedSource,
+    sink: SettledSink,
+    progress: Progress,
+    index: Callable[[IndexPapers], Awaitable[IndexPapersResult]],
+    parts: int = 1,
+) -> SearchIndexResult:
+    return await run_index(
+        service,
+        source,
+        sink,
+        progress,
+        execution=lambda: admission.execution(release_on_exception=True),
+        base_parts=parts,
+        diff_parts=parts,
+        parallelism=1,
+        index=index,
+    )
+
+
+@pytest.mark.usefixtures("prefect_server")
+@pytest.mark.parametrize("failure_count", [1, 4])
+async def test_transient_part_retries_preserve_plan_and_receipts(
+    monkeypatch: pytest.MonkeyPatch, failure_count: int
+) -> None:
+    from openknowledge_core.ingestion.errors import TableUnavailable
+    from openknowledge_pipelines.flows import search_index
+
+    assert search_index.PART_RETRY_DELAYS == [15, 30, 60]
+    monkeypatch.setattr(search_index, "PART_RETRY_DELAYS", [0.01, 0.02, 0.03])
+    source, sink, progress = RangedSource(), SettledSink(), Progress()
+    source.base_rows = [SourceRows(corpusid=i, paper=paper_row(i, 10)) for i in (1, 2)]
+    service = SearchIndexService(source=source, sink=sink, shards=1)
+    attempts: list[IndexPapers] = []
+
+    async def index(command: IndexPapers) -> IndexPapersResult:
+        assert admission.status().active_slots == 1
+        if command.part == 2:
+            attempts.append(command)
+            assert [r.part for r in progress.rows if r.kind == "part"] == [1]
+            if len(attempts) <= failure_count:
+                # Exercise idempotent replay after writes, rather than failure before any work.
+                await service.index(command)
+                raise TableUnavailable("ClickHouse query failed (RemoteProtocolError); rerun")
+        return await service.index(command)
+
+    if failure_count == 4:
+        with pytest.raises(TableUnavailable):
+            await run_retry_parts(service, source, sink, progress, index, parts=2)
+        assert [r.part for r in progress.rows if r.kind == "part"] == [1]
+        assert sink.target is None and not sink.refreshed
+    else:
+        await run_retry_parts(service, source, sink, progress, index, parts=2)
+        assert [r.part for r in progress.rows if r.kind == "part"] == [1, 2]
+        assert sink.target is not None
+    assert len(attempts) == min(failure_count + 1, 4)
+    assert all(command == attempts[0] for command in attempts)
+    assert all(r.plan == progress.rows[0].plan for r in progress.rows)
+    assert admission.status().active_slots == 0
+
+
+@pytest.mark.usefixtures("prefect_server")
+@pytest.mark.parametrize(
+    "failure",
+    [ValueError("bug"), ContractViolation("invalid row"), SearchRejected("source changed")],
+)
+async def test_terminal_part_failure_is_not_retried(failure: Exception) -> None:
+    source, sink, progress = RangedSource(), SettledSink(), Progress()
+    service = SearchIndexService(source=source, sink=sink, shards=1)
+    attempts = 0
+
+    async def index(command: IndexPapers) -> IndexPapersResult:
+        nonlocal attempts
+        attempts += 1
+        raise failure
+
+    with pytest.raises(type(failure), match=str(failure)):
+        await run_retry_parts(service, source, sink, progress, index)
+    assert attempts == 1
+    assert [r.kind for r in progress.rows] == ["started"]
+    assert sink.target is None and admission.status().active_slots == 0
+
+
+@pytest.mark.usefixtures("prefect_server")
+async def test_retry_rechecks_admission_before_replaying_part(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from openknowledge_core.ingestion.errors import TableUnavailable
+    from openknowledge_pipelines.flows import search_index
+
+    monkeypatch.setattr(search_index, "PART_RETRY_DELAYS", [0.01])
+    source, sink, progress = RangedSource(), SettledSink(), Progress()
+    service = SearchIndexService(source=source, sink=sink, shards=1)
+    attempts = 0
+
+    async def index(command: IndexPapers) -> IndexPapersResult:
+        nonlocal attempts
+        attempts += 1
+        admission.status("close")
+        raise TableUnavailable("temporary failure")
+
+    try:
+        with pytest.raises(admission.AdmissionError, match="execution refused"):
+            await run_retry_parts(service, source, sink, progress, index)
+        assert attempts == 1
+        assert [r.kind for r in progress.rows] == ["started"]
+        assert sink.target is None
+        assert admission.status().closed and admission.status().active_slots == 0
+    finally:
         admission.status("open")
